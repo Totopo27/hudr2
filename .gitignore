@@ -1,0 +1,40 @@
+# Compilación y artefactos de Rust
+/target/
+**/*.rs.bk
+*.exe
+*.dll
+*.so
+*.dylib
+*.pdb
+
+# Bases de datos locales y volcados temporales
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Credenciales, tokens y variables de entorno locales
+.env
+.env.*
+!.env.example
+auths/
+**/auths/*.json
+*.token
+*.key
+*.pem
+
+# Telemetría, logs y cachés locales
+*.log
+logs/
+.engram/
+.opencode/
+.atl/
+.local/
+
+# Archivos de depuración y sistema operativo
+.DS_Store
+Thumbs.db
+ehthumbs.db
+[Dd]esktop.ini
