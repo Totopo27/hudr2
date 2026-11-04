@@ -3,6 +3,7 @@ use std::process::Command;
 
 /// Resuelve el directorio de credenciales / autenticaciones de Cliproxy
 pub fn resolve_auths_dir() -> PathBuf {
+    // 1. Variable de entorno explícita (mayor prioridad para cualquier usuario o CI)
     if let Ok(dir) = std::env::var("CLIPROXY_AUTHS_DIR") {
         let p = PathBuf::from(dir.trim());
         if p.exists() {
@@ -10,6 +11,34 @@ pub fn resolve_auths_dir() -> PathBuf {
         }
     }
 
+    // 2. Extraer 'authsDir' o 'cliproxy_auths_dir' desde opencode.json si está configurado
+    let candidates_cfg = opencode_config_candidates(".");
+    for cfg_path in candidates_cfg {
+        if cfg_path.exists()
+            && let Ok(content) = std::fs::read_to_string(&cfg_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            if let Some(auth_dir) = val
+                .get("providers")
+                .and_then(|p| p.get("cliproxy"))
+                .and_then(|c| c.get("authsDir").or_else(|| c.get("auths_dir")))
+                .and_then(|s| s.as_str())
+            {
+                let p = PathBuf::from(auth_dir.trim());
+                if p.exists() {
+                    return p;
+                }
+            }
+            if let Some(auth_dir) = val.get("cliproxy_auths_dir").and_then(|s| s.as_str()) {
+                let p = PathBuf::from(auth_dir.trim());
+                if p.exists() {
+                    return p;
+                }
+            }
+        }
+    }
+
+    // 3. Rutas estándar en el HOME o CONFIG del usuario
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut candidates = vec![
         home.join(".cliproxy").join("auths"),
@@ -22,12 +51,13 @@ pub fn resolve_auths_dir() -> PathBuf {
 
     #[cfg(target_os = "windows")]
     {
-        // En Windows, resolver dinámicamente según las unidades de disco presentes o variables de entorno
+        // En Windows, escanear unidades de disco para instalaciones portables
         if let Ok(system_drive) = std::env::var("SystemDrive") {
             candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/auths")));
         }
         for drive in ['C', 'D', 'E', 'F'] {
             candidates.push(PathBuf::from(format!("{drive}:/cliproxyapi/auths")));
+            candidates.push(PathBuf::from(format!("{drive}:/.cliproxy/auths")));
         }
     }
 
