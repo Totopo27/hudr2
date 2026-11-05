@@ -28,16 +28,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 1. Carga inicial rápida de datos locales
     app::refresh_all(&app_state).await;
 
-    // 2. Disparar de inmediato la consulta de cuotas de red en segundo plano (silenciosa al arrancar)
-    let initial_fetch_state = app_state.clone();
-    tokio::spawn(async move {
-        app::force_refresh(&initial_fetch_state, false).await;
-    });
+    // 2. Disparar de inmediato la consulta de cuotas de red en segundo plano (snapshot inicial completo)
+    if hudr2::quotas::QuotaCollector::is_available() {
+        let initial_fetch_state = app_state.clone();
+        tokio::spawn(async move {
+            app::force_refresh(&initial_fetch_state, false, true).await;
+        });
+    }
 
     // 3. Background worker periódico adaptativo:
     // - Si el agente está trabajando (working): sleep 1500ms
     // - Si el agente está ocioso (!= working): sleep 4000ms
-    // Refresca cuotas de red cada ~60 segundos automáticamente (silencioso)
+    // Refresca cuotas de red cada 5 minutos (300s) automáticamente para cuentas activas
     let bg_state = app_state.clone();
     tokio::spawn(async move {
         let mut last_quota_refresh = tokio::time::Instant::now();
@@ -54,11 +56,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             app::refresh_all(&bg_state).await;
 
-            if last_quota_refresh.elapsed() >= Duration::from_secs(60) {
+            if hudr2::quotas::QuotaCollector::is_available()
+                && last_quota_refresh.elapsed() >= Duration::from_secs(300)
+            {
                 last_quota_refresh = tokio::time::Instant::now();
                 let s_clone = bg_state.clone();
                 tokio::spawn(async move {
-                    app::force_refresh(&s_clone, false).await;
+                    app::force_refresh(&s_clone, false, false).await;
                 });
             }
         }
@@ -206,7 +210,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 KeyCode::Char('r') => {
                                     let state_ref = app_state.clone();
                                     tokio::spawn(async move {
-                                        app::force_refresh(&state_ref, true).await;
+                                        app::force_refresh(&state_ref, true, true).await;
                                     });
                                 }
                                 KeyCode::Char('o') => {

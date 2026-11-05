@@ -468,80 +468,88 @@ pub fn render_screen(
     };
     lines.push(draw_top(&int_title, collapsed[3], width));
     if !collapsed[3] {
-        for acc in &snap.accounts {
-            let is_local = snap
-                .opencode
-                .local_prefix
-                .as_deref()
-                .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                .unwrap_or(false);
-            let is_any_active = snap
-                .opencode
-                .all_active_prefixes
-                .contains(&acc.prefix.to_lowercase());
+        if snap.accounts.is_empty() {
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
+                &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                width,
+            ));
+        } else {
+            for acc in &snap.accounts {
+                let is_local = snap
+                    .opencode
+                    .local_prefix
+                    .as_deref()
+                    .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                    .unwrap_or(false);
+                let is_any_active = snap
+                    .opencode
+                    .all_active_prefixes
+                    .contains(&acc.prefix.to_lowercase());
 
-            let (status_glyph, pct_color, right_text) = if acc.has_error {
-                (
-                    format!("{AMBER}?{RESET}"),
-                    AMBER,
-                    format!("{AMBER}[{}]{RESET}", acc.error_msg),
-                )
-            } else if acc.is_critical {
-                (
-                    format!("{BOLD}{CORAL}!{RESET}"),
-                    CORAL,
-                    format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}"),
-                )
-            } else if acc.is_warning {
-                (
-                    format!("{BOLD}{AMBER}!{RESET}"),
-                    AMBER,
-                    format!("{AMBER}[AVISO 70%]{RESET}"),
-                )
-            } else if is_local {
-                (
-                    format!("{ACCENT_PINK}>{RESET}"),
-                    MINT,
-                    format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
-                )
-            } else if is_any_active {
-                (
-                    format!("{ACCENT_PRIMARY}\u{25cf}{RESET}"),
-                    MINT,
-                    format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
-                )
-            } else {
-                (
-                    format!("{MINT}\u{25cf}{RESET}"),
-                    MINT,
-                    format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
-                )
-            };
+                let (status_glyph, pct_color, right_text) = if acc.has_error {
+                    (
+                        format!("{AMBER}?{RESET}"),
+                        AMBER,
+                        format!("{AMBER}[{}]{RESET}", acc.error_msg),
+                    )
+                } else if acc.is_critical {
+                    (
+                        format!("{BOLD}{CORAL}!{RESET}"),
+                        CORAL,
+                        format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}"),
+                    )
+                } else if acc.is_warning {
+                    (
+                        format!("{BOLD}{AMBER}!{RESET}"),
+                        AMBER,
+                        format!("{AMBER}[AVISO 70%]{RESET}"),
+                    )
+                } else if is_local {
+                    (
+                        format!("{ACCENT_PINK}>{RESET}"),
+                        MINT,
+                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                    )
+                } else if is_any_active {
+                    (
+                        format!("{ACCENT_PRIMARY}\u{25cf}{RESET}"),
+                        MINT,
+                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                    )
+                } else {
+                    (
+                        format!("{MINT}\u{25cf}{RESET}"),
+                        MINT,
+                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                    )
+                };
 
-            let pfx_clean = format!("{:<7}", acc.prefix);
-            let pfx_disp = if is_local {
-                format!("{BOLD}{TEXT_PRIMARY}{pfx_clean}{RESET}")
-            } else if is_any_active {
-                format!("{TEXT_PRIMARY}{pfx_clean}{RESET}")
-            } else {
-                format!("{TEXT_MUTED}{pfx_clean}{RESET}")
-            };
-            let bar = render_gauge_inline(acc.rem_5h, 3, pct_color);
-            let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", acc.rem_5h);
-            let wk_color = if acc.is_critical {
-                CORAL
-            } else if acc.is_warning {
-                AMBER
-            } else {
-                MINT
-            };
-            let pct_wk = format!(
-                "{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
-                acc.rem_wk
-            );
+                let pfx_clean = format!("{:<7}", acc.prefix);
+                let pfx_disp = if is_local {
+                    format!("{BOLD}{TEXT_PRIMARY}{pfx_clean}{RESET}")
+                } else if is_any_active {
+                    format!("{TEXT_PRIMARY}{pfx_clean}{RESET}")
+                } else {
+                    format!("{TEXT_MUTED}{pfx_clean}{RESET}")
+                };
+                let bar = render_gauge_inline(acc.rem_5h, 3, pct_color);
+                let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", acc.rem_5h);
+                let wk_color = if acc.is_critical {
+                    CORAL
+                } else if acc.is_warning {
+                    AMBER
+                } else {
+                    MINT
+                };
+                let pct_wk = format!(
+                    "{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                    acc.rem_wk
+                );
 
-            let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h} {pct_wk}");
-            lines.push(draw_row(&left, &right_text, width));
+                let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h} {pct_wk}");
+                lines.push(draw_row(&left, &right_text, width));
+            }
         }
         lines.push(draw_divider(width));
         let sync_line_idx = lines.len();
@@ -628,29 +636,35 @@ pub fn render_screen(
     );
 
     lines.push(draw_top(&pool_title, collapsed[4], width));
-    if !collapsed[4]
-        && let Some(acc) = target_account
-    {
-        for p in &acc.pools {
-            let pool_color = if p.percent <= 15 {
-                CORAL
-            } else if p.percent <= 50 {
-                AMBER
-            } else {
-                MINT
-            };
+    if !collapsed[4] {
+        if snap.accounts.is_empty() {
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
+                &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                width,
+            ));
+        } else if let Some(acc) = target_account {
+            for p in &acc.pools {
+                let pool_color = if p.percent <= 15 {
+                    CORAL
+                } else if p.percent <= 50 {
+                    AMBER
+                } else {
+                    MINT
+                };
 
-            let bar = render_gauge_inline(p.percent, 6, pool_color);
-            let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
-            let p_label = format!("{:<9}", p.label);
-            let left = format!(
-                "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
-            );
-            let right = format!(
-                "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
-                p.pace, p.reset
-            );
-            lines.push(draw_row(&left, &right, width));
+                let bar = render_gauge_inline(p.percent, 6, pool_color);
+                let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
+                let p_label = format!("{:<9}", p.label);
+                let left = format!(
+                    "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
+                );
+                let right = format!(
+                    "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                    p.pace, p.reset
+                );
+                lines.push(draw_row(&left, &right, width));
+            }
         }
     }
     lines.push(draw_bottom(width));

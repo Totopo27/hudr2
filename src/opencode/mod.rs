@@ -14,7 +14,8 @@ pub use model_info::{
     clean_model_name, clean_opencode_terminal_title, resolve_model_context_limit,
 };
 pub use prefix::{
-    extract_prefix, get_sdd_subagent_account_prefixes, resolve_pool_account_prefixes,
+    extract_prefix, get_sdd_subagent_account_prefixes, normalize_model_str,
+    resolve_pool_account_prefixes,
 };
 pub use session::{DbSessionRecord, resolve_session_for_pane};
 

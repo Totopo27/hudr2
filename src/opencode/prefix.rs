@@ -14,15 +14,35 @@ static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
+pub const KNOWN_PROXY_PREFIXES: &[&str] = &["cliproxy/", "opencode/"];
+
+/// Limpia y normaliza un identificador de modelo eliminando prefijos de vendor o proxy conocidos
+/// como `cliproxy/`, `opencode/`, etc.
+pub fn normalize_model_str(model_str: &str) -> String {
+    let mut clean = model_str.to_string();
+    for pfx in KNOWN_PROXY_PREFIXES {
+        loop {
+            let lower = clean.to_lowercase();
+            if let Some(idx) = lower.find(pfx) {
+                // Mapear el índice de bytes en minúsculas al índice de caracteres original
+                let char_idx = lower[..idx].chars().count();
+                let byte_start = clean.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(idx);
+                let byte_end = clean.char_indices().nth(char_idx + pfx.chars().count()).map(|(i, _)| i).unwrap_or(byte_start + pfx.len());
+                clean.drain(byte_start..byte_end);
+            } else {
+                break;
+            }
+        }
+    }
+    clean
+}
+
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
     if model_str.is_empty() {
         return Vec::new();
     }
     let model_id = clean_model_name(model_str);
-    let clean = model_id
-        .to_lowercase()
-        .replace("cliproxy/", "")
-        .replace("opencode/", "");
+    let clean = normalize_model_str(&model_id).to_lowercase();
 
     if let Some(caps) = RE_POOL.captures(&clean)
         && let Some(num_match) = caps.get(1)
@@ -84,10 +104,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
 
     // 2. Del modelo (ej: "nina/gemini-3.8-flash-high", "cliproxy/nina/...")
     if !model.is_empty() {
-        let clean_model = clean_model_name(model)
-            .to_lowercase()
-            .replace("cliproxy/", "")
-            .replace("opencode/", "");
+        let clean_model = normalize_model_str(&clean_model_name(model)).to_lowercase();
 
         let pool_prefixes = resolve_pool_account_prefixes(&clean_model, sorted_prefixes);
         if let Some(first_pool) = pool_prefixes.into_iter().next() {
@@ -128,7 +145,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
 /// Extrae el prefijo de cuenta (`<prefijo>/modelo`) de un identificador de modelo
 /// configurado, ignorando los proveedores intermedios `cliproxy/` y `opencode/`.
 fn model_account_prefix(model_str: &str) -> Option<String> {
-    let clean = model_str.replace("cliproxy/", "").replace("opencode/", "");
+    let clean = normalize_model_str(model_str);
     clean
         .find('/')
         .map(|slash_idx| clean[..slash_idx].to_lowercase())

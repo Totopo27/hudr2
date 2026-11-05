@@ -2,6 +2,7 @@ use crate::cleanup::release_inactive_sessions;
 use crate::engram::read_engram_telemetry;
 use crate::git::read_git_telemetry;
 use crate::herdr::HerdrClient;
+use crate::models::AccountQuota;
 use crate::opencode::read_opencode_session;
 use crate::quotas::QuotaCollector;
 use crate::state::AppState;
@@ -88,10 +89,19 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     }
 }
 
-pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool) {
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static IS_FETCHING_QUOTAS: AtomicBool = AtomicBool::new(false);
+
+pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool, force_all: bool) {
     if interactive {
         let mut state = app_state.write().await;
-        state.set_flash_notice(Some("+ Refrescando cuotas y contexto...".to_string()), 4000);
+        let notice = if QuotaCollector::is_available() {
+            "+ Refrescando cuotas y contexto..."
+        } else {
+            "+ Refrescando contexto..."
+        };
+        state.set_flash_notice(Some(notice.to_string()), 4000);
     }
 
     crate::git::clear_git_cache();
@@ -100,31 +110,93 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool)
 
     refresh_all(app_state).await;
 
-    let accounts = {
+    // Si no hay proveedor de cuotas disponible, evitar llamadas de red innecesarias
+    if !QuotaCollector::is_available() {
+        if interactive {
+            let mut state = app_state.write().await;
+            state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+        }
+        return;
+    }
+
+    // Evitar peticiones concurrentes superpuestas si ya hay un refresco en vuelo
+    if IS_FETCHING_QUOTAS
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+
+    let (accounts, active_prefixes) = {
         let state = app_state.read().await;
-        state.snapshot.accounts.clone()
+        (
+            state.snapshot.accounts.clone(),
+            state.snapshot.opencode.all_active_prefixes.clone(),
+        )
     };
 
-    // Actualizar cuotas concurrentemente
-    let mut handles = Vec::new();
-    for mut acc in accounts {
-        handles.push(tokio::spawn(async move {
-            QuotaCollector::fetch_quota_for_account(&mut acc).await;
-            acc
-        }));
+    if accounts.is_empty() {
+        IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
+        if interactive {
+            let mut state = app_state.write().await;
+            state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+        }
+        return;
     }
 
-    let mut updated_accounts = Vec::new();
-    for h in handles {
-        if let Ok(acc) = h.await {
-            updated_accounts.push(acc);
+    // Estrategia de Refresco Inteligente (Snapshot Inicial / Manual vs Polling Periódico):
+    // - Si force_all es true (arranque inicial o tecla 'r'): se consultan todas las cuentas para pintar la foto completa.
+    // - Si force_all es false (intervalo periódico de 5m): SOLO se consultan las cuentas activas en uso en alguna sesión
+    //   o aquellas que carezcan de pools aún cargados.
+    let target_accounts: Vec<AccountQuota> = if force_all {
+        accounts
+    } else {
+        let filtered: Vec<AccountQuota> = accounts
+            .into_iter()
+            .filter(|a| {
+                active_prefixes.contains(&a.prefix.to_lowercase()) || a.pools.is_empty()
+            })
+            .collect();
+
+        if filtered.is_empty() {
+            Vec::new()
+        } else {
+            filtered
         }
+    };
+
+    if target_accounts.is_empty() {
+        IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
+        return;
     }
+
+    // Staggering de 3 segundos entre consultas de cuentas para proteger contra rate limits y detección de ráfagas
+    let mut updated_accounts = Vec::new();
+    for (idx, mut acc) in target_accounts.into_iter().enumerate() {
+        if idx > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+        QuotaCollector::fetch_quota_for_account(&mut acc).await;
+        updated_accounts.push(acc);
+    }
+
+    IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
 
     if !updated_accounts.is_empty() {
-        updated_accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         let mut state = app_state.write().await;
-        state.snapshot.accounts = updated_accounts;
+        for updated in updated_accounts {
+            if let Some(existing) = state
+                .snapshot
+                .accounts
+                .iter_mut()
+                .find(|a| a.prefix == updated.prefix || a.auth_file == updated.auth_file)
+            {
+                *existing = updated;
+            } else {
+                state.snapshot.accounts.push(updated);
+            }
+        }
+        state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         if interactive {
             state.set_flash_notice(Some("+ Cuotas y contexto actualizados".to_string()), 4000);
         } else {
@@ -210,7 +282,7 @@ pub async fn sync_integrations_action(app_state: &Arc<RwLock<AppState>>) {
         Err(err) => format!("[!] Sync: {err}"),
     };
 
-    force_refresh(app_state, false).await;
+    force_refresh(app_state, false, true).await;
 
     let mut state = app_state.write().await;
     state.set_flash_notice(Some(notice), 4000);

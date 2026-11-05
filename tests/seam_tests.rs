@@ -797,7 +797,7 @@ mod tests {
         let app_state = Arc::new(RwLock::new(AppState::new()));
 
         // Ejecutar force_refresh interactivo (simulando tecla 'r')
-        force_refresh(&app_state, true).await;
+        force_refresh(&app_state, true, true).await;
 
         let state = app_state.read().await;
         // El flash notice debe reflejar que actualizó cuotas y contexto
@@ -1400,5 +1400,80 @@ mod tests {
                 seen_file = true;
             }
         }
+    }
+
+    #[test]
+    fn test_normalize_model_str_strips_proxy_prefixes() {
+        use hudr2::opencode::normalize_model_str;
+
+        assert_eq!(
+            normalize_model_str("cliproxy/agy3_1/gemini-3.8-flash-high"),
+            "agy3_1/gemini-3.8-flash-high"
+        );
+        assert_eq!(
+            normalize_model_str("opencode/pool-02-claude"),
+            "pool-02-claude"
+        );
+        assert_eq!(
+            normalize_model_str("cliproxy/opencode/gemini-2.5-pro"),
+            "gemini-2.5-pro"
+        );
+        assert_eq!(
+            normalize_model_str("direct-model-name"),
+            "direct-model-name"
+        );
+    }
+
+    #[test]
+    fn test_quota_manager_and_collector_availability() {
+        use hudr2::quotas::{QuotaCollector, QuotaManager};
+
+        // QuotaCollector es un alias de QuotaManager
+        assert_eq!(QuotaCollector::is_available(), QuotaManager::is_available());
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
+        }
+        // En una carpeta vacía, is_available() debe ser false
+        assert!(!QuotaManager::is_available());
+
+        // Con credencial JSON válida, is_available() debe ser true
+        let auth_file = tmp.path().join("account.json");
+        std::fs::write(
+            &auth_file,
+            r#"{"access_token": "token123", "email": "test@example.com"}"#,
+        )
+        .unwrap();
+        assert!(QuotaManager::is_available());
+
+        unsafe {
+            std::env::remove_var("CLIPROXY_AUTHS_DIR");
+        }
+    }
+
+    #[test]
+    fn test_ui_empty_accounts_renders_inactive_rows_gracefully() {
+        let mut state = AppState::new();
+        state.snapshot.accounts.clear();
+        state.collapsed_cards[3] = false; // Integraciones expandida
+        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let screen_text = render_out.lines.join("\n");
+
+        // Debe contener la fila inactiva en ambas tarjetas
+        let inactive_matches: Vec<_> = render_out
+            .lines
+            .iter()
+            .filter(|l| l.contains("Sin proveedor de cuotas activo") && l.contains("[inactivo]"))
+            .collect();
+        assert_eq!(
+            inactive_matches.len(),
+            2,
+            "Tanto Integraciones como Cuota de Modelos deben mostrar la fila inactiva cuando accounts está vacío. Pantalla:\n{}",
+            screen_text
+        );
     }
 }
