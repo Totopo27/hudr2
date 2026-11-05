@@ -315,18 +315,20 @@ pub fn release_inactive_sessions(
         }
 
         let is_opencode_pane = p.agent.as_deref() == Some("opencode")
+            || p.agent_session_id.is_some()
             || p.terminal_title
                 .as_deref()
-                .map(|t| re_oc.is_match(t))
+                .map(|t| {
+                    let lower = t.to_lowercase();
+                    lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode" || re_oc.is_match(t)
+                })
                 .unwrap_or(false);
 
         if let Some(ref session_rec) = s {
-            if session_rec.time_archived.is_none() {
-                let _ = conn.execute(
-                    "UPDATE session_v2 SET time_archived = ? WHERE id = ?",
-                    rusqlite::params![now, session_rec.id],
-                );
-            }
+            let _ = conn.execute(
+                "UPDATE session_v2 SET time_archived = ? WHERE id = ?",
+                rusqlite::params![now, session_rec.id],
+            );
             closed_count += 1;
 
             if let Some(pfx) = extract_prefix(
@@ -372,7 +374,7 @@ pub fn release_inactive_sessions(
 
     // Archivar también cualquier sesión huérfana en DB que haya quedado en desuso
     if let Ok(mut orphan_stmt) = conn.prepare(
-        "SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL",
+        "SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)",
     ) {
         let rows = orphan_stmt.query_map([], |row| {
             Ok((

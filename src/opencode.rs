@@ -451,6 +451,25 @@ pub fn read_opencode_session(
 
     // 1. Recolectar TODAS las cuentas activas desde los panes vivos de Herdr
     for p in herdr_panes {
+        // Solo considerar panes que realmente estén ejecutando OpenCode o pertenezcan al espacio actual
+        let is_agent_pane = p.agent_session_id.is_some()
+            || p.agent.as_deref() == Some("opencode")
+            || p.agent_status.as_deref() == Some("working")
+            || p.terminal_title.as_deref().map(|t| {
+                let lower = t.to_lowercase();
+                lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode"
+            }).unwrap_or(false)
+            || (p.cwd.as_deref().map(|c| {
+                c.replace('\\', "/")
+                    .to_lowercase()
+                    .trim_end_matches('/')
+                    .to_string()
+            }) == Some(norm_target.clone()));
+
+        if !is_agent_pane {
+            continue;
+        }
+
         if let Some(s) = resolve_session_for_pane(&conn, p) {
             let is_alive = s.time_archived.is_none()
                 || (s.time_updated.unwrap_or(0) > s.time_archived.unwrap_or(0))
