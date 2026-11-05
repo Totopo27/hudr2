@@ -138,13 +138,10 @@ impl QuotaCollector {
 
         let project_id = val.get("project_id").and_then(|p| p.as_str()).unwrap_or("");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(6))
-            .build();
+        let client = &*crate::config::HTTP_CLIENT;
 
-        if let Ok(client) = client {
-            let body = serde_json::json!({ "project": project_id });
-            if let Ok(res) = client
+        let body = serde_json::json!({ "project": project_id });
+        if let Ok(res) = client
                 .post(QUOTA_URL)
                 .header("Authorization", format!("Bearer {}", token))
                 .header("User-Agent", USER_AGENT)
@@ -252,7 +249,6 @@ impl QuotaCollector {
                     ];
                 }
             }
-        }
     }
 }
 
@@ -278,11 +274,12 @@ pub fn format_relative_reset(iso_time: &str) -> String {
         }
         let days = hours / 24;
         let rem_hours = hours % 24;
-        return if rem_hours > 0 {
+        if rem_hours > 0 {
             format!("{}d {}h", days, rem_hours)
         } else {
             format!("{}d", days)
-        };
+        }
+    } else {
+        "4h 30m".to_string()
     }
-    "4h 30m".to_string()
 }

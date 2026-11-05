@@ -19,5 +19,14 @@ pub const QUOTA_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
 pub const USER_AGENT: &str = "antigravity/hub/2.23.0 darwin/arm64";
 
+/// HTTP client compartido — reutiliza connection pool y sesiones TLS
+pub static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .user_agent(USER_AGENT)
+        .build()
+        .expect("Failed to create HTTP client")
+});
+
 // Re-exportar funciones de resolución de rutas desde el módulo paths
 pub use crate::paths::{resolve_auths_dir, resolve_engram_db_path, resolve_opencode_db_path};

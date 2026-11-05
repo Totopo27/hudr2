@@ -1,6 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Normaliza un path para comparaciones case-insensitive y cross-platform
+pub fn normalize_path(p: &str) -> String {
+    p.replace('\\', "/")
+        .to_lowercase()
+        .trim_end_matches('/')
+        .to_string()
+}
+
 /// Resuelve el directorio de credenciales / autenticaciones de Cliproxy
 pub fn resolve_auths_dir() -> PathBuf {
     // 1. Variable de entorno explícita (mayor prioridad para cualquier usuario o CI)

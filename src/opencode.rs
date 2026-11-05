@@ -1,7 +1,20 @@
 use crate::config::resolve_opencode_db_path;
 use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
+use regex::Regex;
 use rusqlite::{Connection, OpenFlags};
 use std::collections::HashSet;
+use std::sync::LazyLock;
+
+static RE_OC_TITLE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(?:OC|opencode)\s*\|\s*").unwrap());
+static RE_POOL: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[/\\'])pool-0?([0-9]+)").unwrap());
+static RE_AGENT_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)sdd-[a-z0-9]+-([a-z0-9_-]+)").unwrap());
+static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)(?:^|[/"'\\\\])([a-z0-9_-]+)/(?:gemini|claude|antigravity|[a-z0-9.-]+)"#)
+        .unwrap()
+});
 
 #[derive(Debug, Clone)]
 pub struct DbSessionRecord {
@@ -18,8 +31,7 @@ pub struct DbSessionRecord {
 }
 
 pub fn clean_opencode_terminal_title(title: &str) -> String {
-    let re = regex::Regex::new(r"(?i)^(?:OC|opencode)\s*\|\s*").unwrap();
-    re.replace(title, "").trim().to_string()
+    RE_OC_TITLE.replace(title, "").trim().to_string()
 }
 
 pub fn clean_model_name(model_raw: &str) -> String {
@@ -182,8 +194,7 @@ pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String])
         .replace("cliproxy/", "")
         .replace("opencode/", "");
 
-    let re = regex::Regex::new(r"(?i)(?:^|[/\\'\\])pool-0?([0-9]+)").unwrap();
-    if let Some(caps) = re.captures(&clean)
+    if let Some(caps) = RE_POOL.captures(&clean)
         && let Some(num_match) = caps.get(1)
         && let Ok(pool_num) = num_match.as_str().parse::<u32>()
     {
@@ -214,8 +225,7 @@ pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String])
 pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> Option<String> {
     // 1. Del agente (ej: sdd-orchestrator-xen1, sdd-apply-gianni, sdd-orchestrator-nina)
     if !agent.is_empty() {
-        let re_agent = regex::Regex::new(r"(?i)sdd-[a-z0-9]+-([a-z0-9_-]+)").unwrap();
-        if let Some(caps) = re_agent.captures(agent)
+        if let Some(caps) = RE_AGENT_PREFIX.captures(agent)
             && let Some(c_match) = caps.get(1)
         {
             let candidate = c_match.as_str().to_lowercase();
@@ -254,11 +264,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
             return Some(first_pool);
         }
 
-        let re_model = regex::Regex::new(
-            r#"(?i)(?:^|[/"'\\\\])([a-z0-9_-]+)/(?:gemini|claude|antigravity|[a-z0-9.-]+)"#,
-        )
-        .unwrap();
-        if let Some(caps) = re_model.captures(&clean_model)
+        if let Some(caps) = RE_MODEL_PREFIX.captures(&clean_model)
             && let Some(c_match) = caps.get(1)
         {
             let candidate = c_match.as_str().to_lowercase();
@@ -429,11 +435,7 @@ pub fn read_opencode_session(
 
     let _ = conn.busy_timeout(std::time::Duration::from_millis(1500));
 
-    let norm_target = target_dir
-        .replace('\\', "/")
-        .to_lowercase()
-        .trim_end_matches('/')
-        .to_string();
+    let norm_target = crate::paths::normalize_path(target_dir);
 
     let mut known_prefixes: Vec<String> = accounts_list
         .iter()
@@ -459,12 +461,7 @@ pub fn read_opencode_session(
                 let lower = t.to_lowercase();
                 lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode"
             }).unwrap_or(false)
-            || (p.cwd.as_deref().map(|c| {
-                c.replace('\\', "/")
-                    .to_lowercase()
-                    .trim_end_matches('/')
-                    .to_string()
-            }) == Some(norm_target.clone()));
+            || (p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target));
 
         if !is_agent_pane {
             continue;
@@ -498,12 +495,7 @@ pub fn read_opencode_session(
     let is_target_pane = |p: &HerdrPane| -> bool {
         p.agent_session_id.is_some()
             || p.agent.as_deref() == Some("opencode")
-            || p.cwd.as_deref().map(|c| {
-                c.replace('\\', "/")
-                    .to_lowercase()
-                    .trim_end_matches('/')
-                    .to_string()
-            }) == Some(norm_target.clone())
+            || p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
     };
 
     let sibling_pane = my_tab_id.and_then(|tid| {
@@ -518,12 +510,7 @@ pub fn read_opencode_session(
         .iter()
         .find(|p| p.agent_status.as_deref() == Some("working") && is_target_pane(p));
     let current_cwd_pane = herdr_panes.iter().find(|p| {
-        p.cwd.as_deref().map(|c| {
-            c.replace('\\', "/")
-                .to_lowercase()
-                .trim_end_matches('/')
-                .to_string()
-        }) == Some(norm_target.clone())
+        p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
             && is_target_pane(p)
     });
 
@@ -586,7 +573,7 @@ pub fn read_opencode_session(
                 // 1) Coincidencia por directorio
                 for s in &sessions {
                     if let Some(ref d) = s.directory {
-                        let d_clean = d.replace('\\', "/").to_lowercase().trim_end_matches('/').to_string();
+                        let d_clean = crate::paths::normalize_path(d);
                         if d_clean == norm_target || norm_target.ends_with(&format!("/{d_clean}")) || d_clean.ends_with(&format!("/{norm_target}")) {
                             target_session_id = Some(s.id.clone());
                             if let Some(ref a) = s.agent { session.agent = a.clone(); }

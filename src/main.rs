@@ -1,17 +1,4 @@
-pub mod app;
-pub mod cleanup;
-pub mod config;
-pub mod engram;
-pub mod git;
-pub mod herdr;
-pub mod models;
-pub mod opencode;
-pub mod paths;
-pub mod quotas;
-pub mod state;
-pub mod sync;
-pub mod tree;
-pub mod ui;
+use hudr2::{app, state, ui};
 
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
@@ -73,36 +60,49 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let actual_rendered_offset;
 
         // 1. Renderizado y expiración de avisos
+        // El render se hace bajo un lock de LECTURA (no bloquea a otros lectores) y la
+        // escritura se limita a un lock breve para bounds/scroll. La E/S de terminal
+        // (print + flush) ocurre fuera de cualquier lock para no frenar a los workers.
         {
-            let mut state = app_state.write().await;
-            let _ = state.check_flash_notice_expiry();
-
             let (cols, rows) = size().unwrap_or((48, 36));
             let width = (cols as usize).clamp(36, 50);
-
-            let flash = state.flash_notice.clone();
-            let render_out = ui::render_screen(
-                &state.snapshot,
-                &state.collapsed_cards,
-                flash.as_deref(),
-                width,
-            );
-            state.card_bounds = render_out.bounds;
-
             let max_visible = (rows as usize).max(10);
-            let max_scroll = render_out.lines.len().saturating_sub(max_visible);
-            if state.scroll_offset > max_scroll {
-                state.scroll_offset = max_scroll;
+
+            // 1a. Expirar aviso flash (lock de escritura breve, solo si hay aviso activo)
+            if app_state.read().await.flash_notice.is_some() {
+                let _ = app_state.write().await.check_flash_notice_expiry();
             }
-            actual_rendered_offset = state.scroll_offset;
 
-            let visible = &render_out.lines[actual_rendered_offset
-                ..render_out
-                    .lines
-                    .len()
-                    .min(actual_rendered_offset + max_visible)];
+            // 1b. Renderizar bajo lock de lectura
+            let render_out = {
+                let state = app_state.read().await;
+                ui::render_screen(
+                    &state.snapshot,
+                    &state.collapsed_cards,
+                    state.flash_notice.as_deref(),
+                    width,
+                )
+            };
+            let total_lines = render_out.lines.len();
 
-            let mut buffer = String::from("\x1b[H");
+            // 1c. Lock de escritura breve: actualizar bounds y acotar scroll
+            {
+                let mut state = app_state.write().await;
+                state.card_bounds = render_out.bounds;
+                let max_scroll = total_lines.saturating_sub(max_visible);
+                if state.scroll_offset > max_scroll {
+                    state.scroll_offset = max_scroll;
+                }
+                actual_rendered_offset = state.scroll_offset;
+            }
+
+            // 1d. Construir buffer e imprimir sin ningún lock tomado
+            let visible = &render_out.lines
+                [actual_rendered_offset..total_lines.min(actual_rendered_offset + max_visible)];
+
+            let mut buffer =
+                String::with_capacity(visible.iter().map(|l| l.len() + 4).sum::<usize>() + 8);
+            buffer.push_str("\x1b[H");
             for (idx, line) in visible.iter().enumerate() {
                 buffer.push_str(line);
                 buffer.push_str("\x1b[K");
@@ -112,8 +112,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             buffer.push_str("\x1b[J");
 
-            print!("{}", buffer);
-            let _ = stdout().flush();
+            let mut out = stdout().lock();
+            let _ = out.write_all(buffer.as_bytes());
+            let _ = out.flush();
         }
 
         // 2. Procesar Eventos de Teclado y Mouse

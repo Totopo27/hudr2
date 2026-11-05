@@ -2,10 +2,30 @@ use crate::config::resolve_opencode_db_path;
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::{extract_prefix, resolve_pool_account_prefixes, resolve_session_for_pane};
+use regex::Regex;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
+
+static RE_OC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:OC|opencode)\s*\|").unwrap());
+
+/// Construye un `Command` para invocar el CLI de OpenCode de forma multiplataforma.
+/// En Windows se lanza vía `cmd /c` porque `opencode` suele instalarse como shim
+/// `.cmd` (npm), que `CreateProcess` no resuelve directamente.
+fn opencode_command() -> Command {
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/c", "opencode"]);
+        cmd
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("opencode")
+    }
+}
 
 pub struct ReleaseResult {
     pub closed_count: usize,
@@ -137,10 +157,8 @@ pub fn migrate_critical_sessions(
                     }
 
                     // Intentar notificar a la API de OpenCode CLI
-                    let _ = Command::new("cmd")
+                    let _ = opencode_command()
                         .args([
-                            "/c",
-                            "opencode",
                             "api",
                             "post",
                             &format!("/api/session/{ses_id}/agent"),
@@ -149,10 +167,8 @@ pub fn migrate_critical_sessions(
                         ])
                         .output();
 
-                    let _ = Command::new("cmd")
+                    let _ = opencode_command()
                         .args([
-                            "/c",
-                            "opencode",
                             "api",
                             "post",
                             &format!("/api/session/{ses_id}/model"),
@@ -284,8 +300,6 @@ pub fn release_inactive_sessions(
     let mut closed_panes: HashSet<String> = HashSet::new();
     let mut closed_workspaces: HashSet<String> = HashSet::new();
 
-    let re_oc = regex::Regex::new(r"(?i)^(?:OC|opencode)\s*\|").unwrap();
-
     for p in &panes {
         let s = resolve_session_for_pane(&conn, p);
         let ses_id = s
@@ -320,7 +334,7 @@ pub fn release_inactive_sessions(
                 .as_deref()
                 .map(|t| {
                     let lower = t.to_lowercase();
-                    lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode" || re_oc.is_match(t)
+                    lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode" || RE_OC.is_match(t)
                 })
                 .unwrap_or(false);
 

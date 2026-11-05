@@ -116,10 +116,7 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
         format!("{}/models", base_url.trim_end_matches('/'))
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = &*crate::config::HTTP_CLIENT;
 
     let mut req = client.get(&models_endpoint);
     if !api_key.is_empty() {

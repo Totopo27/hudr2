@@ -160,7 +160,7 @@ pub fn open_folder_in_explorer(target_path: &str) {
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = Command::new("open")
+        let _ = std::process::Command::new("open")
             .arg(&resolved_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -169,7 +169,7 @@ pub fn open_folder_in_explorer(target_path: &str) {
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
-        let _ = Command::new("xdg-open")
+        let _ = std::process::Command::new("xdg-open")
             .arg(&resolved_path)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

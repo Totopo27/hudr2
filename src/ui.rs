@@ -7,10 +7,10 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 pub struct CardBounds {
-    pub id: String,
+    pub id: &'static str,
     pub start_line: usize,
     pub end_line: usize,
-    pub action_type: Option<String>,
+    pub action_type: Option<&'static str>,
     pub action_path: Option<String>,
 }
 
@@ -19,24 +19,67 @@ pub struct RenderOutput {
     pub bounds: Vec<CardBounds>,
 }
 
-pub fn strip_ansi(s: &str) -> String {
-    let mut out = String::new();
-    let mut in_esc = false;
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_esc = true;
-        } else if in_esc {
-            if c.is_ascii_alphabetic() {
-                in_esc = false;
+/// Devuelve la longitud en bytes de la secuencia de escape ANSI que empieza en `s`
+/// (que debe comenzar con `\x1b`). Soporta:
+/// - CSI: `ESC [ <params> <final 0x40..=0x7E>` (colores, cursor, borrado...)
+/// - OSC: `ESC ] ... (BEL | ESC \)` (títulos, hipervínculos)
+/// - Escapes de 2 bytes: `ESC <char>`
+///
+/// Si la secuencia está incompleta, consume hasta el final de la cadena.
+fn ansi_escape_len(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    debug_assert!(bytes.first() == Some(&0x1b));
+    match bytes.get(1) {
+        None => 1,
+        Some(b'[') => {
+            // CSI: parámetros/intermedios en 0x20..=0x3F, byte final en 0x40..=0x7E
+            for (i, &b) in bytes.iter().enumerate().skip(2) {
+                if (0x40..=0x7E).contains(&b) {
+                    return i + 1;
+                }
             }
-        } else {
-            out.push(c);
+            bytes.len()
+        }
+        Some(b']') => {
+            // OSC: termina en BEL (0x07) o ST (ESC \)
+            let mut i = 2;
+            while i < bytes.len() {
+                match bytes[i] {
+                    0x07 => return i + 1,
+                    0x1b if bytes.get(i + 1) == Some(&b'\\') => return i + 2,
+                    _ => i += 1,
+                }
+            }
+            bytes.len()
+        }
+        Some(_) => {
+            // Escape de 2 caracteres: avanzar el char completo (puede ser multibyte)
+            1 + s[1..].chars().next().map_or(0, char::len_utf8)
         }
     }
+}
+
+pub fn strip_ansi(s: &str) -> String {
+    // Ruta rápida: sin secuencias de escape no hay nada que limpiar
+    if !s.contains('\x1b') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(pos) = rest.find('\x1b') {
+        out.push_str(&rest[..pos]);
+        let esc_len = ansi_escape_len(&rest[pos..]);
+        rest = &rest[pos + esc_len..];
+    }
+    out.push_str(rest);
     out
 }
 
 pub fn string_width(s: &str) -> usize {
+    // Evita asignar memoria cuando la cadena no contiene escapes ANSI
+    if !s.contains('\x1b') {
+        return UnicodeWidthStr::width(s);
+    }
     let clean = strip_ansi(s);
     UnicodeWidthStr::width(clean.as_str())
 }
@@ -46,32 +89,28 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
         return String::new();
     }
     let mut current_width = 0;
-    let mut out = String::new();
-    let mut in_esc = false;
-    let mut esc_buf = String::new();
+    let mut out = String::with_capacity(s.len() + RESET.len());
+    let mut rest = s;
 
-    for c in s.chars() {
-        if c == '\x1b' {
-            in_esc = true;
-            esc_buf.push(c);
-            continue;
-        }
-        if in_esc {
-            esc_buf.push(c);
-            if c.is_ascii_alphabetic() {
-                in_esc = false;
-                out.push_str(&esc_buf);
-                esc_buf.clear();
+    'outer: while !rest.is_empty() {
+        // Copiar texto visible hasta el próximo escape (o el final)
+        let next_esc = rest.find('\x1b').unwrap_or(rest.len());
+        for c in rest[..next_esc].chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
+            if current_width + cw > max_width {
+                break 'outer;
             }
-            continue;
+            current_width += cw;
+            out.push(c);
         }
-
-        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(1);
-        if current_width + cw > max_width {
+        rest = &rest[next_esc..];
+        if rest.is_empty() {
             break;
         }
-        current_width += cw;
-        out.push(c);
+        // Preservar la secuencia de escape completa (no ocupa ancho visible)
+        let esc_len = ansi_escape_len(rest);
+        out.push_str(&rest[..esc_len]);
+        rest = &rest[esc_len..];
     }
     out.push_str(RESET);
     out
@@ -247,7 +286,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "estado".to_string(),
+        id: "estado",
         start_line: estado_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -317,7 +356,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "contexto".to_string(),
+        id: "contexto",
         start_line: ctx_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -358,10 +397,10 @@ pub fn render_screen(
             width,
         ));
         bounds.push(CardBounds {
-            id: "open_folder".to_string(),
+            id: "open_folder",
             start_line: open_line_idx,
             end_line: open_line_idx,
-            action_type: Some("open_folder".to_string()),
+            action_type: Some("open_folder"),
             action_path: Some(snap.tree.root_path.clone()),
         });
 
@@ -399,7 +438,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "proyecto".to_string(),
+        id: "proyecto",
         start_line: proj_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -491,10 +530,10 @@ pub fn render_screen(
             width,
         ));
         bounds.push(CardBounds {
-            id: "sync_integrations".to_string(),
+            id: "sync_integrations",
             start_line: sync_line_idx,
             end_line: sync_line_idx,
-            action_type: Some("sync_integrations".to_string()),
+            action_type: Some("sync_integrations"),
             action_path: None,
         });
     }
@@ -528,7 +567,7 @@ pub fn render_screen(
 
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "integraciones".to_string(),
+        id: "integraciones",
         start_line: int_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -575,7 +614,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "pools".to_string(),
+        id: "pools",
         start_line: pools_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -618,7 +657,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "git".to_string(),
+        id: "git",
         start_line: git_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -638,19 +677,27 @@ pub fn render_screen(
         } else {
             format!("{CORAL}\u{25cb} Offline{RESET}")
         };
+        // El estado "en línea" se deriva de poder abrir engram.db (SQLite local),
+        // no de un puerto HTTP, así que la etiqueta refleja la fuente real.
         lines.push(draw_row(
-            "Local (7437)",
+            "Local (engram.db)",
             &format!(
                 "{online} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{} obs{RESET}",
                 snap.engram.obs_count
             ),
             width,
         ));
-        lines.push(draw_row("Cloud: solo local o no configurado", "", width));
+        let cloud_row = match (&snap.engram.cloud_host, snap.engram.enrolled) {
+            (Some(host), true) => format!("Cloud: {host} (inscrito)"),
+            (Some(host), false) => format!("Cloud: {host} (no inscrito)"),
+            (None, true) => "Cloud: proyecto inscrito para sync".to_string(),
+            (None, false) => "Cloud: solo local o no configurado".to_string(),
+        };
+        lines.push(draw_row(&cloud_row, "", width));
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "engram".to_string(),
+        id: "engram",
         start_line: engram_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -672,7 +719,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "tools".to_string(),
+        id: "tools",
         start_line: tools_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -708,7 +755,7 @@ pub fn render_screen(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "mcp".to_string(),
+        id: "mcp",
         start_line: mcp_start,
         end_line: lines.len() - 1,
         action_type: None,
@@ -734,4 +781,54 @@ pub fn render_screen(
     ));
 
     RenderOutput { lines, bounds }
+}
+
+#[cfg(test)]
+mod ansi_tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_sin_escapes_devuelve_igual() {
+        assert_eq!(strip_ansi("hola mundo"), "hola mundo");
+    }
+
+    #[test]
+    fn strip_ansi_elimina_csi_sgr_y_truecolor() {
+        assert_eq!(strip_ansi("\x1b[38;2;10;20;30mA\x1b[0mB"), "AB");
+    }
+
+    #[test]
+    fn strip_ansi_elimina_csi_con_byte_final_no_alfabetico() {
+        // `ESC [ 2 ~` (Insert) y `ESC [ @` usan bytes finales no alfabéticos
+        assert_eq!(strip_ansi("a\x1b[2~b\x1b[@c"), "abc");
+    }
+
+    #[test]
+    fn strip_ansi_elimina_osc_con_bel_y_st() {
+        assert_eq!(strip_ansi("\x1b]0;titulo\x07X"), "X");
+        assert_eq!(
+            strip_ansi("\x1b]8;;https://x.y\x1b\\link\x1b]8;;\x1b\\"),
+            "link"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_tolera_secuencia_incompleta_y_unicode() {
+        assert_eq!(strip_ansi("ñ\x1b[31"), "ñ");
+        assert_eq!(strip_ansi("\x1bé"), "");
+    }
+
+    #[test]
+    fn string_width_ignora_escapes() {
+        assert_eq!(string_width("\x1b[31m\u{25cf} ok\x1b[0m"), 4);
+    }
+
+    #[test]
+    fn truncate_preserva_escapes_y_respeta_ancho() {
+        let out = truncate_to_width("\x1b[31mabcdef\x1b[0m", 3);
+        assert_eq!(strip_ansi(&out), "abc");
+        assert!(out.starts_with("\x1b[31m"));
+        assert!(out.ends_with(RESET));
+        assert_eq!(truncate_to_width("abc", 0), "");
+    }
 }

@@ -72,7 +72,7 @@ impl AppState {
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset += 2;
+        self.scroll_offset = self.scroll_offset.saturating_add(2);
     }
 
     pub fn handle_mouse_click(
@@ -84,7 +84,7 @@ impl AppState {
 
         // 1. Prioridad: Acciones especiales exactas (abrir carpeta o sincronizar)
         for bound in &self.card_bounds {
-            if let Some(ref action) = bound.action_type
+            if let Some(action) = bound.action_type
                 && absolute_line == bound.start_line
             {
                 if action == "sync_integrations" {

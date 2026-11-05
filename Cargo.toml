@@ -6,15 +6,12 @@ license = "MIT"
 description = "High-density developer telemetry HUD and status sidebar for Herdr/Telar and OpenCode in native Rust"
 
 [dependencies]
-# TUI y terminal
-ratatui = "0.29"
+# Terminal
 crossterm = { version = "0.28", features = ["event-stream"] }
 unicode-width = "0.2"
 
 # Asincronía y Concurrencia
 tokio = { version = "1.43", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
-futures = "0.3"
 
 # Bases de Datos SQLite (Lectura directa sin overhead)
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -24,13 +21,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Peticiones HTTP y Red (Cuotas y APIs)
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Utilidades de Sistema y Tiempo
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 dirs = "6.0"
 regex = "1.11"
-url = "2.5"
 
 [dev-dependencies]
 tempfile = "3.17"
