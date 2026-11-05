@@ -418,7 +418,13 @@ pub fn render_screen(
     lines.push(draw_top(&int_title, collapsed[3], width));
     if !collapsed[3] {
         for acc in &snap.accounts {
-            let is_active = snap
+            let is_local = snap
+                .opencode
+                .local_prefix
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                .unwrap_or(false);
+            let is_any_active = snap
                 .opencode
                 .all_active_prefixes
                 .contains(&acc.prefix.to_lowercase());
@@ -441,9 +447,15 @@ pub fn render_screen(
                     AMBER,
                     format!("{AMBER}[AVISO 70%]{RESET}"),
                 )
-            } else if is_active {
+            } else if is_local {
                 (
                     format!("{ACCENT_PINK}>{RESET}"),
+                    MINT,
+                    format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                )
+            } else if is_any_active {
+                (
+                    format!("{ACCENT_PRIMARY}\u{25cf}{RESET}"),
                     MINT,
                     format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
                 )
@@ -456,8 +468,10 @@ pub fn render_screen(
             };
 
             let pfx_clean = format!("{:<7}", acc.prefix);
-            let pfx_disp = if is_active {
+            let pfx_disp = if is_local {
                 format!("{BOLD}{TEXT_PRIMARY}{pfx_clean}{RESET}")
+            } else if is_any_active {
+                format!("{TEXT_PRIMARY}{pfx_clean}{RESET}")
             } else {
                 format!("{TEXT_MUTED}{pfx_clean}{RESET}")
             };

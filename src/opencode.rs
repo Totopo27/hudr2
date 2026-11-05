@@ -125,29 +125,31 @@ pub fn resolve_session_for_pane(conn: &Connection, pane: &HerdrPane) -> Option<D
             .unwrap_or("");
         let title_clean = clean_opencode_terminal_title(raw_title);
 
+        // 1. Coincidencia exacta por título y directorio (sin filtrar por time_archived, ya que el pane está vivo)
         if !title_clean.is_empty()
             && let Ok(mut stmt) = conn.prepare(
-                "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE time_archived IS NULL AND (directory = ? OR directory = ?) AND title = ? ORDER BY time_updated DESC LIMIT 1"
+                "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE (directory = ? OR directory = ?) AND title = ? ORDER BY time_updated DESC LIMIT 1"
             )
-                && let Ok(rec) = stmt.query_row(rusqlite::params![raw_cwd, norm_cwd, title_clean], |row| {
-                    Ok(DbSessionRecord {
-                        id: row.get(0)?,
-                        agent: row.get(1)?,
-                        model: row.get(2)?,
-                        directory: row.get(3)?,
-                        title: row.get(4)?,
-                        time_updated: row.get(5)?,
-                        time_archived: row.get(6)?,
-                        tokens_input: row.get(7)?,
-                        tokens_output: row.get(8)?,
-                        cost: row.get(9)?,
-                    })
-                }) {
-                    return Some(rec);
-                }
+            && let Ok(rec) = stmt.query_row(rusqlite::params![raw_cwd, norm_cwd, title_clean], |row| {
+                Ok(DbSessionRecord {
+                    id: row.get(0)?,
+                    agent: row.get(1)?,
+                    model: row.get(2)?,
+                    directory: row.get(3)?,
+                    title: row.get(4)?,
+                    time_updated: row.get(5)?,
+                    time_archived: row.get(6)?,
+                    tokens_input: row.get(7)?,
+                    tokens_output: row.get(8)?,
+                    cost: row.get(9)?,
+                })
+            }) {
+                return Some(rec);
+            }
 
+        // 2. Coincidencia por directorio en sesiones activas (no archivadas o actualizadas después de archivarse)
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE time_archived IS NULL AND (directory = ? OR directory = ?) ORDER BY time_updated DESC LIMIT 1"
+            "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE (time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)) AND (directory = ? OR directory = ?) ORDER BY time_updated DESC LIMIT 1"
         )
             && let Ok(rec) = stmt.query_row(rusqlite::params![raw_cwd, norm_cwd], |row| {
                 Ok(DbSessionRecord {
@@ -545,7 +547,7 @@ pub fn read_opencode_session(
     // Fallback: si no se encontró sesión a través de los panes, consultar la sesión activa más reciente en DB
     if target_session_id.is_none()
         && let Ok(mut stmt) = conn.prepare(
-            "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE time_archived IS NULL ORDER BY time_updated DESC LIMIT 30"
+            "SELECT id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost FROM session_v2 WHERE (time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)) ORDER BY time_updated DESC LIMIT 30"
         )
             && let Ok(rows) = stmt.query_map([], |row| {
                 Ok(DbSessionRecord {
