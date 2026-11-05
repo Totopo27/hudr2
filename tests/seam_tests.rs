@@ -765,6 +765,24 @@ mod tests {
         // Validar attributed changes files_count (src/main.rs de edit)
         assert_eq!(session.attributed_changes.files_count, 1);
 
+        // Validar caché por time_updated: si borramos los mensajes pero time_updated no cambió,
+        // collect_message_stats debe devolver las estadísticas cacheadas intactas.
+        conn.execute("DELETE FROM session_message", []).unwrap();
+        let session2 = read_opencode_session("D:/myproj", &panes, &[], None, None);
+        assert_eq!(
+            session2.active_turn_tokens, 42450,
+            "Caché preservó active_turn_tokens"
+        );
+        assert_eq!(session2.tool_total, 4, "Caché preservó tool_total");
+
+        // Al limpiar caché y no haber mensajes, se recalculan desde SQLite vacío
+        hudr2::opencode::clear_message_stats_cache();
+        let session3 = read_opencode_session("D:/myproj", &panes, &[], None, None);
+        assert_eq!(
+            session3.tool_total, 0,
+            "Al limpiar caché y no haber mensajes, total es 0"
+        );
+
         unsafe {
             std::env::remove_var("OPENCODE_DB_PATH");
         }
@@ -1048,8 +1066,14 @@ mod tests {
         // Verificamos que Gemini manda sobre la salud:
         assert_eq!(acc.rem_5h, 88);
         assert_eq!(acc.rem_wk, 95);
-        assert!(!acc.is_critical, "No debe ser crítico si Gemini tiene cuota suficiente, aunque Claude esté en 0%");
-        assert!(!acc.is_warning, "No debe estar en warning si Gemini está por encima del 70% restante");
+        assert!(
+            !acc.is_critical,
+            "No debe ser crítico si Gemini tiene cuota suficiente, aunque Claude esté en 0%"
+        );
+        assert!(
+            !acc.is_warning,
+            "No debe estar en warning si Gemini está por encima del 70% restante"
+        );
 
         // Sin embargo, los pools de Claude deben registrarse correctamente para inspección en la card de desglose
         let claude_5h = acc.pools.iter().find(|p| p.label == "Claude 5h").unwrap();
@@ -1079,7 +1103,10 @@ mod tests {
 
         QuotaCollector::apply_quota_data(&mut acc, &critical_payload);
         assert_eq!(acc.rem_5h, 10);
-        assert!(acc.is_critical, "Debe ser crítico cuando Gemini baja del 15% restante");
+        assert!(
+            acc.is_critical,
+            "Debe ser crítico cuando Gemini baja del 15% restante"
+        );
     }
 
     #[test]
@@ -1197,5 +1224,160 @@ mod tests {
             pools_raw.contains(hudr2::config::MINT),
             "Cuota de Modelos debe incluir color MINT (verde) para cuotas saludables"
         );
+    }
+
+    #[test]
+    fn test_needs_redraw_lifecycle() {
+        let mut state = AppState::new();
+        assert!(
+            state.needs_redraw,
+            "AppState nuevo debe nacer con needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.set_flash_notice(Some("Aviso".to_string()), 5000);
+        assert!(
+            state.needs_redraw,
+            "set_flash_notice debe marcar needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.toggle_card(1);
+        assert!(
+            state.needs_redraw,
+            "toggle_card debe marcar needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.toggle_all_collapse();
+        assert!(
+            state.needs_redraw,
+            "toggle_all_collapse debe marcar needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.scroll_down();
+        assert!(
+            state.needs_redraw,
+            "scroll_down debe marcar needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.scroll_up();
+        assert!(
+            state.needs_redraw,
+            "scroll_up debe marcar needs_redraw = true"
+        );
+
+        state.needs_redraw = false;
+        state.set_snapshot(hudr2::models::TelemetrySnapshot::default());
+        assert!(
+            state.needs_redraw,
+            "set_snapshot debe marcar needs_redraw = true"
+        );
+
+        // Expiración de aviso flash
+        state.set_flash_notice(Some("Flash rápido".to_string()), 10);
+        state.needs_redraw = false;
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        let expired = state.check_flash_notice_expiry();
+        assert!(expired);
+        assert!(
+            state.needs_redraw,
+            "check_flash_notice_expiry al expirar debe marcar needs_redraw = true"
+        );
+    }
+
+    #[test]
+    fn test_git_telemetry_caching() {
+        hudr2::git::clear_git_cache();
+        let cur = std::env::current_dir().unwrap();
+        let cur_str = cur.to_string_lossy().to_string();
+
+        let t1 = hudr2::git::read_git_telemetry(&cur_str);
+        assert!(t1.has_git, "El directorio de hudr2 es un repositorio git");
+
+        let t2 = hudr2::git::read_git_telemetry(&cur_str);
+        assert_eq!(t1.branch, t2.branch);
+        assert_eq!(t1.modified, t2.modified);
+        assert_eq!(t1.staged, t2.staged);
+
+        hudr2::git::clear_git_cache();
+    }
+
+    #[test]
+    fn test_engram_telemetry_caching() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        hudr2::engram::clear_engram_cache();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("engram.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE observations (
+                id INTEGER PRIMARY KEY,
+                project TEXT,
+                deleted_at TEXT
+            );
+            CREATE TABLE sync_enrolled_projects (
+                project TEXT PRIMARY KEY
+            );
+            INSERT INTO observations (id, project, deleted_at) VALUES (1, 'mytestproj', NULL);
+            INSERT INTO observations (id, project, deleted_at) VALUES (2, 'mytestproj', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("ENGRAM_DB_PATH", db_path.to_str().unwrap());
+        }
+
+        let proj_path = tmp.path().join("mytestproj");
+        std::fs::create_dir_all(&proj_path).unwrap();
+        let proj_str = proj_path.to_str().unwrap();
+
+        let t1 = hudr2::engram::read_engram_telemetry(proj_str);
+        assert!(t1.online);
+        assert_eq!(t1.obs_count, 2);
+
+        // Volver a leer: debe devolver la telemetría en caché
+        let t2 = hudr2::engram::read_engram_telemetry(proj_str);
+        assert_eq!(t2.obs_count, 2);
+
+        hudr2::engram::clear_engram_cache();
+        unsafe {
+            std::env::remove_var("ENGRAM_DB_PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_all_skips_tree_when_collapsed() {
+        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+        let sentinel_tree = hudr2::models::ProjectTreeData {
+            root_path: "sentinel_path".to_string(),
+            total_dirs: 42,
+            total_files: 99,
+            tree: Vec::new(),
+        };
+        {
+            let mut state = app_state.write().await;
+            state.collapsed_cards[2] = true;
+            state.snapshot.tree = sentinel_tree.clone();
+        }
+
+        hudr2::app::refresh_all(&app_state).await;
+
+        {
+            let state = app_state.read().await;
+            assert_eq!(
+                state.snapshot.tree, sentinel_tree,
+                "Cuando la tarjeta de proyecto (idx 2) está colapsada, read_project_tree debe omitirse y mantener el árbol previo"
+            );
+            assert!(
+                state.needs_redraw,
+                "refresh_all debe marcar needs_redraw = true"
+            );
+        }
     }
 }

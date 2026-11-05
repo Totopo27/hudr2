@@ -10,11 +10,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, accounts_copy) = {
+    let (project_dir, accounts_copy, is_tree_collapsed) = {
         let state = app_state.read().await;
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
+            state.collapsed_cards[2],
         )
     };
 
@@ -41,14 +42,25 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     let dir_clone = project_dir.clone();
     let git_fut = tokio::task::spawn_blocking(move || read_git_telemetry(&dir_clone));
 
-    let dir_clone = project_dir.clone();
-    let tree_fut = tokio::task::spawn_blocking(move || read_project_tree(&dir_clone));
+    let tree_fut = if is_tree_collapsed {
+        None
+    } else {
+        let dir_clone = project_dir.clone();
+        Some(tokio::task::spawn_blocking(move || {
+            read_project_tree(&dir_clone)
+        }))
+    };
 
     let dir_clone = project_dir.clone();
     let mcps_fut = tokio::task::spawn_blocking(move || read_mcp_servers(&dir_clone));
 
-    let (opencode_res, engram_res, git_res, tree_res, mcps_res) =
-        tokio::join!(opencode_fut, engram_fut, git_fut, tree_fut, mcps_fut);
+    let (opencode_res, engram_res, git_res, mcps_res) =
+        tokio::join!(opencode_fut, engram_fut, git_fut, mcps_fut);
+
+    let tree_res = match tree_fut {
+        Some(handle) => handle.await.ok(),
+        None => None,
+    };
 
     {
         let mut state = app_state.write().await;
@@ -61,7 +73,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         if let Ok(g) = git_res {
             state.snapshot.git = g;
         }
-        if let Ok(tr) = tree_res {
+        if let Some(tr) = tree_res {
             state.snapshot.tree = tr;
         }
         if let Ok(m) = mcps_res {
@@ -72,6 +84,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         QuotaCollector::discover_accounts(&mut state.snapshot.accounts);
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
+        state.needs_redraw = true;
     }
 }
 
@@ -80,6 +93,10 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool)
         let mut state = app_state.write().await;
         state.set_flash_notice(Some("+ Refrescando cuotas y contexto...".to_string()), 4000);
     }
+
+    crate::git::clear_git_cache();
+    crate::opencode::clear_message_stats_cache();
+    crate::engram::clear_engram_cache();
 
     refresh_all(app_state).await;
 
@@ -110,6 +127,8 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool)
         state.snapshot.accounts = updated_accounts;
         if interactive {
             state.set_flash_notice(Some("+ Cuotas y contexto actualizados".to_string()), 4000);
+        } else {
+            state.needs_redraw = true;
         }
     } else if interactive {
         let mut state = app_state.write().await;

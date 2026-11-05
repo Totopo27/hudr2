@@ -633,9 +633,13 @@ pub fn render_screen(
             let bar = render_gauge_inline(p.percent, 6, pool_color);
             let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
             let p_label = format!("{:<9}", p.label);
-            let left =
-                format!("{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}");
-            let right = format!("{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}", p.pace, p.reset);
+            let left = format!(
+                "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
+            );
+            let right = format!(
+                "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                p.pace, p.reset
+            );
             lines.push(draw_row(&left, &right, width));
         }
     }

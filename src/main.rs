@@ -34,18 +34,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
         app::force_refresh(&initial_fetch_state, false).await;
     });
 
-    // 3. Background worker periódico:
-    // Actualiza datos de disco cada 2.5s y refresca cuotas de red cada 60s
+    // 3. Background worker periódico adaptativo:
+    // - Si el agente está trabajando (working): sleep 1500ms
+    // - Si el agente está ocioso (!= working): sleep 4000ms
+    // Refresca cuotas de red cada ~60 segundos automáticamente (silencioso)
     let bg_state = app_state.clone();
     tokio::spawn(async move {
-        let mut loop_counter = 0;
+        let mut last_quota_refresh = tokio::time::Instant::now();
         loop {
-            sleep(Duration::from_millis(2500)).await;
+            let sleep_duration = {
+                let state = bg_state.read().await;
+                if state.snapshot.opencode.agent_status == "working" {
+                    Duration::from_millis(1500)
+                } else {
+                    Duration::from_millis(4000)
+                }
+            };
+            sleep(sleep_duration).await;
+
             app::refresh_all(&bg_state).await;
-            loop_counter += 1;
-            // Cada ~60 segundos (24 * 2.5s), actualizar cuotas de red automáticamente (silencioso)
-            if loop_counter >= 24 {
-                loop_counter = 0;
+
+            if last_quota_refresh.elapsed() >= Duration::from_secs(60) {
+                last_quota_refresh = tokio::time::Instant::now();
                 let s_clone = bg_state.clone();
                 tokio::spawn(async move {
                     app::force_refresh(&s_clone, false).await;
@@ -55,25 +65,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     let mut should_quit = false;
+    let mut last_rendered_offset = 0;
 
     while !should_quit {
-        let actual_rendered_offset;
+        // 1a. Expirar aviso flash si existe
+        if app_state.read().await.flash_notice.is_some() {
+            let mut state = app_state.write().await;
+            if state.check_flash_notice_expiry() {
+                state.needs_redraw = true;
+            }
+        }
 
-        // 1. Renderizado y expiración de avisos
-        // El render se hace bajo un lock de LECTURA (no bloquea a otros lectores) y la
-        // escritura se limita a un lock breve para bounds/scroll. La E/S de terminal
-        // (print + flush) ocurre fuera de cualquier lock para no frenar a los workers.
-        {
+        // 1b. Renderizado condicional bajo demanda (needs_redraw)
+        let should_render = app_state.read().await.needs_redraw;
+        if should_render {
             let (cols, rows) = size().unwrap_or((48, 36));
             let width = (cols as usize).clamp(36, 50);
             let max_visible = (rows as usize).max(10);
 
-            // 1a. Expirar aviso flash (lock de escritura breve, solo si hay aviso activo)
-            if app_state.read().await.flash_notice.is_some() {
-                let _ = app_state.write().await.check_flash_notice_expiry();
-            }
-
-            // 1b. Renderizar bajo lock de lectura
             let render_out = {
                 let state = app_state.read().await;
                 ui::render_screen(
@@ -85,18 +94,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
             let total_lines = render_out.lines.len();
 
-            // 1c. Lock de escritura breve: actualizar bounds y acotar scroll
-            {
+            let actual_rendered_offset = {
                 let mut state = app_state.write().await;
                 state.card_bounds = render_out.bounds;
                 let max_scroll = total_lines.saturating_sub(max_visible);
                 if state.scroll_offset > max_scroll {
                     state.scroll_offset = max_scroll;
                 }
-                actual_rendered_offset = state.scroll_offset;
-            }
+                state.needs_redraw = false;
+                state.scroll_offset
+            };
+            last_rendered_offset = actual_rendered_offset;
 
-            // 1d. Construir buffer e imprimir sin ningún lock tomado
             let visible = &render_out.lines
                 [actual_rendered_offset..total_lines.min(actual_rendered_offset + max_visible)];
 
@@ -117,17 +126,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = out.flush();
         }
 
-        // 2. Procesar Eventos de Teclado y Mouse
-        if event::poll(Duration::from_millis(30))? {
+        // 2. Procesar Eventos de Teclado, Mouse y Resize
+        if event::poll(Duration::from_millis(50))? {
             let mut ev_opt = Some(event::read()?);
             while let Some(ev) = ev_opt {
                 match ev {
+                    Event::Resize(_, _) => {
+                        app_state.write().await.needs_redraw = true;
+                    }
                     // Eventos de Mouse (Clics y Rueda de Scroll)
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let mut state = app_state.write().await;
+                            state.needs_redraw = true;
                             if let Some(action) =
-                                state.handle_mouse_click(mouse.row as usize, actual_rendered_offset)
+                                state.handle_mouse_click(mouse.row as usize, last_rendered_offset)
                             {
                                 match action {
                                     state::ClickAction::SyncIntegrations => {
@@ -171,6 +184,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             should_quit = true;
                         } else {
                             let mut state = app_state.write().await;
+                            state.needs_redraw = true;
                             match key.code {
                                 KeyCode::Char('q') => should_quit = true,
                                 KeyCode::Char('c') => state.toggle_all_collapse(),

@@ -22,7 +22,32 @@ use crate::config::resolve_opencode_db_path;
 use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
 use rusqlite::{Connection, OpenFlags};
 use session::{extract_tool_path, recent_alive_sessions};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+struct MessageStatsCacheEntry {
+    session_id: String,
+    time_updated: Option<i64>,
+    active_turn_tokens: i64,
+    tool_total: usize,
+    tool_reads: usize,
+    tool_writes: usize,
+    tool_bash: usize,
+    tool_engram: usize,
+    tool_other: usize,
+    attributed_changes: AttributedChanges,
+}
+
+static MESSAGE_STATS_CACHE: LazyLock<Mutex<HashMap<String, MessageStatsCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn clear_message_stats_cache() {
+    if let Ok(mut guard) = MESSAGE_STATS_CACHE.lock() {
+        guard.clear();
+    }
+}
 
 pub fn read_opencode_session(
     target_dir: &str,
@@ -131,6 +156,7 @@ pub fn read_opencode_session(
         .or(current_cwd_pane);
 
     let mut target_session_id: Option<String> = None;
+    let mut target_time_updated: Option<i64> = None;
 
     if let Some(pp) = primary_pane {
         if let Some(status) = &pp.agent_status
@@ -140,6 +166,7 @@ pub fn read_opencode_session(
         }
         if let Some(target_s) = resolve_session_for_pane(&conn, pp) {
             target_session_id = Some(target_s.id.clone());
+            target_time_updated = target_s.time_updated;
             target_s.apply_to(&mut session);
         }
     }
@@ -158,6 +185,7 @@ pub fn read_opencode_session(
         });
         if let Some(s) = by_dir.or(sessions.first()) {
             target_session_id = Some(s.id.clone());
+            target_time_updated = s.time_updated;
             s.apply_to(&mut session);
         }
     }
@@ -177,7 +205,7 @@ pub fn read_opencode_session(
 
     // Si encontramos sesión, calcular tokens y herramientas
     if let Some(ref session_id) = target_session_id {
-        collect_message_stats(&conn, session_id, &mut session);
+        collect_message_stats(&conn, session_id, target_time_updated, &mut session);
     }
 
     session
@@ -204,7 +232,41 @@ fn resolve_known_prefixes(accounts_list: &[AccountQuota]) -> Vec<String> {
 
 /// Recorre los mensajes del asistente de la sesión para calcular los tokens del turno
 /// activo, el uso de herramientas por categoría y los archivos modificados.
-fn collect_message_stats(conn: &Connection, session_id: &str, session: &mut OpenCodeSession) {
+/// Si time_updated no ha cambiado, reutiliza el resultado cacheado para evitar queries
+/// pesadas y deserialización de JSON repetitiva.
+fn collect_message_stats(
+    conn: &Connection,
+    session_id: &str,
+    time_updated: Option<i64>,
+    session: &mut OpenCodeSession,
+) {
+    let resolved_time_updated = time_updated.or_else(|| {
+        conn.query_row(
+            "SELECT time_updated FROM session_v2 WHERE id = ?",
+            [session_id],
+            |row| row.get(0),
+        )
+        .ok()
+    });
+
+    if let Some(t_up) = resolved_time_updated {
+        if let Ok(guard) = MESSAGE_STATS_CACHE.lock() {
+            if let Some(cached) = guard.get(session_id) {
+                if cached.time_updated == Some(t_up) {
+                    session.active_turn_tokens = cached.active_turn_tokens;
+                    session.tool_total = cached.tool_total;
+                    session.tool_reads = cached.tool_reads;
+                    session.tool_writes = cached.tool_writes;
+                    session.tool_bash = cached.tool_bash;
+                    session.tool_engram = cached.tool_engram;
+                    session.tool_other = cached.tool_other;
+                    session.attributed_changes = cached.attributed_changes.clone();
+                    return;
+                }
+            }
+        }
+    }
+
     let mut modified_files = HashSet::new();
     let mut found_active_tokens = false;
 
@@ -276,4 +338,22 @@ fn collect_message_stats(conn: &Connection, session_id: &str, session: &mut Open
         additions: 0,
         deletions: 0,
     };
+
+    if let Ok(mut guard) = MESSAGE_STATS_CACHE.lock() {
+        guard.insert(
+            session_id.to_string(),
+            MessageStatsCacheEntry {
+                session_id: session_id.to_string(),
+                time_updated: resolved_time_updated,
+                active_turn_tokens: session.active_turn_tokens,
+                tool_total: session.tool_total,
+                tool_reads: session.tool_reads,
+                tool_writes: session.tool_writes,
+                tool_bash: session.tool_bash,
+                tool_engram: session.tool_engram,
+                tool_other: session.tool_other,
+                attributed_changes: session.attributed_changes.clone(),
+            },
+        );
+    }
 }

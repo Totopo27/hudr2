@@ -222,10 +222,8 @@ impl QuotaCollector {
             // Opción 1: Gemini es la métrica soberana para salud y alertas de migración.
             // Las cuotas secundarias (Claude / GPT de regalo) se muestran en los pools para desglose,
             // pero no marcan la cuenta como crítica ni en aviso.
-            let worst_used = std::cmp::max(
-                100u8.saturating_sub(gem_5h),
-                100u8.saturating_sub(gem_wk),
-            );
+            let worst_used =
+                std::cmp::max(100u8.saturating_sub(gem_5h), 100u8.saturating_sub(gem_wk));
             acc.is_critical = worst_used >= 85;
             acc.is_warning = (70..85).contains(&worst_used);
 

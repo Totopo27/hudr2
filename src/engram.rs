@@ -1,16 +1,36 @@
 use crate::config::resolve_engram_db_path;
 use crate::models::EngramTelemetry;
 use rusqlite::{Connection, OpenFlags};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
-/// Consulta instantánea en SQLite de Engram
+#[derive(Clone, Debug)]
+struct EngramCacheEntry {
+    mtime: SystemTime,
+    telemetry: EngramTelemetry,
+}
+
+static ENGRAM_CACHE: LazyLock<Mutex<HashMap<String, EngramCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn clear_engram_cache() {
+    if let Ok(mut guard) = ENGRAM_CACHE.lock() {
+        guard.clear();
+    }
+}
+
+/// Consulta instantánea en SQLite de Engram con caché mtime
 pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
+    let project = Path::new(project_dir)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("proyecto")
+        .to_string();
+
     let mut tele = EngramTelemetry {
-        project: Path::new(project_dir)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("proyecto")
-            .to_string(),
+        project: project.clone(),
         online: false,
         obs_count: 0,
         enrolled: false,
@@ -18,8 +38,19 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
     };
 
     let db_path = resolve_engram_db_path();
-    if !db_path.exists() {
-        return tele;
+    let metadata = match std::fs::metadata(&db_path) {
+        Ok(m) => m,
+        Err(_) => return tele,
+    };
+
+    let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+    if let Ok(guard) = ENGRAM_CACHE.lock() {
+        if let Some(entry) = guard.get(&project) {
+            if entry.mtime == mtime {
+                return entry.telemetry.clone();
+            }
+        }
     }
 
     let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
@@ -46,6 +77,16 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
         |row| row.get::<_, usize>(0),
     ) {
         tele.enrolled = enrolled > 0;
+    }
+
+    if let Ok(mut guard) = ENGRAM_CACHE.lock() {
+        guard.insert(
+            project,
+            EngramCacheEntry {
+                mtime,
+                telemetry: tele.clone(),
+            },
+        );
     }
 
     tele

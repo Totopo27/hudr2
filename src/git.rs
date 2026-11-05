@@ -1,7 +1,58 @@
 use crate::models::GitTelemetry;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
-/// Recolección de Git limpia y ligera
+#[derive(Debug, Clone)]
+struct GitCacheEntry {
+    telemetry: GitTelemetry,
+    head_mtime: Option<SystemTime>,
+    index_mtime: Option<SystemTime>,
+    last_check: Instant,
+}
+
+static GIT_CACHE: LazyLock<Mutex<HashMap<String, GitCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub fn clear_git_cache() {
+    if let Ok(mut guard) = GIT_CACHE.lock() {
+        guard.clear();
+    }
+}
+
+fn find_git_dir(target_dir: &str) -> Option<PathBuf> {
+    let mut curr = Path::new(target_dir).to_path_buf();
+    loop {
+        let base_git = curr.join(".git");
+        if base_git.is_dir() {
+            return Some(base_git);
+        } else if base_git.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&base_git) {
+                let line = content.lines().next().unwrap_or("").trim();
+                if let Some(rest) = line.strip_prefix("gitdir:") {
+                    let p = rest.trim();
+                    let candidate = curr.join(p);
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                    let abs = Path::new(p);
+                    if abs.exists() {
+                        return Some(abs.to_path_buf());
+                    }
+                }
+            }
+            return Some(base_git);
+        }
+        if !curr.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Recolección de Git limpia y ligera con caché mtime / 5s idle
 pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let mut git = GitTelemetry {
         branch: "main".to_string(),
@@ -14,6 +65,36 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
         has_git: false,
         recent_commits: Vec::new(),
     };
+
+    let git_dir = match find_git_dir(target_dir) {
+        Some(d) => d,
+        None => return git,
+    };
+
+    let head_path = git_dir.join("HEAD");
+    let index_path = git_dir.join("index");
+    let head_mtime = std::fs::metadata(&head_path)
+        .and_then(|m| m.modified())
+        .ok();
+    let index_mtime = std::fs::metadata(&index_path)
+        .and_then(|m| m.modified())
+        .ok();
+    let now = Instant::now();
+    let norm_dir = crate::paths::normalize_path(target_dir);
+
+    // Comprobar caché por mtime (.git/index y .git/HEAD) o ventana de 5s ociosa
+    if let Ok(guard) = GIT_CACHE.lock() {
+        if let Some(entry) = guard.get(&norm_dir) {
+            let mtime_matches = head_mtime.is_some()
+                && entry.head_mtime == head_mtime
+                && entry.index_mtime == index_mtime;
+            let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5);
+
+            if mtime_matches || within_idle_ttl {
+                return entry.telemetry.clone();
+            }
+        }
+    }
 
     // 1. Branch actual
     if let Ok(output) = Command::new("git")
@@ -74,6 +155,18 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
                 git.recent_commits.push(line.trim().to_string());
             }
         }
+    }
+
+    if let Ok(mut guard) = GIT_CACHE.lock() {
+        guard.insert(
+            norm_dir,
+            GitCacheEntry {
+                telemetry: git.clone(),
+                head_mtime,
+                index_mtime,
+                last_check: now,
+            },
+        );
     }
 
     git

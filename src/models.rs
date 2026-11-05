@@ -97,14 +97,14 @@ pub struct McpServer {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TreeNode {
     pub name: String,
     pub is_dir: bool,
     pub children: Vec<TreeNode>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProjectTreeData {
     pub root_path: String,
     pub total_dirs: usize,

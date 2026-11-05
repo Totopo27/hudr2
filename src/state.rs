@@ -9,6 +9,7 @@ pub struct AppState {
     pub card_bounds: Vec<CardBounds>,
     pub flash_notice: Option<String>,
     pub flash_notice_until: Option<std::time::Instant>,
+    pub needs_redraw: bool,
 }
 
 impl AppState {
@@ -29,6 +30,7 @@ impl AppState {
             card_bounds: Vec::new(),
             flash_notice: None,
             flash_notice_until: None,
+            needs_redraw: true,
         }
     }
 
@@ -41,6 +43,7 @@ impl AppState {
             self.flash_notice = None;
             self.flash_notice_until = None;
         }
+        self.needs_redraw = true;
     }
 
     pub fn check_flash_notice_expiry(&mut self) -> bool {
@@ -49,6 +52,7 @@ impl AppState {
         {
             self.flash_notice = None;
             self.flash_notice_until = None;
+            self.needs_redraw = true;
             return true;
         }
         false
@@ -57,22 +61,26 @@ impl AppState {
     pub fn toggle_card(&mut self, index: usize) {
         if index < self.collapsed_cards.len() {
             self.collapsed_cards[index] = !self.collapsed_cards[index];
+            self.needs_redraw = true;
         }
     }
 
     pub fn toggle_all_collapse(&mut self) {
         let any_open = self.collapsed_cards.iter().any(|&c| !c);
         self.collapsed_cards.fill(any_open);
+        self.needs_redraw = true;
     }
 
     pub fn scroll_up(&mut self) {
         if self.scroll_offset > 0 {
             self.scroll_offset = self.scroll_offset.saturating_sub(2);
+            self.needs_redraw = true;
         }
     }
 
     pub fn scroll_down(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_add(2);
+        self.needs_redraw = true;
     }
 
     pub fn handle_mouse_click(
@@ -80,6 +88,7 @@ impl AppState {
         clicked_row: usize,
         actual_scroll_offset: usize,
     ) -> Option<ClickAction> {
+        self.needs_redraw = true;
         let absolute_line = clicked_row + actual_scroll_offset;
 
         // 1. Prioridad: Acciones especiales exactas (abrir carpeta o sincronizar)
@@ -133,6 +142,11 @@ impl AppState {
         }
 
         None
+    }
+
+    pub fn set_snapshot(&mut self, snapshot: TelemetrySnapshot) {
+        self.snapshot = snapshot;
+        self.needs_redraw = true;
     }
 }
 
