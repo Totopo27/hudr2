@@ -196,13 +196,6 @@ pub fn read_opencode_session(
         session.all_active_prefixes.insert(local_pfx);
     }
 
-    // Agregar prefijos de subagentes SDD si es un orquestador
-    let sub_prefixes =
-        get_sdd_subagent_account_prefixes(&session.agent, target_dir, &known_prefixes);
-    for sp in sub_prefixes {
-        session.all_active_prefixes.insert(sp);
-    }
-
     // Si encontramos sesión, calcular tokens y herramientas
     if let Some(ref session_id) = target_session_id {
         collect_message_stats(&conn, session_id, target_time_updated, &mut session);
