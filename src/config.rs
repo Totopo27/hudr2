@@ -17,7 +17,8 @@ pub const BOLD: &str = "\x1b[1m";
 
 pub const QUOTA_URL: &str =
     "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
-pub const USER_AGENT: &str = "antigravity/hub/2.23.0 darwin/arm64";
+pub const USER_AGENT: &str =
+    "antigravity/hub/2.29.0 (aidev_client; os_type=darwin; arch=arm64; cl=1013060670)";
 
 /// HTTP client compartido — reutiliza connection pool y sesiones TLS
 pub static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
