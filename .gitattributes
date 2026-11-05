@@ -1,0 +1,6 @@
+# Forzar CRLF para scripts batch de Windows (evita errores de sintaxis en CMD)
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Forzar LF para scripts shell Unix/Linux
+*.sh text eol=lf

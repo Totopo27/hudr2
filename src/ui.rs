@@ -404,7 +404,9 @@ pub fn render_screen(
             action_path: Some(snap.tree.root_path.clone()),
         });
 
-        for item in snap.tree.tree.iter().take(4) {
+        let max_items = 6;
+        let total_items = snap.tree.tree.len();
+        for item in snap.tree.tree.iter().take(max_items) {
             if item.is_dir {
                 lines.push(draw_row(
                     &format!(
@@ -434,6 +436,14 @@ pub fn render_screen(
                     width,
                 ));
             }
+        }
+        if total_items > max_items {
+            let remaining = total_items - max_items;
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}\u{2026} y {remaining} elementos m\u{00e1}s{RESET}"),
+                "",
+                width,
+            ));
         }
     }
     lines.push(draw_bottom(width));

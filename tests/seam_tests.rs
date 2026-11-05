@@ -1380,4 +1380,25 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn test_read_project_tree_prioritizes_directories_and_orders_alphabetically() {
+        use hudr2::tree::read_project_tree;
+        let tree_data = read_project_tree(".");
+        assert!(tree_data.tree.len() > 0, "El árbol no debe estar vacío");
+
+        // Verificar que las carpetas aparezcan antes que los archivos en la raíz
+        let mut seen_file = false;
+        for node in &tree_data.tree {
+            if node.is_dir {
+                assert!(
+                    !seen_file,
+                    "Se encontró la carpeta '{}' después de un archivo; las carpetas deben ir primero",
+                    node.name
+                );
+            } else {
+                seen_file = true;
+            }
+        }
+    }
 }

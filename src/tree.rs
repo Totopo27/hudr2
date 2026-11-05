@@ -24,7 +24,16 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
             })
             .collect();
 
-        list.sort_by_key(|e| e.file_name());
+        // Carpetas primero, luego archivos, ambos ordenados alfabéticamente
+        list.sort_by(|a, b| {
+            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            match (a_is_dir, b_is_dir) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.file_name().cmp(&b.file_name()),
+            }
+        });
 
         for entry in list {
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -34,7 +43,17 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
                 data.total_dirs += 1;
                 let mut children = Vec::new();
                 if let Ok(sub) = fs::read_dir(entry.path()) {
-                    for s in sub.flatten() {
+                    let mut sub_entries: Vec<_> = sub.flatten().collect();
+                    sub_entries.sort_by(|a, b| {
+                        let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        match (a_is_dir, b_is_dir) {
+                            (true, false) => std::cmp::Ordering::Less,
+                            (false, true) => std::cmp::Ordering::Greater,
+                            _ => a.file_name().cmp(&b.file_name()),
+                        }
+                    });
+                    for s in sub_entries {
                         let s_name = s.file_name().to_string_lossy().to_string();
                         if !s_name.starts_with('.') && s_name != "target" {
                             let s_is_dir = s.file_type().map(|t| t.is_dir()).unwrap_or(false);
