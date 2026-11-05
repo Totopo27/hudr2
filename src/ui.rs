@@ -450,7 +450,9 @@ pub fn render_screen(
     let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
     let critical_count = snap.accounts.iter().filter(|a| a.is_critical).count();
     let int_title = if critical_count > 0 {
-        format!("{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}")
+        format!(
+            "{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
+        )
     } else {
         format!("{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
     };
@@ -516,8 +518,17 @@ pub fn render_screen(
             };
             let bar = render_gauge_inline(acc.rem_5h, 3, pct_color);
             let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", acc.rem_5h);
-            let wk_color = if acc.is_critical { CORAL } else if acc.is_warning { AMBER } else { MINT };
-            let pct_wk = format!("{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}", acc.rem_wk);
+            let wk_color = if acc.is_critical {
+                CORAL
+            } else if acc.is_warning {
+                AMBER
+            } else {
+                MINT
+            };
+            let pct_wk = format!(
+                "{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                acc.rem_wk
+            );
 
             let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h} {pct_wk}");
             lines.push(draw_row(&left, &right_text, width));
@@ -546,8 +557,13 @@ pub fn render_screen(
     let active_critical_accs: Vec<&crate::models::AccountQuota> = snap
         .accounts
         .iter()
-        .filter(|a| (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
-            && snap.opencode.all_active_prefixes.contains(&a.prefix.to_lowercase()))
+        .filter(|a| {
+            (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+                && snap
+                    .opencode
+                    .all_active_prefixes
+                    .contains(&a.prefix.to_lowercase())
+        })
         .collect();
 
     if !active_critical_accs.is_empty() || flash_notice.is_some() {
@@ -558,7 +574,10 @@ pub fn render_screen(
         for ca in active_critical_accs {
             let action_label = format!("[presion\u{00e1} 'x' -> migrar a {target_healthy}]");
             lines.push(draw_row(
-                &format!("{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activa) {action_label}{RESET}", ca.prefix),
+                &format!(
+                    "{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activa) {action_label}{RESET}",
+                    ca.prefix
+                ),
                 "",
                 width,
             ));
@@ -603,12 +622,20 @@ pub fn render_screen(
         && let Some(acc) = target_account
     {
         for p in &acc.pools {
-            let bar = render_gauge_inline(p.percent, 6, MINT);
-            let pct_fmt = format!("{BOLD}{MINT}{:>3}%{RESET}", p.percent);
+            let pool_color = if p.percent <= 15 {
+                CORAL
+            } else if p.percent <= 50 {
+                AMBER
+            } else {
+                MINT
+            };
+
+            let bar = render_gauge_inline(p.percent, 6, pool_color);
+            let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
             let p_label = format!("{:<9}", p.label);
             let left =
-                format!("{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}");
-            let right = format!("{MINT}{}{RESET} {TEXT_DIM}en {}{RESET}", p.pace, p.reset);
+                format!("{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}");
+            let right = format!("{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}", p.pace, p.reset);
             lines.push(draw_row(&left, &right, width));
         }
     }
@@ -766,11 +793,13 @@ pub fn render_screen(
     lines.push(format!(
         "{TEXT_DIM} 1-9: colap \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
     ));
-    let has_active_critical = snap
-        .accounts
-        .iter()
-        .any(|a| (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
-            && snap.opencode.all_active_prefixes.contains(&a.prefix.to_lowercase()));
+    let has_active_critical = snap.accounts.iter().any(|a| {
+        (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+            && snap
+                .opencode
+                .all_active_prefixes
+                .contains(&a.prefix.to_lowercase())
+    });
     let critical_action = if has_active_critical {
         format!("{CORAL}x: migrar ({target_healthy}){TEXT_DIM} \u{00b7} {RESET}")
     } else {

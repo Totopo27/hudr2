@@ -150,7 +150,9 @@ pub fn resolve_opencode_db_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
         for drive in ['C', 'D', 'E', 'F'] {
-            candidates.push(PathBuf::from(format!("{drive}:/.local/share/opencode/opencode.db")));
+            candidates.push(PathBuf::from(format!(
+                "{drive}:/.local/share/opencode/opencode.db"
+            )));
         }
     }
 

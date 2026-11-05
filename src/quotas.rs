@@ -142,113 +142,120 @@ impl QuotaCollector {
 
         let body = serde_json::json!({ "project": project_id });
         if let Ok(res) = client
-                .post(QUOTA_URL)
-                .header("Authorization", format!("Bearer {}", token))
-                .header("User-Agent", USER_AGENT)
-                .json(&body)
-                .send()
-                .await
-                && res.status().is_success()
-                && let Ok(data) = res.json::<serde_json::Value>().await
-            {
-                acc.has_error = false;
-                acc.error_msg.clear();
+            .post(QUOTA_URL)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("User-Agent", USER_AGENT)
+            .json(&body)
+            .send()
+            .await
+            && res.status().is_success()
+            && let Ok(data) = res.json::<serde_json::Value>().await
+        {
+            Self::apply_quota_data(acc, &data);
+        }
+    }
 
-                if let Some(groups) = data.get("groups").and_then(|g| g.as_array()) {
-                    let mut gem_5h = 100;
-                    let mut gem_wk = 100;
-                    let mut gem_5h_reset = "4h 59m".to_string();
-                    let mut gem_wk_reset = "4d 23h".to_string();
-                    let mut cla_5h = 100;
-                    let mut cla_wk = 100;
-                    let mut cla_5h_reset = "4h 59m".to_string();
-                    let mut cla_wk_reset = "6d 23h".to_string();
+    pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
+        acc.has_error = false;
+        acc.error_msg.clear();
 
-                    for grp in groups {
-                        let name = grp
-                            .get("displayName")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("")
-                            .to_lowercase();
-                        if let Some(buckets) = grp.get("buckets").and_then(|b| b.as_array()) {
-                            for b in buckets {
-                                let window = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
-                                let frac = b
-                                    .get("remainingFraction")
-                                    .and_then(|f| f.as_f64())
-                                    .unwrap_or(1.0);
-                                let pct = (frac * 100.0).clamp(0.0, 100.0).round() as u8;
-                                let reset_time = b.get("resetTime").and_then(|r| r.as_str());
+        if let Some(groups) = data.get("groups").and_then(|g| g.as_array()) {
+            let mut gem_5h = 100;
+            let mut gem_wk = 100;
+            let mut gem_5h_reset = "4h 59m".to_string();
+            let mut gem_wk_reset = "4d 23h".to_string();
+            let mut cla_5h = 100;
+            let mut cla_wk = 100;
+            let mut cla_5h_reset = "4h 59m".to_string();
+            let mut cla_wk_reset = "6d 23h".to_string();
 
-                                if name.contains("gemini") {
-                                    if window == "5h" || window.contains('5') {
-                                        gem_5h = pct;
-                                        if let Some(rt) = reset_time {
-                                            gem_5h_reset = format_relative_reset(rt);
-                                        }
-                                    } else if window == "weekly" || window.contains("week") {
-                                        gem_wk = pct;
-                                        if let Some(rt) = reset_time {
-                                            gem_wk_reset = format_relative_reset(rt);
-                                        }
-                                    }
-                                } else if name.contains("claude") || name.contains("gpt") {
-                                    if window == "5h" || window.contains('5') {
-                                        cla_5h = pct;
-                                        if let Some(rt) = reset_time {
-                                            cla_5h_reset = format_relative_reset(rt);
-                                        }
-                                    } else if window == "weekly" || window.contains("week") {
-                                        cla_wk = pct;
-                                        if let Some(rt) = reset_time {
-                                            cla_wk_reset = format_relative_reset(rt);
-                                        }
-                                    }
+            for grp in groups {
+                let name = grp
+                    .get("displayName")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if let Some(buckets) = grp.get("buckets").and_then(|b| b.as_array()) {
+                    for b in buckets {
+                        let window = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
+                        let frac = b
+                            .get("remainingFraction")
+                            .and_then(|f| f.as_f64())
+                            .unwrap_or(1.0);
+                        let pct = (frac * 100.0).clamp(0.0, 100.0).round() as u8;
+                        let reset_time = b.get("resetTime").and_then(|r| r.as_str());
+
+                        if name.contains("gemini") {
+                            if window == "5h" || window.contains('5') {
+                                gem_5h = pct;
+                                if let Some(rt) = reset_time {
+                                    gem_5h_reset = format_relative_reset(rt);
+                                }
+                            } else if window == "weekly" || window.contains("week") {
+                                gem_wk = pct;
+                                if let Some(rt) = reset_time {
+                                    gem_wk_reset = format_relative_reset(rt);
+                                }
+                            }
+                        } else if name.contains("claude") || name.contains("gpt") {
+                            if window == "5h" || window.contains('5') {
+                                cla_5h = pct;
+                                if let Some(rt) = reset_time {
+                                    cla_5h_reset = format_relative_reset(rt);
+                                }
+                            } else if window == "weekly" || window.contains("week") {
+                                cla_wk = pct;
+                                if let Some(rt) = reset_time {
+                                    cla_wk_reset = format_relative_reset(rt);
                                 }
                             }
                         }
                     }
-
-                    acc.rem_5h = gem_5h;
-                    acc.rem_wk = gem_wk;
-                    acc.reset_5h = gem_5h_reset.clone();
-                    acc.reset_wk = gem_wk_reset.clone();
-
-                    let worst_used = std::cmp::max(
-                        std::cmp::max(100u8.saturating_sub(gem_5h), 100u8.saturating_sub(gem_wk)),
-                        std::cmp::max(100u8.saturating_sub(cla_5h), 100u8.saturating_sub(cla_wk)),
-                    );
-                    acc.is_critical = worst_used >= 85;
-                    acc.is_warning = (70..85).contains(&worst_used);
-
-                    acc.pools = vec![
-                        QuotaPool {
-                            label: "Gemini Wk".to_string(),
-                            percent: gem_wk,
-                            reset: gem_wk_reset,
-                            pace: "↑19%".to_string(),
-                        },
-                        QuotaPool {
-                            label: "Gemini 5h".to_string(),
-                            percent: gem_5h,
-                            reset: gem_5h_reset,
-                            pace: "↑8%".to_string(),
-                        },
-                        QuotaPool {
-                            label: "Claude Wk".to_string(),
-                            percent: cla_wk,
-                            reset: cla_wk_reset,
-                            pace: "~0%".to_string(),
-                        },
-                        QuotaPool {
-                            label: "Claude 5h".to_string(),
-                            percent: cla_5h,
-                            reset: cla_5h_reset,
-                            pace: "~0%".to_string(),
-                        },
-                    ];
                 }
             }
+
+            acc.rem_5h = gem_5h;
+            acc.rem_wk = gem_wk;
+            acc.reset_5h = gem_5h_reset.clone();
+            acc.reset_wk = gem_wk_reset.clone();
+
+            // Opción 1: Gemini es la métrica soberana para salud y alertas de migración.
+            // Las cuotas secundarias (Claude / GPT de regalo) se muestran en los pools para desglose,
+            // pero no marcan la cuenta como crítica ni en aviso.
+            let worst_used = std::cmp::max(
+                100u8.saturating_sub(gem_5h),
+                100u8.saturating_sub(gem_wk),
+            );
+            acc.is_critical = worst_used >= 85;
+            acc.is_warning = (70..85).contains(&worst_used);
+
+            acc.pools = vec![
+                QuotaPool {
+                    label: "Gemini Wk".to_string(),
+                    percent: gem_wk,
+                    reset: gem_wk_reset,
+                    pace: "↑19%".to_string(),
+                },
+                QuotaPool {
+                    label: "Gemini 5h".to_string(),
+                    percent: gem_5h,
+                    reset: gem_5h_reset,
+                    pace: "↑8%".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude Wk".to_string(),
+                    percent: cla_wk,
+                    reset: cla_wk_reset,
+                    pace: "~0%".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude 5h".to_string(),
+                    percent: cla_5h,
+                    reset: cla_5h_reset,
+                    pace: "~0%".to_string(),
+                },
+            ];
+        }
     }
 }
 

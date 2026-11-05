@@ -953,18 +953,249 @@ mod tests {
         // Simulamos que globalmente en Herdr existen agy1 y agy2 activos,
         // pero en este espacio específico el local_prefix es agy1
         state.snapshot.opencode.local_prefix = Some("agy1".to_string());
-        state.snapshot.opencode.all_active_prefixes.insert("agy1".to_string());
-        state.snapshot.opencode.all_active_prefixes.insert("agy2".to_string());
+        state
+            .snapshot
+            .opencode
+            .all_active_prefixes
+            .insert("agy1".to_string());
+        state
+            .snapshot
+            .opencode
+            .all_active_prefixes
+            .insert("agy2".to_string());
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let pools_bound = render_out.bounds.iter().find(|b| b.id == "pools").unwrap();
-        let pools_text: String = render_out.lines[pools_bound.start_line..=pools_bound.end_line].join("\n");
+        let pools_text: String =
+            render_out.lines[pools_bound.start_line..=pools_bound.end_line].join("\n");
         let pools_clean = ui::strip_ansi(&pools_text);
 
         // Debe ser Cuota de Modelos específico de agy1
         assert!(pools_clean.contains("Cuota de Modelos · agy1 *"));
-        assert!(!pools_clean.contains("Multi-cuenta"), "No debe mostrar Multi-cuenta aunque all_active_prefixes tenga varias");
-        assert!(pools_clean.contains("Claude-3.5"), "Debe mostrar el pool de agy1");
-        assert!(!pools_clean.contains("GPT-4o"), "No debe mostrar el pool de agy2");
+        assert!(
+            !pools_clean.contains("Multi-cuenta"),
+            "No debe mostrar Multi-cuenta aunque all_active_prefixes tenga varias"
+        );
+        assert!(
+            pools_clean.contains("Claude-3.5"),
+            "Debe mostrar el pool de agy1"
+        );
+        assert!(
+            !pools_clean.contains("GPT-4o"),
+            "No debe mostrar el pool de agy2"
+        );
+    }
+
+    #[test]
+    fn test_gemini_is_sovereign_for_quota_health_and_critical_alerts() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::QuotaCollector;
+
+        let mut acc = AccountQuota {
+            prefix: "agy2_1".to_string(),
+            email: "agy2_1@example.com".to_string(),
+            auth_file: "dummy.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 59m".to_string(),
+            rem_wk: 100,
+            reset_wk: "4d 23h".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![],
+        };
+
+        // Simulamos un payload donde Claude está al 0% restante (consumo 100%, crítico si contara),
+        // pero Gemini está saludable (88% restante en 5h y 95% semanal).
+        let payload = serde_json::json!({
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.88,
+                            "resetTime": "2026-11-05T18:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.95,
+                            "resetTime": "2026-11-10T12:00:00Z"
+                        }
+                    ]
+                },
+                {
+                    "displayName": "Claude Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.0,
+                            "resetTime": "2026-11-05T18:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.05,
+                            "resetTime": "2026-11-12T12:00:00Z"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        QuotaCollector::apply_quota_data(&mut acc, &payload);
+
+        // Verificamos que Gemini manda sobre la salud:
+        assert_eq!(acc.rem_5h, 88);
+        assert_eq!(acc.rem_wk, 95);
+        assert!(!acc.is_critical, "No debe ser crítico si Gemini tiene cuota suficiente, aunque Claude esté en 0%");
+        assert!(!acc.is_warning, "No debe estar en warning si Gemini está por encima del 70% restante");
+
+        // Sin embargo, los pools de Claude deben registrarse correctamente para inspección en la card de desglose
+        let claude_5h = acc.pools.iter().find(|p| p.label == "Claude 5h").unwrap();
+        assert_eq!(claude_5h.percent, 0);
+
+        // Ahora comprobamos que si Gemini realmente se agota (ej. 10% restante en 5h => 90% usado >= 85),
+        // sí se marca como crítico
+        let critical_payload = serde_json::json!({
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.10,
+                            "resetTime": "2026-11-05T18:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.95,
+                            "resetTime": "2026-11-10T12:00:00Z"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        QuotaCollector::apply_quota_data(&mut acc, &critical_payload);
+        assert_eq!(acc.rem_5h, 10);
+        assert!(acc.is_critical, "Debe ser crítico cuando Gemini baja del 15% restante");
+    }
+
+    #[test]
+    fn test_ui_integraciones_card_reflects_gemini_sovereignty_without_false_criticals() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::QuotaCollector;
+        use hudr2::state::AppState;
+
+        let mut state = AppState::new();
+
+        // Creamos una cuenta agy2_1 exactamente como en la captura del usuario:
+        // Gemini al 98% restante, Claude al 9% restante (gastado)
+        let mut acc = AccountQuota {
+            prefix: "agy2_1".to_string(),
+            email: "agy2_1@gmail.com".to_string(),
+            auth_file: "auth.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 4m".to_string(),
+            rem_wk: 100,
+            reset_wk: "2d 12h".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![],
+        };
+
+        let quota_payload = serde_json::json!({
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.98,
+                            "resetTime": "2026-11-05T18:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.88,
+                            "resetTime": "2026-11-10T12:00:00Z"
+                        }
+                    ]
+                },
+                {
+                    "displayName": "Claude Models",
+                    "buckets": [
+                        {
+                            "window": "5h",
+                            "remainingFraction": 0.09,
+                            "resetTime": "2026-11-05T18:00:00Z"
+                        },
+                        {
+                            "window": "weekly",
+                            "remainingFraction": 0.50,
+                            "resetTime": "2026-11-12T12:00:00Z"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        QuotaCollector::apply_quota_data(&mut acc, &quota_payload);
+
+        state.snapshot.accounts.push(acc);
+        state.snapshot.opencode.local_prefix = Some("agy2_1".to_string());
+        state
+            .snapshot
+            .opencode
+            .all_active_prefixes
+            .insert("agy2_1".to_string());
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_text = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // 1. La tarjeta NO debe marcar 'crític' en el encabezado
+        assert!(
+            screen_text.contains("Integraciones · 1 cuentas"),
+            "El título debe mostrar 1 cuentas saludable, NO '! 1 crític'. Texto real:\n{}",
+            screen_text
+        );
+
+        // 2. La línea de la cuenta NO debe decir [AGOTÁNDOSE]
+        assert!(
+            !screen_text.contains("[AGOTÁNDOSE]"),
+            "No debe mostrar [AGOTÁNDOSE] porque Gemini está al 98%"
+        );
+
+        // 3. No debe haber banner de pánico ni acción de migración forzada para agy2_1
+        assert!(
+            !screen_text.contains("! CRÍTICO: agy2_1 (activa)"),
+            "No debe alertar de migración crítica para agy2_1"
+        );
+        assert!(
+            !screen_text.contains("x: migrar"),
+            "No debe haber atajo de migración crítica en el footer"
+        );
+
+        // 4. En Cuota de Modelos: Claude 5h (0%) debe usar CORAL (rojo),
+        // Gemini (98%) debe usar MINT (verde), y Claude Wk (50%) AMBER (amarillo)
+        let pools_bound = render_out.bounds.iter().find(|b| b.id == "pools").unwrap();
+        let pools_raw: String =
+            render_out.lines[pools_bound.start_line..=pools_bound.end_line].join("\n");
+
+        // Verificamos que contenga secuencias ANSI con CORAL (\x1b[38;2;248;113;113m) para Claude 5h
+        assert!(
+            pools_raw.contains(hudr2::config::CORAL),
+            "Cuota de Modelos debe incluir color CORAL (rojo) para cuotas agotadas <=15%"
+        );
+        assert!(
+            pools_raw.contains(hudr2::config::AMBER),
+            "Cuota de Modelos debe incluir color AMBER (amarillo) para cuotas <=50%"
+        );
+        assert!(
+            pools_raw.contains(hudr2::config::MINT),
+            "Cuota de Modelos debe incluir color MINT (verde) para cuotas saludables"
+        );
     }
 }

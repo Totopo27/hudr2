@@ -40,7 +40,11 @@ pub fn get_best_healthy_target_prefix(
     let compute_health_score = |acc: &AccountQuota| -> i32 {
         let rem_5h = acc.rem_5h as i32;
         let mut rem_wk = 100i32;
-        if let Some(wk_pool) = acc.pools.iter().find(|p| p.label.to_lowercase().contains("wk")) {
+        if let Some(wk_pool) = acc
+            .pools
+            .iter()
+            .find(|p| p.label.to_lowercase().contains("wk"))
+        {
             rem_wk = wk_pool.percent as i32;
         }
         if rem_wk < 10 {
@@ -51,10 +55,9 @@ pub fn get_best_healthy_target_prefix(
 
     // 1. Si hay alguna cuenta activa que esté sana (> 30% libre y sin error), preferir esa
     for p in active_prefixes {
-        if let Some(acc) = accounts_list
-            .iter()
-            .find(|a| a.prefix.to_lowercase() == *p && !a.is_critical && !a.has_error && a.rem_5h > 30)
-        {
+        if let Some(acc) = accounts_list.iter().find(|a| {
+            a.prefix.to_lowercase() == *p && !a.is_critical && !a.has_error && a.rem_5h > 30
+        }) {
             return acc.prefix.clone();
         }
     }
@@ -81,12 +84,17 @@ pub fn migrate_critical_sessions(
 ) -> (usize, String) {
     let critical_list: Vec<&AccountQuota> = accounts_list
         .iter()
-        .filter(|a| (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
-            && active_prefixes.contains(&a.prefix.to_lowercase()))
+        .filter(|a| {
+            (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+                && active_prefixes.contains(&a.prefix.to_lowercase())
+        })
         .collect();
 
     if critical_list.is_empty() {
-        return (0, "No hay sesiones activas usando cuentas críticas.".to_string());
+        return (
+            0,
+            "No hay sesiones activas usando cuentas críticas.".to_string(),
+        );
     }
 
     let target_prefix = get_best_healthy_target_prefix(accounts_list, active_prefixes);
@@ -100,7 +108,10 @@ pub fn migrate_critical_sessions(
 
     let db_path = resolve_opencode_db_path();
     if !db_path.exists() {
-        return (0, "[error] Base de datos de OpenCode no encontrada.".to_string());
+        return (
+            0,
+            "[error] Base de datos de OpenCode no encontrada.".to_string(),
+        );
     }
 
     let conn = match Connection::open(&db_path) {
@@ -113,10 +124,11 @@ pub fn migrate_critical_sessions(
     let mut migrated_from = Vec::new();
 
     // Obtener sesiones no archivadas
-    let mut stmt = match conn.prepare("SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL") {
-        Ok(s) => s,
-        Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
-    };
+    let mut stmt =
+        match conn.prepare("SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL") {
+            Ok(s) => s,
+            Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
+        };
 
     let session_rows: Vec<(String, Option<String>, Option<String>)> = stmt
         .query_map([], |row| {
@@ -134,13 +146,16 @@ pub fn migrate_critical_sessions(
         for (ses_id, agent_opt, model_opt) in &session_rows {
             let mut matches = false;
             if let Some(a) = agent_opt
-                && (a == &from_agent || a.to_lowercase().contains(&format!("-{}", ca.prefix.to_lowercase())))
+                && (a == &from_agent
+                    || a.to_lowercase()
+                        .contains(&format!("-{}", ca.prefix.to_lowercase())))
             {
                 matches = true;
             }
             if !matches
                 && let Some(m) = model_opt
-                && m.to_lowercase().contains(&format!("{}/", ca.prefix.to_lowercase()))
+                && m.to_lowercase()
+                    .contains(&format!("{}/", ca.prefix.to_lowercase()))
             {
                 matches = true;
             }
@@ -150,7 +165,9 @@ pub fn migrate_critical_sessions(
                     "UPDATE session_v2 SET agent = ?, model = ? WHERE id = ?",
                     rusqlite::params![to_agent, to_model_json, ses_id],
                 );
-                if let Ok(changes) = updated && changes > 0 {
+                if let Ok(changes) = updated
+                    && changes > 0
+                {
                     total_migrated += changes;
                     if !migrated_from.contains(&ca.prefix) {
                         migrated_from.push(ca.prefix.clone());
@@ -183,7 +200,9 @@ pub fn migrate_critical_sessions(
 
     if total_migrated > 0 {
         let from_str = migrated_from.join(", ");
-        let notice = format!("[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_prefix}!");
+        let notice = format!(
+            "[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_prefix}!"
+        );
 
         // Guardar checkpoint en Engram
         if let Some(cand) = crate::paths::resolve_engram_binary() {
@@ -211,7 +230,17 @@ pub fn migrate_critical_sessions(
 
         (total_migrated, notice)
     } else {
-        (0, format!("No se encontraron sesiones abiertas usando [{}]", critical_list.iter().map(|c| c.prefix.as_str()).collect::<Vec<_>>().join(", ")))
+        (
+            0,
+            format!(
+                "No se encontraron sesiones abiertas usando [{}]",
+                critical_list
+                    .iter()
+                    .map(|c| c.prefix.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
     }
 }
 
@@ -334,7 +363,10 @@ pub fn release_inactive_sessions(
                 .as_deref()
                 .map(|t| {
                     let lower = t.to_lowercase();
-                    lower.starts_with("oc |") || lower.starts_with("opencode |") || lower == "opencode" || RE_OC.is_match(t)
+                    lower.starts_with("oc |")
+                        || lower.starts_with("opencode |")
+                        || lower == "opencode"
+                        || RE_OC.is_match(t)
                 })
                 .unwrap_or(false);
 
