@@ -518,10 +518,10 @@ mod tests {
     fn test_context_card_rendering_no_hardcoded_fallbacks() {
         let mut state = AppState::new();
         state.collapsed_cards[1] = false; // Contexto expandido
-        state.snapshot.opencode.active_turn_tokens = 0;
-        state.snapshot.opencode.tokens_input = 0;
-        state.snapshot.opencode.tokens_output = 0;
-        state.snapshot.opencode.context_limit = 1_000_000;
+        state.snapshot.agent_session.active_turn_tokens = 0;
+        state.snapshot.agent_session.tokens_input = 0;
+        state.snapshot.agent_session.tokens_output = 0;
+        state.snapshot.agent_session.context_limit = 1_000_000;
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 44);
         let ctx_bounds = render_out
@@ -551,10 +551,10 @@ mod tests {
     fn test_context_card_dynamic_thresholds_and_notice() {
         let mut state = AppState::new();
         state.collapsed_cards[1] = false;
-        state.snapshot.opencode.context_limit = 100_000;
+        state.snapshot.agent_session.context_limit = 100_000;
 
         // 1. < 50% -> Optimo, MINT, sin notice row
-        state.snapshot.opencode.active_turn_tokens = 40_000; // 40%
+        state.snapshot.agent_session.active_turn_tokens = 40_000; // 40%
         let render_opt = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 44);
         let ctx_bounds = render_opt
             .bounds
@@ -579,7 +579,7 @@ mod tests {
         );
 
         // 2. >= 50% y < 80% -> Maduro, AMBER, con notice row
-        state.snapshot.opencode.active_turn_tokens = 60_000; // 60%
+        state.snapshot.agent_session.active_turn_tokens = 60_000; // 60%
         let render_mad = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 60);
         let ctx_bounds = render_mad
             .bounds
@@ -604,7 +604,7 @@ mod tests {
         );
 
         // 3. >= 80% -> Saturado, CORAL, con notice row
-        state.snapshot.opencode.active_turn_tokens = 85_000; // 85%
+        state.snapshot.agent_session.active_turn_tokens = 85_000; // 85%
         let render_sat = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 60);
         let ctx_bounds = render_sat
             .bounds
@@ -970,15 +970,15 @@ mod tests {
 
         // Simulamos que globalmente en Herdr existen agy1 y agy2 activos,
         // pero en este espacio específico el local_prefix es agy1
-        state.snapshot.opencode.local_prefix = Some("agy1".to_string());
+        state.snapshot.agent_session.local_prefix = Some("agy1".to_string());
         state
             .snapshot
-            .opencode
+            .agent_session
             .all_active_prefixes
             .insert("agy1".to_string());
         state
             .snapshot
-            .opencode
+            .agent_session
             .all_active_prefixes
             .insert("agy2".to_string());
 
@@ -1172,10 +1172,10 @@ mod tests {
         QuotaCollector::apply_quota_data(&mut acc, &quota_payload);
 
         state.snapshot.accounts.push(acc);
-        state.snapshot.opencode.local_prefix = Some("agy2_1".to_string());
+        state.snapshot.agent_session.local_prefix = Some("agy2_1".to_string());
         state
             .snapshot
-            .opencode
+            .agent_session
             .all_active_prefixes
             .insert("agy2_1".to_string());
 
@@ -1385,7 +1385,7 @@ mod tests {
     async fn test_read_project_tree_prioritizes_directories_and_orders_alphabetically() {
         use hudr2::tree::read_project_tree;
         let tree_data = read_project_tree(".");
-        assert!(tree_data.tree.len() > 0, "El árbol no debe estar vacío");
+        assert!(!tree_data.tree.is_empty(), "El árbol no debe estar vacío");
 
         // Verificar que las carpetas aparezcan antes que los archivos en la raíz
         let mut seen_file = false;
@@ -1475,5 +1475,114 @@ mod tests {
             "Tanto Integraciones como Cuota de Modelos deben mostrar la fila inactiva cuando accounts está vacío. Pantalla:\n{}",
             screen_text
         );
+    }
+
+    #[test]
+    fn test_agent_session_generalization_renders_cleanly() {
+        use hudr2::models::{AgentSession, OpenCodeSession};
+
+        // 1. Verificar equivalencia de tipo (alias retrocompatible)
+        let session = AgentSession {
+            provider_name: "pi".to_string(),
+            agent: "pi-coder".to_string(),
+            model: "anthropic/claude-3-5-sonnet".to_string(),
+            model_short: "claude-3.5-sonnet".to_string(),
+            context_limit: 200_000,
+            active_turn_tokens: 15_000,
+            tokens_input: 45_000,
+            tokens_output: 5_000,
+            cost: 0.042,
+            tool_reads: 8,
+            tool_writes: 3,
+            tool_bash: 2,
+            tool_engram: 0,
+            tool_other: 0,
+            tool_total: 13,
+            agent_status: "working".to_string(),
+            ..Default::default()
+        };
+
+        let mut state = AppState::new();
+        state.snapshot.agent_session = session;
+
+        // Renderizar pantalla completa
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let screen_text = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // El estado debe reflejar que el agente está trabajando y su modelo
+        assert!(screen_text.contains(">> WORKING"));
+        assert!(screen_text.contains("claude-3.5-sonnet"));
+        assert!(screen_text.contains("Contexto"));
+        assert!(screen_text.contains("Herramientas"));
+
+        // Validar que OpenCodeSession sigue siendo el mismo tipo
+        let oc_session: OpenCodeSession = state.snapshot.agent_session.clone();
+        assert_eq!(oc_session.provider_name, "pi");
+        assert_eq!(oc_session.tool_total, 13);
+    }
+
+    #[test]
+    fn test_quota_error_handling_and_orphan_purge() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::{QuotaManager, calculate_quota_pace};
+
+        let mut acc = AccountQuota::default();
+
+        // 1. 401 -> token expirado
+        let err_401 = serde_json::json!({
+            "error": { "code": 401, "status": "UNAUTHENTICATED", "message": "Token expired" }
+        });
+        QuotaManager::apply_quota_error(&mut acc, 401, &err_401);
+        assert!(acc.has_error);
+        assert_eq!(acc.error_msg, "token expirado");
+
+        // 2. 403 TOS_VIOLATION -> tos suspendida
+        let err_tos = serde_json::json!({
+            "error": {
+                "code": 403,
+                "status": "PERMISSION_DENIED",
+                "message": "This service has been disabled in this account for violation of Terms of Service.",
+                "details": [{ "reason": "TOS_VIOLATION" }]
+            }
+        });
+        QuotaManager::apply_quota_error(&mut acc, 403, &err_tos);
+        assert!(acc.has_error);
+        assert_eq!(acc.error_msg, "tos suspendida");
+
+        // 3. 429 -> rate limited
+        let err_429 = serde_json::json!({
+            "error": { "code": 429, "status": "RESOURCE_EXHAUSTED" }
+        });
+        QuotaManager::apply_quota_error(&mut acc, 429, &err_429);
+        assert!(acc.has_error);
+        assert_eq!(acc.error_msg, "rate limited");
+
+        // 4. Purga de cuentas huérfanas cuando un archivo .json se elimina
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
+        }
+        let f1 = tmp.path().join("antigravity-acc1.json");
+        let f2 = tmp.path().join("antigravity-acc2.json");
+        std::fs::write(&f1, r#"{"access_token":"t1","email":"a1@test.com"}"#).unwrap();
+        std::fs::write(&f2, r#"{"access_token":"t2","email":"a2@test.com"}"#).unwrap();
+
+        let mut list = Vec::new();
+        QuotaManager::discover_accounts(&mut list);
+        assert_eq!(list.len(), 2);
+
+        // Eliminar f2 y redescubrir: debe purgar acc2
+        std::fs::remove_file(&f2).unwrap();
+        QuotaManager::discover_accounts(&mut list);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].prefix, "acc1");
+
+        unsafe {
+            std::env::remove_var("CLIPROXY_AUTHS_DIR");
+        }
+
+        // 5. Cálculo de pace sin fecha devuelve ~0%
+        assert_eq!(calculate_quota_pace(90, false, None), "~0%");
     }
 }

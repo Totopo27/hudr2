@@ -83,16 +83,16 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let norm_dir = crate::paths::normalize_path(target_dir);
 
     // Comprobar caché por mtime (.git/index y .git/HEAD) o ventana de 5s ociosa
-    if let Ok(guard) = GIT_CACHE.lock() {
-        if let Some(entry) = guard.get(&norm_dir) {
-            let mtime_matches = head_mtime.is_some()
-                && entry.head_mtime == head_mtime
-                && entry.index_mtime == index_mtime;
-            let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5);
+    if let Ok(guard) = GIT_CACHE.lock()
+        && let Some(entry) = guard.get(&norm_dir)
+    {
+        let mtime_matches = head_mtime.is_some()
+            && entry.head_mtime == head_mtime
+            && entry.index_mtime == index_mtime;
+        let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5);
 
-            if mtime_matches || within_idle_ttl {
-                return entry.telemetry.clone();
-            }
+        if mtime_matches || within_idle_ttl {
+            return entry.telemetry.clone();
         }
     }
 

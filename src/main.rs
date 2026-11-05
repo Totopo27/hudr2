@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             let sleep_duration = {
                 let state = bg_state.read().await;
-                if state.snapshot.opencode.agent_status == "working" {
+                if state.snapshot.agent_session.agent_status == "working" {
                     Duration::from_millis(1500)
                 } else {
                     Duration::from_millis(4000)

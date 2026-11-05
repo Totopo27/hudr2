@@ -182,6 +182,7 @@ pub fn get_sdd_subagent_account_prefixes(
                 if let Some(start_idx) = sys_text.find("<!-- gentle-ai:sdd-model-assignments -->")
                     && let Some(end_idx) =
                         sys_text.find("<!-- /gentle-ai:sdd-model-assignments -->")
+                    && end_idx > start_idx
                 {
                     let table_part = &sys_text[start_idx..end_idx];
                     for line in table_part.lines() {

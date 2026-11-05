@@ -66,7 +66,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     {
         let mut state = app_state.write().await;
         if let Ok(oc) = opencode_res {
-            state.snapshot.opencode = oc;
+            state.snapshot.agent_session = oc;
         }
         if let Ok(en) = engram_res {
             state.snapshot.engram = en;
@@ -92,6 +92,13 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static IS_FETCHING_QUOTAS: AtomicBool = AtomicBool::new(false);
+
+struct FetchGuard;
+impl Drop for FetchGuard {
+    fn drop(&mut self) {
+        IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
+    }
+}
 
 pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool, force_all: bool) {
     if interactive {
@@ -124,19 +131,26 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
+        if interactive {
+            let mut state = app_state.write().await;
+            state.set_flash_notice(
+                Some("+ Contexto actualizado (cuotas en curso...)".to_string()),
+                4000,
+            );
+        }
         return;
     }
+    let _fetch_guard = FetchGuard;
 
     let (accounts, active_prefixes) = {
         let state = app_state.read().await;
         (
             state.snapshot.accounts.clone(),
-            state.snapshot.opencode.all_active_prefixes.clone(),
+            state.snapshot.agent_session.all_active_prefixes.clone(),
         )
     };
 
     if accounts.is_empty() {
-        IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
         if interactive {
             let mut state = app_state.write().await;
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
@@ -147,64 +161,58 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
     // Estrategia de Refresco Inteligente (Snapshot Inicial / Manual vs Polling Periódico):
     // - Si force_all es true (arranque inicial o tecla 'r'): se consultan todas las cuentas para pintar la foto completa.
     // - Si force_all es false (intervalo periódico de 5m): SOLO se consultan las cuentas activas en uso en alguna sesión
-    //   o aquellas que carezcan de pools aún cargados.
+    //   o aquellas recién descubiertas que aún tengan los valores placeholder iniciales.
     let target_accounts: Vec<AccountQuota> = if force_all {
         accounts
     } else {
-        let filtered: Vec<AccountQuota> = accounts
+        accounts
             .into_iter()
             .filter(|a| {
-                active_prefixes.contains(&a.prefix.to_lowercase()) || a.pools.is_empty()
+                let is_unfetched = a.pools.is_empty()
+                    || (a.reset_5h == "4h 59m" && a.reset_wk == "4d 23h" && !a.has_error);
+                active_prefixes.contains(&a.prefix.to_lowercase()) || is_unfetched
             })
-            .collect();
-
-        if filtered.is_empty() {
-            Vec::new()
-        } else {
-            filtered
-        }
+            .collect()
     };
 
     if target_accounts.is_empty() {
-        IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
+        if interactive {
+            let mut state = app_state.write().await;
+            state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+        }
         return;
     }
 
-    // Staggering de 3 segundos entre consultas de cuentas para proteger contra rate limits y detección de ráfagas
-    let mut updated_accounts = Vec::new();
+    // Staggering de 3 segundos entre consultas de cuentas con actualización progresiva en la UI
+    let mut any_updated = false;
     for (idx, mut acc) in target_accounts.into_iter().enumerate() {
         if idx > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
         QuotaCollector::fetch_quota_for_account(&mut acc).await;
-        updated_accounts.push(acc);
-    }
+        any_updated = true;
 
-    IS_FETCHING_QUOTAS.store(false, Ordering::SeqCst);
-
-    if !updated_accounts.is_empty() {
         let mut state = app_state.write().await;
-        for updated in updated_accounts {
-            if let Some(existing) = state
-                .snapshot
-                .accounts
-                .iter_mut()
-                .find(|a| a.prefix == updated.prefix || a.auth_file == updated.auth_file)
-            {
-                *existing = updated;
-            } else {
-                state.snapshot.accounts.push(updated);
-            }
+        if let Some(existing) = state
+            .snapshot
+            .accounts
+            .iter_mut()
+            .find(|a| a.prefix == acc.prefix || a.auth_file == acc.auth_file)
+        {
+            *existing = acc;
         }
         state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
-        if interactive {
-            state.set_flash_notice(Some("+ Cuotas y contexto actualizados".to_string()), 4000);
-        } else {
-            state.needs_redraw = true;
-        }
-    } else if interactive {
+        state.needs_redraw = true;
+    }
+
+    if interactive {
         let mut state = app_state.write().await;
-        state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+        let msg = if any_updated {
+            "+ Cuotas y contexto actualizados"
+        } else {
+            "+ Contexto actualizado"
+        };
+        state.set_flash_notice(Some(msg.to_string()), 4000);
     }
 }
 
@@ -328,7 +336,7 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
-            state.snapshot.opencode.all_active_prefixes.clone(),
+            state.snapshot.agent_session.all_active_prefixes.clone(),
         )
     };
 

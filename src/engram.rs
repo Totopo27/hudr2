@@ -45,12 +45,11 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
 
     let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
-    if let Ok(guard) = ENGRAM_CACHE.lock() {
-        if let Some(entry) = guard.get(&project) {
-            if entry.mtime == mtime {
-                return entry.telemetry.clone();
-            }
-        }
+    if let Ok(guard) = ENGRAM_CACHE.lock()
+        && let Some(entry) = guard.get(&project)
+        && entry.mtime == mtime
+    {
+        return entry.telemetry.clone();
     }
 
     let conn = match Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_ONLY) {

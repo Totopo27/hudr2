@@ -29,9 +29,14 @@ impl QuotaManager {
     pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         cliproxy::apply_quota_data(acc, data);
     }
+
+    /// Registra estados de error HTTP sobre la estructura de la cuenta.
+    pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_json::Value) {
+        cliproxy::apply_quota_error(acc, status, err_val);
+    }
 }
 
 /// Alias / fachada para mantener compatibilidad total con llamadas existentes a `QuotaCollector`.
 pub type QuotaCollector = QuotaManager;
 
-pub use cliproxy::format_relative_reset;
+pub use cliproxy::{calculate_quota_pace, format_relative_reset};

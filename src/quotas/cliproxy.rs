@@ -46,8 +46,11 @@ pub fn is_available() -> bool {
 pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
     let auths_dir = resolve_auths_dir();
     if !auths_dir.exists() {
+        target_list.clear();
         return;
     }
+
+    let mut seen_files = std::collections::HashSet::new();
 
     if let Ok(entries) = fs::read_dir(auths_dir) {
         for entry in entries.flatten() {
@@ -99,12 +102,14 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
                     });
 
                 let path_str = path.to_string_lossy().to_string();
+                seen_files.insert(path_str.clone());
                 if let Some(existing) = target_list
                     .iter_mut()
                     .find(|a| a.auth_file == path_str || a.prefix == prefix)
                 {
                     existing.prefix = prefix;
                     existing.email = email;
+                    existing.auth_file = path_str;
                 } else {
                     target_list.push(AccountQuota {
                         prefix,
@@ -150,6 +155,8 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
         }
     }
 
+    // Purgar cuentas huérfanas cuyos archivos JSON fueron eliminados del directorio auths
+    target_list.retain(|a| seen_files.contains(&a.auth_file));
     target_list.sort_by(|a, b| a.prefix.cmp(&b.prefix));
 }
 
@@ -186,10 +193,56 @@ pub async fn fetch_quota_for_account(acc: &mut AccountQuota) {
         .json(&body)
         .send()
         .await
-        && res.status().is_success()
-        && let Ok(data) = res.json::<serde_json::Value>().await
     {
-        apply_quota_data(acc, &data);
+        if res.status().is_success() {
+            if let Ok(data) = res.json::<serde_json::Value>().await {
+                apply_quota_data(acc, &data);
+            }
+        } else {
+            let status = res.status().as_u16();
+            let err_val = res
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or(serde_json::Value::Null);
+            apply_quota_error(acc, status, &err_val);
+        }
+    }
+}
+
+/// Registra estados de error HTTP (401 expirado, 403 TOS/verificación, 429 rate limit) en la cuenta.
+pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_json::Value) {
+    acc.has_error = true;
+    let msg = err_val
+        .get("error")
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    let err_status = err_val
+        .get("error")
+        .and_then(|e| e.get("status"))
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
+    let has_reason = |target: &str| -> bool {
+        err_val
+            .get("error")
+            .and_then(|e| e.get("details"))
+            .and_then(|d| d.as_array())
+            .is_some_and(|arr| {
+                arr.iter()
+                    .any(|item| item.get("reason").and_then(|r| r.as_str()) == Some(target))
+            })
+    };
+
+    if status == 401 || msg.contains("expired") || err_status == "UNAUTHENTICATED" {
+        acc.error_msg = "token expirado".to_string();
+    } else if has_reason("TOS_VIOLATION") || msg.contains("Terms of Service") {
+        acc.error_msg = "tos suspendida".to_string();
+    } else if has_reason("VALIDATION_REQUIRED") || msg.contains("Verify your account") {
+        acc.error_msg = "verif. requerida".to_string();
+    } else if status == 429 || err_status == "RESOURCE_EXHAUSTED" {
+        acc.error_msg = "rate limited".to_string();
+    } else {
+        acc.error_msg = format!("err {status}");
     }
 }
 
@@ -203,10 +256,14 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         let mut gem_wk = 100;
         let mut gem_5h_reset = "4h 59m".to_string();
         let mut gem_wk_reset = "4d 23h".to_string();
+        let mut gem_5h_iso: Option<String> = None;
+        let mut gem_wk_iso: Option<String> = None;
         let mut cla_5h = 100;
         let mut cla_wk = 100;
         let mut cla_5h_reset = "4h 59m".to_string();
         let mut cla_wk_reset = "6d 23h".to_string();
+        let mut cla_5h_iso: Option<String> = None;
+        let mut cla_wk_iso: Option<String> = None;
 
         for grp in groups {
             let name = grp
@@ -229,11 +286,13 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                             gem_5h = pct;
                             if let Some(rt) = reset_time {
                                 gem_5h_reset = format_relative_reset(rt);
+                                gem_5h_iso = Some(rt.to_string());
                             }
                         } else if window == "weekly" || window.contains("week") {
                             gem_wk = pct;
                             if let Some(rt) = reset_time {
                                 gem_wk_reset = format_relative_reset(rt);
+                                gem_wk_iso = Some(rt.to_string());
                             }
                         }
                     } else if name.contains("claude") || name.contains("gpt") {
@@ -241,11 +300,13 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                             cla_5h = pct;
                             if let Some(rt) = reset_time {
                                 cla_5h_reset = format_relative_reset(rt);
+                                cla_5h_iso = Some(rt.to_string());
                             }
                         } else if window == "weekly" || window.contains("week") {
                             cla_wk = pct;
                             if let Some(rt) = reset_time {
                                 cla_wk_reset = format_relative_reset(rt);
+                                cla_wk_iso = Some(rt.to_string());
                             }
                         }
                     }
@@ -264,32 +325,64 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         acc.is_critical = worst_used >= 85;
         acc.is_warning = (70..85).contains(&worst_used);
 
+        let gem_wk_pace = calculate_quota_pace(gem_wk, true, gem_wk_iso.as_deref());
+        let gem_5h_pace = calculate_quota_pace(gem_5h, false, gem_5h_iso.as_deref());
+        let cla_wk_pace = calculate_quota_pace(cla_wk, true, cla_wk_iso.as_deref());
+        let cla_5h_pace = calculate_quota_pace(cla_5h, false, cla_5h_iso.as_deref());
+
         acc.pools = vec![
             QuotaPool {
                 label: "Gemini Wk".to_string(),
                 percent: gem_wk,
                 reset: gem_wk_reset,
-                pace: "↑19%".to_string(),
+                pace: gem_wk_pace,
             },
             QuotaPool {
                 label: "Gemini 5h".to_string(),
                 percent: gem_5h,
                 reset: gem_5h_reset,
-                pace: "↑8%".to_string(),
+                pace: gem_5h_pace,
             },
             QuotaPool {
                 label: "Claude Wk".to_string(),
                 percent: cla_wk,
                 reset: cla_wk_reset,
-                pace: "~0%".to_string(),
+                pace: cla_wk_pace,
             },
             QuotaPool {
                 label: "Claude 5h".to_string(),
                 percent: cla_5h,
                 reset: cla_5h_reset,
-                pace: "~0%".to_string(),
+                pace: cla_5h_pace,
             },
         ];
+    }
+}
+
+/// Calcula el ritmo de consumo (pacing) comparando el % usado frente al % de tiempo transcurrido en la ventana.
+pub fn calculate_quota_pace(rem_percent: u8, is_weekly: bool, iso_time: Option<&str>) -> String {
+    let Some(iso) = iso_time else {
+        return "~0%".to_string();
+    };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return "~0%".to_string();
+    };
+    let now = chrono::Utc::now();
+    let remaining_secs = (dt.with_timezone(&chrono::Utc) - now).num_seconds();
+    let window_secs: i64 = if is_weekly { 7 * 24 * 3600 } else { 5 * 3600 };
+    if remaining_secs <= 0 || remaining_secs > window_secs {
+        return "~0%".to_string();
+    }
+    let elapsed_secs = window_secs - remaining_secs;
+    let elapsed_pct = (elapsed_secs as f64 / window_secs as f64) * 100.0;
+    let used_pct = 100.0 - f64::from(rem_percent);
+    let pace_diff = (used_pct - elapsed_pct).round() as i32;
+    if pace_diff > 5 {
+        format!("↓{pace_diff}%")
+    } else if pace_diff < -5 {
+        format!("↑{}%", pace_diff.abs())
+    } else {
+        "~0%".to_string()
     }
 }
 

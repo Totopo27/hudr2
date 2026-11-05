@@ -60,6 +60,7 @@ pub fn read_opencode_session(
     let default_model = "gemini-3.8-flash-high".to_string();
     let default_limit = resolve_model_context_limit(&default_model);
     let mut session = OpenCodeSession {
+        provider_name: "opencode".to_string(),
         agent: "sdd-orchestrator".to_string(),
         model: default_model,
         model_short: "gemini-3.8-flash-h".to_string(),
@@ -196,6 +197,9 @@ pub fn read_opencode_session(
         session.local_prefix = Some(local_pfx.clone());
         session.all_active_prefixes.insert(local_pfx);
     }
+    for pp in resolve_pool_account_prefixes(&session.model, &known_prefixes) {
+        session.all_active_prefixes.insert(pp);
+    }
 
     // Si encontramos sesión, calcular tokens y herramientas
     if let Some(ref session_id) = target_session_id {
@@ -243,22 +247,20 @@ fn collect_message_stats(
         .ok()
     });
 
-    if let Some(t_up) = resolved_time_updated {
-        if let Ok(guard) = MESSAGE_STATS_CACHE.lock() {
-            if let Some(cached) = guard.get(session_id) {
-                if cached.time_updated == Some(t_up) {
-                    session.active_turn_tokens = cached.active_turn_tokens;
-                    session.tool_total = cached.tool_total;
-                    session.tool_reads = cached.tool_reads;
-                    session.tool_writes = cached.tool_writes;
-                    session.tool_bash = cached.tool_bash;
-                    session.tool_engram = cached.tool_engram;
-                    session.tool_other = cached.tool_other;
-                    session.attributed_changes = cached.attributed_changes.clone();
-                    return;
-                }
-            }
-        }
+    if let Some(t_up) = resolved_time_updated
+        && let Ok(guard) = MESSAGE_STATS_CACHE.lock()
+        && let Some(cached) = guard.get(session_id)
+        && cached.time_updated == Some(t_up)
+    {
+        session.active_turn_tokens = cached.active_turn_tokens;
+        session.tool_total = cached.tool_total;
+        session.tool_reads = cached.tool_reads;
+        session.tool_writes = cached.tool_writes;
+        session.tool_bash = cached.tool_bash;
+        session.tool_engram = cached.tool_engram;
+        session.tool_other = cached.tool_other;
+        session.attributed_changes = cached.attributed_changes.clone();
+        return;
     }
 
     let mut modified_files = HashSet::new();

@@ -224,7 +224,7 @@ pub fn render_screen(
 
     // 2. Estado Card (0)
     let estado_start = lines.len();
-    let is_working = snap.opencode.agent_status == "working";
+    let is_working = snap.agent_session.agent_status == "working";
     let petal = if is_working {
         format!("{BOLD}{AMBER}>> WORKING{RESET}")
     } else {
@@ -258,16 +258,16 @@ pub fn render_screen(
         ));
         lines.push(draw_row(
             &format!("{GOLD}Modelo{RESET}"),
-            &format!("{ACCENT_PRIMARY}{}{RESET}", snap.opencode.model_short),
+            &format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
             width,
         ));
 
-        let active_prof_labels = if let Some(ref lp) = snap.opencode.local_prefix {
+        let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
             format!("{ACCENT_PINK}*{RESET} {MINT}{lp}{RESET} {ACCENT_PINK}*{RESET}")
-        } else if snap.opencode.all_active_prefixes.is_empty() {
+        } else if snap.agent_session.all_active_prefixes.is_empty() {
             format!("{TEXT_MUTED}default{RESET}")
         } else {
-            snap.opencode
+            snap.agent_session
                 .all_active_prefixes
                 .iter()
                 .map(|p| format!("{ACCENT_PINK}*{RESET} {MINT}{p}{RESET} {ACCENT_PINK}*{RESET}"))
@@ -301,8 +301,8 @@ pub fn render_screen(
         width,
     ));
     if !collapsed[1] {
-        let cur_tokens = snap.opencode.active_turn_tokens;
-        let limit = snap.opencode.context_limit.max(1);
+        let cur_tokens = snap.agent_session.active_turn_tokens;
+        let limit = snap.agent_session.context_limit.max(1);
         let pct = (cur_tokens as f64 / limit as f64) * 100.0;
         let (gauge_color, right_st) = if pct >= 80.0 {
             (
@@ -331,8 +331,8 @@ pub fn render_screen(
             width,
         ));
 
-        let in_t = snap.opencode.tokens_input;
-        let out_t = snap.opencode.tokens_output;
+        let in_t = snap.agent_session.tokens_input;
+        let out_t = snap.agent_session.tokens_output;
         let left_io = format!(
             "{TEXT_DIM}^{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_DIM}v{RESET} {TEXT_PRIMARY}{}{RESET}",
             format_tokens(in_t),
@@ -340,7 +340,7 @@ pub fn render_screen(
         );
         let right_cost = format!(
             "{GOLD}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
-            snap.opencode.cost
+            snap.agent_session.cost
         );
         lines.push(draw_row(&left_io, &right_cost, width));
 
@@ -477,13 +477,13 @@ pub fn render_screen(
         } else {
             for acc in &snap.accounts {
                 let is_local = snap
-                    .opencode
+                    .agent_session
                     .local_prefix
                     .as_deref()
                     .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
                     .unwrap_or(false);
                 let is_any_active = snap
-                    .opencode
+                    .agent_session
                     .all_active_prefixes
                     .contains(&acc.prefix.to_lowercase());
 
@@ -570,7 +570,7 @@ pub fn render_screen(
     // Alertas de cuentas críticas activas + Flash notice dentro de Integraciones
     let target_healthy = crate::cleanup::get_best_healthy_target_prefix(
         &snap.accounts,
-        &snap.opencode.all_active_prefixes,
+        &snap.agent_session.all_active_prefixes,
     );
     let active_critical_accs: Vec<&crate::models::AccountQuota> = snap
         .accounts
@@ -578,7 +578,7 @@ pub fn render_screen(
         .filter(|a| {
             (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
                 && snap
-                    .opencode
+                    .agent_session
                     .all_active_prefixes
                     .contains(&a.prefix.to_lowercase())
         })
@@ -619,7 +619,7 @@ pub fn render_screen(
         .map(|a| a.prefix.as_str())
         .unwrap_or("local");
     let active_acc_prefix = snap
-        .opencode
+        .agent_session
         .local_prefix
         .as_deref()
         .unwrap_or(default_prefix);
@@ -680,7 +680,7 @@ pub fn render_screen(
     let git_start = lines.len();
     let ag_changes = format!(
         "{TEXT_DIM}\u{00b7} {} por agente{RESET}",
-        snap.opencode.attributed_changes.files_count
+        snap.agent_session.attributed_changes.files_count
     );
     lines.push(draw_top(
         &format!("{BOLD}{GOLD}Cambios{RESET} {ag_changes}"),
@@ -706,7 +706,7 @@ pub fn render_screen(
         let git_part = format!("{TEXT_DIM}git:{RESET} {MINT}limpio{RESET}");
         let ag_part = format!(
             "{ACCENT_PRIMARY}ag:{RESET} {MINT}{} archivos (+){RESET}",
-            snap.opencode.attributed_changes.files_count
+            snap.agent_session.attributed_changes.files_count
         );
         lines.push(draw_row(&git_part, &ag_part, width));
     }
@@ -763,13 +763,13 @@ pub fn render_screen(
     let tools_start = lines.len();
     let tool_title = format!(
         "{BOLD}{GOLD}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
-        snap.opencode.tool_total
+        snap.agent_session.tool_total
     );
     lines.push(draw_top(&tool_title, collapsed[7], width));
     if !collapsed[7] {
-        let p_read = format!("{MAGENTA}@ {} lecturas{RESET}", snap.opencode.tool_reads);
-        let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.opencode.tool_writes);
-        let p_mem = format!("{CORAL}mem: {}{RESET}", snap.opencode.tool_engram);
+        let p_read = format!("{MAGENTA}@ {} lecturas{RESET}", snap.agent_session.tool_reads);
+        let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
+        let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
         lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
     }
     lines.push(draw_bottom(width));
@@ -824,7 +824,7 @@ pub fn render_screen(
     let has_active_critical = snap.accounts.iter().any(|a| {
         (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
             && snap
-                .opencode
+                .agent_session
                 .all_active_prefixes
                 .contains(&a.prefix.to_lowercase())
     });

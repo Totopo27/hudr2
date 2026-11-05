@@ -23,7 +23,8 @@ pub struct AttributedChanges {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct OpenCodeSession {
+pub struct AgentSession {
+    pub provider_name: String, // "opencode", "pi", "gentle-shell"
     pub agent: String,
     pub model: String,
     pub model_short: String,
@@ -43,6 +44,9 @@ pub struct OpenCodeSession {
     pub all_active_prefixes: HashSet<String>,
     pub attributed_changes: AttributedChanges,
 }
+
+/// Alias para mantener retrocompatibilidad con el adaptador de OpenCode
+pub type OpenCodeSession = AgentSession;
 
 #[derive(Debug, Clone, Default)]
 pub struct EngramTelemetry {
@@ -115,7 +119,7 @@ pub struct ProjectTreeData {
 #[derive(Debug, Clone, Default)]
 pub struct TelemetrySnapshot {
     pub project_dir: String,
-    pub opencode: OpenCodeSession,
+    pub agent_session: AgentSession,
     pub engram: EngramTelemetry,
     pub git: GitTelemetry,
     pub accounts: Vec<AccountQuota>,
