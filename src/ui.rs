@@ -205,19 +205,21 @@ pub fn format_tokens(num: i64) -> String {
 
 pub fn render_screen(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 10],
+    collapsed: &[bool; 11],
     flash_notice: Option<&str>,
     width: usize,
 ) -> RenderOutput {
-    render_screen_with_diff(snap, collapsed, flash_notice, None, &[], width)
+    let empty = std::collections::HashSet::new();
+    render_screen_with_diff(snap, collapsed, flash_notice, None, &[], &empty, width)
 }
 
 pub fn render_screen_with_diff(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 10],
+    collapsed: &[bool; 11],
     flash_notice: Option<&str>,
     selected_diff_file: Option<&str>,
     selected_diff_lines: &[String],
+    hidden_cards: &std::collections::HashSet<String>,
     width: usize,
 ) -> RenderOutput {
     let mut lines = Vec::new();
@@ -228,252 +230,266 @@ pub fn render_screen_with_diff(
         .and_then(|n| n.to_str())
         .unwrap_or("proyecto");
 
+    let active_model = if !snap.agent_session.model.is_empty() {
+        snap.agent_session.model.as_str()
+    } else {
+        snap.agent_session.model_short.as_str()
+    };
+
+    let target_healthy = crate::cleanup::get_best_healthy_target_prefix_for_model(
+        &snap.accounts,
+        &snap.agent_session.all_active_prefixes,
+        active_model,
+    );
+
     // 1. Header Linear (Línea 0 fija siempre)
     let banner_raw = ":: HUDR2 \u{00b7} GENTLEMAN ::";
     let banner_pad = width.saturating_sub(string_width(banner_raw)) / 2;
     lines.push(format!("{}{ACCENT_PRIMARY}:: HUDR2{RESET} {BORDER}\u{00b7} {GOLD}GENTLEMAN {ACCENT_PRIMARY}::{RESET}", " ".repeat(banner_pad)));
 
     // 2. Estado Card (0)
-    let estado_start = lines.len();
-    let is_working = snap.agent_session.agent_status == "working";
-    let petal = if is_working {
-        format!("{BOLD}{AMBER}>> WORKING{RESET}")
-    } else {
-        format!("{TEXT_DIM}-- idle{RESET}")
-    };
-    let estado_title = format!("{BOLD}{GOLD}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
-    lines.push(draw_top(&estado_title, collapsed[0], width));
-    if !collapsed[0] {
-        let short_proj = if folder.len() > 18 {
-            format!("{}…", &folder[..16])
+    if !hidden_cards.contains("estado") {
+        let estado_start = lines.len();
+        let is_working = snap.agent_session.agent_status == "working";
+        let petal = if is_working {
+            format!("{BOLD}{AMBER}>> WORKING{RESET}")
         } else {
-            folder.to_string()
+            format!("{TEXT_DIM}-- idle{RESET}")
         };
-        lines.push(draw_row(
-            &format!("{GOLD}Proyecto{RESET}"),
-            &format!("{TEXT_PRIMARY}~/.../{short_proj}{RESET}"),
-            width,
-        ));
-        let dirty = if snap.git.is_clean {
-            format!("{MINT}limpio{RESET}")
-        } else {
-            format!(
-                "{AMBER}\u{00b1}{}{RESET}",
-                snap.git.modified + snap.git.staged
-            )
-        };
-        lines.push(draw_row(
-            &format!("{GOLD}Rama{RESET}"),
-            &format!("{CYAN}# {}{RESET} {dirty}", snap.git.branch),
-            width,
-        ));
-        lines.push(draw_row(
-            &format!("{GOLD}Modelo{RESET}"),
-            &format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
-            width,
-        ));
-
-        let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
-            format!("{ACCENT_PINK}*{RESET} {MINT}{lp}{RESET} {ACCENT_PINK}*{RESET}")
-        } else if snap.agent_session.all_active_prefixes.is_empty() {
-            format!("{TEXT_MUTED}default{RESET}")
-        } else {
-            snap.agent_session
-                .all_active_prefixes
-                .iter()
-                .map(|p| format!("{ACCENT_PINK}*{RESET} {MINT}{p}{RESET} {ACCENT_PINK}*{RESET}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let sub_vitals = format!(
-            "{ACCENT_PRIMARY}mem:{RESET} {TEXT_PRIMARY}{folder}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_MUTED}{} MCPs{RESET} {TEXT_DIM}\u{00b7}{RESET} {active_prof_labels}",
-            snap.mcps.len()
-        );
-        lines.push(draw_row(
-            &sub_vitals,
-            &format!("{ACCENT_PINK}>{RESET}"),
-            width,
-        ));
-    }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "estado",
-        start_line: estado_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
-
-    // 3. Contexto Card (1)
-    let ctx_start = lines.len();
-    lines.push(draw_top(
-        &format!("{BOLD}{GOLD}Contexto{RESET}"),
-        collapsed[1],
-        width,
-    ));
-    if !collapsed[1] {
-        let cur_tokens = snap.agent_session.active_turn_tokens;
-        let limit = snap.agent_session.context_limit.max(1);
-        let pct = (cur_tokens as f64 / limit as f64) * 100.0;
-        let (gauge_color, right_st) = if pct >= 80.0 {
-            (
-                CORAL,
-                format!("{CORAL}\u{25cf} Saturado {:.1}% [/snew]{RESET}", pct),
-            )
-        } else if pct >= 50.0 {
-            (
-                AMBER,
-                format!("{AMBER}\u{25cf} Maduro {:.1}% [/snew]{RESET}", pct),
-            )
-        } else {
-            (MINT, format!("{MINT}\u{25cf} Optimo {:.1}%{RESET}", pct))
-        };
-        let left_tok = format!(
-            "{BOLD}{gauge_color}{}{RESET} {TEXT_DIM}/{RESET} {TEXT_MUTED}{}{RESET}",
-            format_tokens(cur_tokens),
-            format_tokens(limit)
-        );
-        lines.push(draw_row(&left_tok, &right_st, width));
-
-        let inner_w = width.saturating_sub(4);
-        lines.push(draw_row(
-            &render_gauge_inline(pct.round().clamp(0.0, 100.0) as u8, inner_w, gauge_color),
-            "",
-            width,
-        ));
-
-        let in_t = snap.agent_session.tokens_input;
-        let out_t = snap.agent_session.tokens_output;
-        let left_io = format!(
-            "{TEXT_DIM}^{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_DIM}v{RESET} {TEXT_PRIMARY}{}{RESET}",
-            format_tokens(in_t),
-            format_tokens(out_t)
-        );
-        let right_cost = format!(
-            "{GOLD}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
-            snap.agent_session.cost
-        );
-        lines.push(draw_row(&left_io, &right_cost, width));
-
-        if pct >= 50.0 {
+        let estado_title = format!("{BOLD}{GOLD}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
+        lines.push(draw_top(&estado_title, collapsed[0], width));
+        if !collapsed[0] {
+            let short_proj = if folder.len() > 18 {
+                format!("{}…", &folder[..16])
+            } else {
+                folder.to_string()
+            };
             lines.push(draw_row(
-                &format!(
-                    "{gauge_color}[aviso] Sesion madura: usa /snew para handover limpio{RESET}"
-                ),
-                "",
+                &format!("{GOLD}Proyecto{RESET}"),
+                &format!("{TEXT_PRIMARY}~/.../{short_proj}{RESET}"),
+                width,
+            ));
+            let dirty = if snap.git.is_clean {
+                format!("{MINT}limpio{RESET}")
+            } else {
+                format!(
+                    "{AMBER}\u{00b1}{}{RESET}",
+                    snap.git.modified + snap.git.staged
+                )
+            };
+            lines.push(draw_row(
+                &format!("{GOLD}Rama{RESET}"),
+                &format!("{CYAN}# {}{RESET} {dirty}", snap.git.branch),
+                width,
+            ));
+            lines.push(draw_row(
+                &format!("{GOLD}Modelo{RESET}"),
+                &format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
+                width,
+            ));
+
+            let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
+                format!("{ACCENT_PINK}*{RESET} {MINT}{lp}{RESET} {ACCENT_PINK}*{RESET}")
+            } else if snap.agent_session.all_active_prefixes.is_empty() {
+                format!("{TEXT_MUTED}default{RESET}")
+            } else {
+                snap.agent_session
+                    .all_active_prefixes
+                    .iter()
+                    .map(|p| format!("{ACCENT_PINK}*{RESET} {MINT}{p}{RESET} {ACCENT_PINK}*{RESET}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let sub_vitals = format!(
+                "{ACCENT_PRIMARY}mem:{RESET} {TEXT_PRIMARY}{folder}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_MUTED}{} MCPs{RESET} {TEXT_DIM}\u{00b7}{RESET} {active_prof_labels}",
+                snap.mcps.len()
+            );
+            lines.push(draw_row(
+                &sub_vitals,
+                &format!("{ACCENT_PINK}>{RESET}"),
                 width,
             ));
         }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "estado",
+            start_line: estado_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "contexto",
-        start_line: ctx_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
 
-    // 4. Proyecto Card (Árbol 2 niveles) (2)
-    let proj_start = lines.len();
-    let stats_badge = format!(
-        "{TEXT_DIM}{}d \u{00b7} {}f{RESET}",
-        snap.tree.total_dirs, snap.tree.total_files
-    );
-    let proj_title = format!(
-        "{ACCENT_PRIMARY}~{RESET} {BOLD}{GOLD}Proyecto{RESET} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{folder}{RESET} {stats_badge}"
-    );
-    lines.push(draw_top(&proj_title, collapsed[2], width));
-    if !collapsed[2] {
-        let open_line_idx = lines.len();
-        let normalized_path = snap.tree.root_path.replace('\\', "/");
-        let btn_label = format!("{GOLD}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
-        let btn_w = string_width(&btn_label);
-        let target_inner = width.saturating_sub(4);
-        let avail_right = target_inner.saturating_sub(btn_w + 1);
-
-        let disp_path = if string_width(&normalized_path) <= avail_right {
-            normalized_path
-        } else {
-            let short = format!(".../{folder}");
-            if string_width(&short) <= avail_right {
-                short
-            } else {
-                truncate_to_width(&short, avail_right)
-            }
-        };
-        lines.push(draw_row(
-            &btn_label,
-            &format!("{TEXT_PRIMARY}{disp_path}{RESET}"),
+    // 3. Contexto Card (1)
+    if !hidden_cards.contains("contexto") {
+        let ctx_start = lines.len();
+        lines.push(draw_top(
+            &format!("{BOLD}{GOLD}Contexto{RESET}"),
+            collapsed[1],
             width,
         ));
-        bounds.push(CardBounds {
-            id: "open_folder",
-            start_line: open_line_idx,
-            end_line: open_line_idx,
-            action_type: Some("open_folder"),
-            action_path: Some(snap.tree.root_path.clone()),
-        });
+        if !collapsed[1] {
+            let cur_tokens = snap.agent_session.active_turn_tokens;
+            let limit = snap.agent_session.context_limit.max(1);
+            let pct = (cur_tokens as f64 / limit as f64) * 100.0;
+            let (gauge_color, right_st) = if pct >= 80.0 {
+                (
+                    CORAL,
+                    format!("{CORAL}\u{25cf} Saturado {:.1}% [/snew]{RESET}", pct),
+                )
+            } else if pct >= 50.0 {
+                (
+                    AMBER,
+                    format!("{AMBER}\u{25cf} Maduro {:.1}% [/snew]{RESET}", pct),
+                )
+            } else {
+                (MINT, format!("{MINT}\u{25cf} Optimo {:.1}%{RESET}", pct))
+            };
+            let left_tok = format!(
+                "{BOLD}{gauge_color}{}{RESET} {TEXT_DIM}/{RESET} {TEXT_MUTED}{}{RESET}",
+                format_tokens(cur_tokens),
+                format_tokens(limit)
+            );
+            lines.push(draw_row(&left_tok, &right_st, width));
 
-        let max_items = 6;
-        let total_items = snap.tree.tree.len();
-        for item in snap.tree.tree.iter().take(max_items) {
-            if item.is_dir {
+            let inner_w = width.saturating_sub(4);
+            lines.push(draw_row(
+                &render_gauge_inline(pct.round().clamp(0.0, 100.0) as u8, inner_w, gauge_color),
+                "",
+                width,
+            ));
+
+            let in_t = snap.agent_session.tokens_input;
+            let out_t = snap.agent_session.tokens_output;
+            let left_io = format!(
+                "{TEXT_DIM}^{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_DIM}v{RESET} {TEXT_PRIMARY}{}{RESET}",
+                format_tokens(in_t),
+                format_tokens(out_t)
+            );
+            let right_cost = format!(
+                "{GOLD}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
+                snap.agent_session.cost
+            );
+            lines.push(draw_row(&left_io, &right_cost, width));
+
+            if pct >= 50.0 {
                 lines.push(draw_row(
                     &format!(
-                        "{CYAN}> /{RESET} {TEXT_PRIMARY}{}/{RESET} {TEXT_DIM}({}){RESET}",
-                        item.name,
-                        item.children.len()
+                        "{gauge_color}[aviso] Sesion madura: usa /snew para handover limpio{RESET}"
                     ),
                     "",
                     width,
                 ));
-                for sub in item.children.iter().take(2) {
-                    let sub_icon = if sub.is_dir {
-                        format!("{CYAN}\u{2514} /{RESET}")
-                    } else {
-                        format!("{TEXT_DIM}\u{2514} {RESET}")
-                    };
+            }
+        }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "contexto",
+            start_line: ctx_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
+
+    // 4. Proyecto Card (Árbol 2 niveles) (2)
+    if !hidden_cards.contains("proyecto") {
+        let proj_start = lines.len();
+        let stats_badge = format!(
+            "{TEXT_DIM}{}d \u{00b7} {}f{RESET}",
+            snap.tree.total_dirs, snap.tree.total_files
+        );
+        let proj_title = format!(
+            "{ACCENT_PRIMARY}~{RESET} {BOLD}{GOLD}Proyecto{RESET} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{folder}{RESET} {stats_badge}"
+        );
+        lines.push(draw_top(&proj_title, collapsed[2], width));
+        if !collapsed[2] {
+            let open_line_idx = lines.len();
+            let normalized_path = snap.tree.root_path.replace('\\', "/");
+            let btn_label = format!("{GOLD}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
+            let btn_w = string_width(&btn_label);
+            let target_inner = width.saturating_sub(4);
+            let avail_right = target_inner.saturating_sub(btn_w + 1);
+
+            let disp_path = if string_width(&normalized_path) <= avail_right {
+                normalized_path
+            } else {
+                let short = format!(".../{folder}");
+                if string_width(&short) <= avail_right {
+                    short
+                } else {
+                    truncate_to_width(&short, avail_right)
+                }
+            };
+            lines.push(draw_row(
+                &btn_label,
+                &format!("{TEXT_PRIMARY}{disp_path}{RESET}"),
+                width,
+            ));
+            bounds.push(CardBounds {
+                id: "open_folder",
+                start_line: open_line_idx,
+                end_line: open_line_idx,
+                action_type: Some("open_folder"),
+                action_path: Some(snap.tree.root_path.clone()),
+            });
+
+            let max_items = 6;
+            let total_items = snap.tree.tree.len();
+            for item in snap.tree.tree.iter().take(max_items) {
+                if item.is_dir {
                     lines.push(draw_row(
-                        &format!("   {sub_icon} {TEXT_MUTED}{}{RESET}", sub.name),
+                        &format!(
+                            "{CYAN}> /{RESET} {TEXT_PRIMARY}{}/{RESET} {TEXT_DIM}({}){RESET}",
+                            item.name,
+                            item.children.len()
+                        ),
+                        "",
+                        width,
+                    ));
+                    for sub in item.children.iter().take(2) {
+                        let sub_icon = if sub.is_dir {
+                            format!("{CYAN}\u{2514} /{RESET}")
+                        } else {
+                            format!("{TEXT_DIM}\u{2514} {RESET}")
+                        };
+                        lines.push(draw_row(
+                            &format!("   {sub_icon} {TEXT_MUTED}{}{RESET}", sub.name),
+                            "",
+                            width,
+                        ));
+                    }
+                } else {
+                    lines.push(draw_row(
+                        &format!("{TEXT_DIM}\u{2022} {RESET}{TEXT_MUTED}{}{RESET}", item.name),
                         "",
                         width,
                     ));
                 }
-            } else {
+            }
+            if total_items > max_items {
+                let remaining = total_items - max_items;
                 lines.push(draw_row(
-                    &format!("{TEXT_DIM}\u{2022} {RESET}{TEXT_MUTED}{}{RESET}", item.name),
+                    &format!("{TEXT_DIM}\u{2026} y {remaining} elementos m\u{00e1}s{RESET}"),
                     "",
                     width,
                 ));
             }
         }
-        if total_items > max_items {
-            let remaining = total_items - max_items;
-            lines.push(draw_row(
-                &format!("{TEXT_DIM}\u{2026} y {remaining} elementos m\u{00e1}s{RESET}"),
-                "",
-                width,
-            ));
-        }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "proyecto",
+            start_line: proj_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "proyecto",
-        start_line: proj_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
 
     // 5. Integraciones Card (3)
-    let int_start = lines.len();
-    let active_model = if !snap.agent_session.model.is_empty() {
-        snap.agent_session.model.as_str()
-    } else {
-        snap.agent_session.model_short.as_str()
-    };
-    let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
+    if !hidden_cards.contains("integraciones") {
+        let int_start = lines.len();
+        let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
     let critical_count = snap
         .accounts
         .iter()
@@ -592,11 +608,6 @@ pub fn render_screen_with_diff(
     }
 
     // Alertas de cuentas críticas activas + Flash notice dentro de Integraciones
-    let target_healthy = crate::cleanup::get_best_healthy_target_prefix_for_model(
-        &snap.accounts,
-        &snap.agent_session.all_active_prefixes,
-        active_model,
-    );
     let active_critical_accs: Vec<&crate::models::AccountQuota> = snap
         .accounts
         .iter()
@@ -628,17 +639,19 @@ pub fn render_screen_with_diff(
         }
     }
 
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "integraciones",
-        start_line: int_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "integraciones",
+            start_line: int_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
 
     // 6. Pool de Modelos / Cuotas Breakdown Card (4)
-    let pools_start = lines.len();
+    if !hidden_cards.contains("pools") {
+        let pools_start = lines.len();
     let default_prefix = snap
         .accounts
         .first()
@@ -693,27 +706,44 @@ pub fn render_screen_with_diff(
             }
         }
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "pools",
-        start_line: pools_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "pools",
+            start_line: pools_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
 
     // 7. Cambios / Git Card (5)
-    let git_start = lines.len();
-    let ag_changes = format!(
-        "{TEXT_DIM}\u{00b7} {} por agente{RESET}",
-        snap.agent_session.attributed_changes.files_count
-    );
+    if !hidden_cards.contains("git") {
+        let git_start = lines.len();
+    let ag_changes = if !snap.git.cross_session_conflicts.is_empty() {
+        format!(
+            "{BOLD}{CORAL}! {} colisi\u{00f3}n{RESET}",
+            snap.git.cross_session_conflicts.len()
+        )
+    } else {
+        format!(
+            "{TEXT_DIM}\u{00b7} {} por agente{RESET}",
+            snap.agent_session.attributed_changes.files_count
+        )
+    };
     lines.push(draw_top(
         &format!("{BOLD}{GOLD}Cambios{RESET} {ag_changes}"),
         collapsed[5],
         width,
     ));
     if !collapsed[5] {
+        if !snap.git.cross_session_conflicts.is_empty() {
+            let files_joined = snap.git.cross_session_conflicts.join(", ");
+            lines.push(draw_row(
+                &format!("{BOLD}{CORAL}! CONFLICTO: {files_joined}{RESET}"),
+                &format!("{CORAL}[colisi\u{00f3}n]{RESET}"),
+                width,
+            ));
+        }
         let ab_badge = match snap.git.ahead_behind {
             Some((a, b)) if a > 0 || b > 0 => {
                 let mut parts = Vec::new();
@@ -740,6 +770,12 @@ pub fn render_screen_with_diff(
         if let Some(latest_commit) = snap.git.recent_commits.first() {
             lines.push(draw_row(
                 &format!("{TEXT_DIM}* {latest_commit}{RESET}"),
+                "",
+                width,
+            ));
+        } else if let Some(ref head_sha) = snap.git.head_short {
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}* {head_sha} HEAD{RESET}"),
                 "",
                 width,
             ));
@@ -815,6 +851,19 @@ pub fn render_screen_with_diff(
                         };
                         lines.push(draw_row(&colored_dl, "", width));
                     }
+                    let peek_line_idx = lines.len();
+                    lines.push(draw_row(
+                        &format!("  {ACCENT_PRIMARY}>> [vista r\u{00e1}pida (Espacio)]{RESET}"),
+                        "",
+                        width,
+                    ));
+                    bounds.push(CardBounds {
+                        id: "open_quick_peek",
+                        start_line: peek_line_idx,
+                        end_line: peek_line_idx,
+                        action_type: Some("open_quick_peek"),
+                        action_path: Some(f.path.clone()),
+                    });
                 }
             }
             if snap.git.files.len() > max_files {
@@ -829,17 +878,19 @@ pub fn render_screen_with_diff(
             }
         }
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "git",
-        start_line: git_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "git",
+            start_line: git_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
 
     // 8. Engram Card (6)
-    let engram_start = lines.len();
+    if !hidden_cards.contains("engram") {
+        let engram_start = lines.len();
     lines.push(draw_top(
         &format!("{ACCENT_PRIMARY}Engram:{RESET} {CYAN}{folder}{RESET} {TEXT_DIM}^{RESET}"),
         collapsed[6],
@@ -898,17 +949,19 @@ pub fn render_screen_with_diff(
             }
         }
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "engram",
-        start_line: engram_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "engram",
+            start_line: engram_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
 
     // 8. Stack · Ecosistema Card (idx 9)
-    let eco_start = lines.len();
+    if !hidden_cards.contains("ecosystem") {
+        let eco_start = lines.len();
     let eco_title = format!("{BOLD}{GOLD}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}Ecosistema{RESET}");
     lines.push(draw_top(&eco_title, collapsed[9], width));
     if !collapsed[9] {
@@ -929,76 +982,137 @@ pub fn render_screen_with_diff(
             }
         }
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "ecosystem",
-        start_line: eco_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
-
-    // 9. Herramientas Card (7)
-    let tools_start = lines.len();
-    let tool_title = format!(
-        "{BOLD}{GOLD}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
-        snap.agent_session.tool_total
-    );
-    lines.push(draw_top(&tool_title, collapsed[7], width));
-    if !collapsed[7] {
-        let p_read = format!("{MAGENTA}@ {} lecturas{RESET}", snap.agent_session.tool_reads);
-        let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
-        let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
-        lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "ecosystem",
+            start_line: eco_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "tools",
-        start_line: tools_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
 
-    // 10. MCP Card (8)
-    let mcp_start = lines.len();
-    lines.push(draw_top(
-        &format!(
-            "{BOLD}{GOLD}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
-            snap.mcps.len()
-        ),
-        collapsed[8],
-        width,
-    ));
-    if !collapsed[8] {
-        for m in &snap.mcps {
-            let dot = if m.enabled {
-                format!("{MINT}\u{25cf}{RESET}")
-            } else {
-                format!("{AMBER}\u{25cb}{RESET}")
-            };
-            let badge = format!("{TEXT_DIM}[{}]{RESET}", m.mcp_type);
-            let left = format!("{dot} {BOLD}{TEXT_PRIMARY}{}{RESET} {badge}", m.name);
-            let right = if m.enabled {
-                format!("{MINT}en línea{RESET}")
-            } else {
-                format!("{TEXT_MUTED}desactivado{RESET}")
-            };
-            lines.push(draw_row(&left, &right, width));
+    // 9. Herramientas Card (7) y 10. MCP Card (8)
+    if !hidden_cards.contains("mcp") {
+        let tools_start = lines.len();
+        let tool_title = format!(
+            "{BOLD}{GOLD}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
+            snap.agent_session.tool_total
+        );
+        lines.push(draw_top(&tool_title, collapsed[7], width));
+        if !collapsed[7] {
+            let p_read = format!("{MAGENTA}@ {} lecturas{RESET}", snap.agent_session.tool_reads);
+            let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
+            let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
+            lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
         }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "tools",
+            start_line: tools_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+
+        // 10. MCP Card (8)
+        let mcp_start = lines.len();
+        lines.push(draw_top(
+            &format!(
+                "{BOLD}{GOLD}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
+                snap.mcps.len()
+            ),
+            collapsed[8],
+            width,
+        ));
+        if !collapsed[8] {
+            for m in &snap.mcps {
+                let dot = if m.enabled {
+                    format!("{MINT}\u{25cf}{RESET}")
+                } else {
+                    format!("{AMBER}\u{25cb}{RESET}")
+                };
+                let badge = format!("{TEXT_DIM}[{}]{RESET}", m.mcp_type);
+                let left = format!("{dot} {BOLD}{TEXT_PRIMARY}{}{RESET} {badge}", m.name);
+                let right = if m.enabled {
+                    format!("{MINT}en línea{RESET}")
+                } else {
+                    format!("{TEXT_MUTED}desactivado{RESET}")
+                };
+                lines.push(draw_row(&left, &right, width));
+            }
+        }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "mcp",
+            start_line: mcp_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
+
+    // 11. Tarjetas Card (10) — Selector interactivo de visibilidad
+    let tarjetas_start = lines.len();
+    let tarjetas_title = format!("{BOLD}{GOLD}Tarjetas{RESET}");
+    lines.push(draw_top(&tarjetas_title, collapsed[10], width));
+    if !collapsed[10] {
+        let cards_info: [(&str, &str); 9] = [
+            ("estado", "Estado"),
+            ("contexto", "Contexto"),
+            ("proyecto", "Proyecto"),
+            ("integraciones", "Integraciones"),
+            ("pools", "Cuota de Modelos"),
+            ("git", "Cambios (Git)"),
+            ("engram", "Engram"),
+            ("ecosystem", "Stack \u{00b7} Ecosistema"),
+            ("mcp", "Herramientas & MCP"),
+        ];
+
+        for (id, label) in cards_info {
+            let is_hidden = hidden_cards.contains(id);
+            let row_line_idx = lines.len();
+            let (left_box, right_status) = if is_hidden {
+                (
+                    format!("{TEXT_DIM}[ ]{RESET} {TEXT_MUTED}{label}{RESET}"),
+                    format!("{TEXT_DIM}oculta{RESET}"),
+                )
+            } else {
+                (
+                    format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
+                    format!("{MINT}visible{RESET}"),
+                )
+            };
+            lines.push(draw_row(&left_box, &right_status, width));
+            bounds.push(CardBounds {
+                id: "toggle_card_visibility",
+                start_line: row_line_idx,
+                end_line: row_line_idx,
+                action_type: Some("toggle_card_visibility"),
+                action_path: Some(id.to_string()),
+            });
+        }
+
+        // Fila fija para la card de Tarjetas misma (no puede ocultarse)
+        let fija_left = format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}\u{2699} Tarjetas{RESET}");
+        let fija_right = format!("{TEXT_DIM}fija{RESET}");
+        lines.push(draw_row(&fija_left, &fija_right, width));
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "mcp",
-        start_line: mcp_start,
+        id: "tarjetas",
+        start_line: tarjetas_start,
         end_line: lines.len() - 1,
         action_type: None,
         action_path: None,
     });
 
     // Footer de atajos
-    lines.push(format!(
-        "{TEXT_DIM} 1-9: colap \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
+    lines.push(truncate_to_width(
+        &format!(
+            "{TEXT_DIM} 0-9: colap \u{00b7} t: tarjetas \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
+        ),
+        width,
     ));
     let has_active_critical = snap.accounts.iter().any(|a| {
         let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
@@ -1013,11 +1127,131 @@ pub fn render_screen_with_diff(
     } else {
         String::new()
     };
-    lines.push(format!(
-        "{TEXT_DIM} s: sync \u{00b7} r: act \u{00b7} {critical_action}q: salir{RESET}"
+    lines.push(truncate_to_width(
+        &format!("{TEXT_DIM} s: sync \u{00b7} r: act \u{00b7} {critical_action}q: salir{RESET}"),
+        width,
     ));
 
     RenderOutput { lines, bounds }
+}
+
+/// Renderiza el modal flotante Quick Peek usando las primitivas ANSI/Unicode seguras de `hudr2`.
+pub fn render_quick_peek_modal(
+    peek: &crate::state::QuickPeekState,
+    width: usize,
+    max_content_rows: usize,
+) -> RenderOutput {
+    let mut lines = Vec::new();
+    let mut bounds = Vec::new();
+
+    let title = format!(
+        "{BOLD}{ACCENT_PRIMARY}Quick Peek{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}{}{RESET}",
+        peek.title
+    );
+    let top_idx = lines.len();
+    lines.push(draw_top(&title, false, width));
+    bounds.push(CardBounds {
+        id: "close_quick_peek",
+        start_line: top_idx,
+        end_line: top_idx,
+        action_type: Some("close_quick_peek"),
+        action_path: None,
+    });
+
+    let close_row_idx = lines.len();
+    lines.push(draw_row(
+        &format!("{ACCENT_PINK}>> [cerrar vista r\u{00e1}pida (Esc)]{RESET}"),
+        &format!("{TEXT_DIM}\u{2191}/\u{2193} scroll{RESET}"),
+        width,
+    ));
+    bounds.push(CardBounds {
+        id: "close_quick_peek",
+        start_line: close_row_idx,
+        end_line: close_row_idx,
+        action_type: Some("close_quick_peek"),
+        action_path: None,
+    });
+    lines.push(draw_divider(width));
+
+    let rows = max_content_rows.clamp(4, 24);
+    let total = peek.lines.len();
+    let start = peek.scroll.min(total.saturating_sub(1));
+    for (idx, dl) in peek.lines.iter().skip(start).take(rows).enumerate() {
+        let line_no = start + idx + 1;
+        let colored_dl = if dl.starts_with('[') {
+            format!("{AMBER}{dl}{RESET}")
+        } else if dl.starts_with("@@") {
+            format!("{CYAN}{dl}{RESET}")
+        } else if dl.starts_with('+') {
+            format!("{MINT}{dl}{RESET}")
+        } else if dl.starts_with('-') {
+            format!("{CORAL}{dl}{RESET}")
+        } else {
+            format!("{TEXT_PRIMARY}{dl}{RESET}")
+        };
+        let numbered = format!("{TEXT_DIM}{line_no:>3} \u{2502}{RESET} {colored_dl}");
+        lines.push(draw_row(&numbered, "", width));
+    }
+
+    lines.push(draw_divider(width));
+    let end_line_no = (start + rows).min(total);
+    let status_left = if total == 0 {
+        format!("{TEXT_DIM}Sin contenido{RESET}")
+    } else {
+        format!(
+            "{TEXT_DIM}L\u{00ed}neas {}-{} de {}{RESET}",
+            start + 1,
+            end_line_no,
+            total
+        )
+    };
+    lines.push(draw_row(
+        &status_left,
+        &format!("{CYAN}[Espacio/Esc]{RESET}"),
+        width,
+    ));
+    lines.push(draw_bottom(width));
+
+    RenderOutput { lines, bounds }
+}
+
+/// Superpone el modal flotante Quick Peek centrado sobre el viewport activo sin deformar las tarjetas de fondo.
+pub fn apply_quick_peek_overlay(
+    base: &mut RenderOutput,
+    peek: &crate::state::QuickPeekState,
+    scroll_offset: usize,
+    width: usize,
+    viewport_rows: usize,
+) {
+    let content_rows = viewport_rows.saturating_sub(8).clamp(4, 18);
+    let modal = render_quick_peek_modal(peek, width, content_rows);
+    let modal_h = modal.lines.len();
+
+    let needed_total = scroll_offset + viewport_rows.max(modal_h + 2);
+    while base.lines.len() < needed_total {
+        base.lines.push(" ".repeat(width));
+    }
+
+    let top_pad = viewport_rows.saturating_sub(modal_h) / 2;
+    let insert_start = scroll_offset + top_pad;
+
+    for (i, m_line) in modal.lines.into_iter().enumerate() {
+        if insert_start + i < base.lines.len() {
+            base.lines[insert_start + i] = m_line;
+        } else {
+            base.lines.push(m_line);
+        }
+    }
+
+    base.bounds = modal
+        .bounds
+        .into_iter()
+        .map(|mut b| {
+            b.start_line += insert_start;
+            b.end_line += insert_start;
+            b
+        })
+        .collect();
 }
 
 #[cfg(test)]

@@ -11,8 +11,10 @@
 | `4` | `5` | `pools` | `Cuota de Modelos` | Expanded |
 | `5` | `6` | `git` | `Cambios` | Expanded |
 | `6` | `7` | `engram` | `Engram` | Expanded |
-| `7` | `8` | `ecosystem` | `Stack · Ecosistema` | Expanded |
-| `8` | `9` | `tools` / `mcp` | `Herramientas` & `MCP` | Expanded |
+| `7` | `8` | `tools` | `Herramientas` | Expanded |
+| `8` | `9` | `mcp` | `MCP` | Expanded |
+| `9` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
+| `10` | `0` / `t` | `tarjetas` | `Tarjetas` | **Collapsed** |
 
 ---
 
@@ -53,13 +55,14 @@
 - **Traffic-light colors per pool:** `CORAL` (`<= 15%`), `AMBER` (`<= 50%`), `MINT` (`> 50%`).
 
 ## 5. `Cambios` (`id: "git"`, index `5`)
-- **Header:** `Cambios · <N> por agente`.
+- **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).
 - **Rows:**
+  - Optional conflict radar alert (`! CONFLICTO: <files>` + `[colisión]` in `CORAL`) when two or more active sessions/worktrees modify the same tracked file concurrently.
   - `<branch>` (+ optional `▲ahead▼behind`) and `ok limpio` / `modificado`.
-  - Latest commit `* <hash> <subject>`.
+  - Latest commit `* <hash> <subject>` (with zero-subprocess fallback to `* <head_short> HEAD` read from `.git/HEAD` / `refs/` / `packed-refs`).
   - `git: +<added> -<deleted>` (or `limpio` / `<N> pend`) and `ag: <N> archivos (+)`.
   - Up to 6 clickable file rows (`action_type: Some("git_file_diff")`): `> [M|A|D|?] <path>` with `+<added> -<deleted>`.
-  - Clicking a file toggles an inline diff preview underneath (guarded by `is_sensitive_file`).
+  - Clicking a file toggles an inline diff preview underneath (guarded by `is_sensitive_file`) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) that opens the centered floating **Quick Peek** modal (`Space` / `p` to toggle, `↑`/`↓` or wheel to scroll, `Esc` or click header to close).
 
 ## 6. `Engram` (`id: "engram"`, index `6`)
 - **Header:** `Engram: <project> ^` (`^` green if daemon `:7437` is online, `v` dim if offline).
@@ -76,3 +79,12 @@
 - Both cards share collapse slot `collapsed[8]` (key `9`).
 - **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
 - **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
+
+## 10. `Tarjetas` (`id: "tarjetas"`, index `10`, key `0` / `t`)
+- **Header:** `Tarjetas` (collapsed by default).
+- **Rows:**
+  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Stack · Ecosistema`, `Herramientas & MCP`).
+  - `[✓] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`).
+  - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
+  - Fixed row: `[✓] ⚙ Tarjetas` (`fija`), ensuring the user can never hide the settings card or lock themselves out.
+  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...]}`).

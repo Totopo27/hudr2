@@ -50,7 +50,13 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     let engram_fut = tokio::task::spawn_blocking(move || read_engram_telemetry(&dir_clone));
 
     let dir_clone = project_dir.clone();
-    let git_fut = tokio::task::spawn_blocking(move || read_git_telemetry(&dir_clone));
+    let panes_for_git = panes.clone();
+    let git_fut = tokio::task::spawn_blocking(move || {
+        let mut g = read_git_telemetry(&dir_clone);
+        g.cross_session_conflicts =
+            crate::git::collect_cross_session_conflicts(&dir_clone, &g.files, &panes_for_git);
+        g
+    });
 
     let tree_fut = if is_tree_collapsed {
         None

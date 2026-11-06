@@ -133,6 +133,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             state.flash_notice.as_deref(),
             state.selected_diff_file.as_deref(),
             &state.selected_diff_lines,
+            &state.hidden_cards,
             48,
         );
         for line in render_out.lines {
@@ -369,7 +370,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let width = (cols as usize).clamp(36, 50);
             let max_visible = (rows as usize).max(10);
 
-            let render_out = {
+            let mut render_out = {
                 let state = app_state.read().await;
                 ui::render_screen_with_diff(
                     &state.snapshot,
@@ -377,22 +378,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     state.flash_notice.as_deref(),
                     state.selected_diff_file.as_deref(),
                     &state.selected_diff_lines,
+                    &state.hidden_cards,
                     width,
                 )
             };
-            let total_lines = render_out.lines.len();
+            let base_total_lines = render_out.lines.len();
 
             let actual_rendered_offset = {
                 let mut state = app_state.write().await;
-                state.card_bounds = render_out.bounds;
-                let max_scroll = total_lines.saturating_sub(max_visible);
+                let max_scroll = base_total_lines.saturating_sub(max_visible);
                 if state.scroll_offset > max_scroll {
                     state.scroll_offset = max_scroll;
                 }
+                let offset = state.scroll_offset;
+                if let Some(ref peek) = state.quick_peek {
+                    ui::apply_quick_peek_overlay(&mut render_out, peek, offset, width, max_visible);
+                }
+                state.card_bounds = render_out.bounds;
                 state.needs_redraw = false;
-                state.scroll_offset
+                offset
             };
             last_rendered_offset = actual_rendered_offset;
+            let total_lines = render_out.lines.len();
 
             let visible = &render_out.lines
                 [actual_rendered_offset..total_lines.min(actual_rendered_offset + max_visible)];
@@ -492,7 +499,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         });
                                     }
                                     state::ClickAction::ToggledCard(_)
-                                    | state::ClickAction::ToggleGitFileDiff(_) => {}
+                                    | state::ClickAction::ToggleGitFileDiff(_)
+                                    | state::ClickAction::OpenQuickPeek(_)
+                                    | state::ClickAction::CloseQuickPeek
+                                    | state::ClickAction::ToggleCardVisibility(_) => {}
                                 }
                             }
                         }
@@ -524,7 +534,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 KeyCode::Char('7') => state.toggle_card(6), // Engram
                                 KeyCode::Char('8') => state.toggle_card(7), // Herramientas
                                 KeyCode::Char('9') => state.toggle_card(8), // MCP
-                                KeyCode::Char('0') | KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
+                                KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
+                                KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Tarjetas
                                 KeyCode::Char('s') => {
                                     let state_ref = app_state.clone();
                                     let tx_done = tx.clone();
@@ -575,6 +586,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         let _ = tx_done
                                             .send(MainMsg::DataChanged { git_touched: false });
                                     });
+                                }
+                                KeyCode::Esc => state.close_quick_peek(),
+                                KeyCode::Char(' ') | KeyCode::Char('p') => {
+                                    state.toggle_quick_peek()
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
                                 KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),

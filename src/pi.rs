@@ -366,8 +366,128 @@ pub fn is_new_sibling_session_file(event: &notify::Event, current_session: &Path
         })
 }
 
+/// Sincroniza en caliente los `metadata_tokens` emitidos por `telar-agent-state.ts` (vía IPC de Herdr/TelarDev)
+/// sobre la sesión activa, permitiendo telemetría en memoria con 0 lecturas de disco cuando el agente los publica.
+pub fn apply_pane_metadata_tokens(
+    session: &mut AgentSession,
+    tokens: &HashMap<String, String>,
+    accounts_list: &[AccountQuota],
+) {
+    if tokens.is_empty() {
+        return;
+    }
+
+    if let Some(profile) = tokens
+        .get("profile")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let clean = clean_model_name(profile);
+        session.model_short = clean.rsplit('/').next().unwrap_or(&clean).to_string();
+        session.model = clean;
+    }
+
+    if let Some(win_str) = tokens.get("ctx_win")
+        && let Ok(win) = win_str.parse::<i64>()
+        && win > 0
+    {
+        session.context_limit = win;
+    } else if !session.model.is_empty()
+        && session.model != "sin-modelo"
+        && session.context_limit <= 0
+    {
+        session.context_limit = resolve_model_context_limit(&session.model);
+    }
+
+    if let Some(tok_str) = tokens.get("ctx_tok")
+        && let Ok(tok) = tok_str.parse::<i64>()
+        && tok >= 0
+    {
+        session.active_turn_tokens = tok;
+    } else if let Some(pct_str) = tokens.get("ctx_pct")
+        && let Ok(pct) = pct_str.parse::<f64>()
+        && session.context_limit > 0
+        && session.active_turn_tokens == 0
+    {
+        session.active_turn_tokens = ((pct / 100.0) * session.context_limit as f64).round() as i64;
+    }
+
+    if let Some(tin_str) = tokens.get("tok_in")
+        && let Ok(tin) = tin_str.parse::<i64>()
+    {
+        session.tokens_input = tin;
+    }
+    if let Some(tout_str) = tokens.get("tok_out")
+        && let Ok(tout) = tout_str.parse::<i64>()
+    {
+        session.tokens_output = tout;
+    }
+    if let Some(cost_str) = tokens.get("cost")
+        && let Ok(cost) = cost_str.parse::<f64>()
+    {
+        session.cost = cost;
+    }
+    if let Some(files_str) = tokens.get("git_files")
+        && let Ok(fc) = files_str.parse::<usize>()
+    {
+        session.attributed_changes.files_count = session.attributed_changes.files_count.max(fc);
+    }
+    if let Some(lines_str) = tokens.get("git_lines")
+        && let Ok(la) = lines_str.parse::<usize>()
+    {
+        session.attributed_changes.additions = session.attributed_changes.additions.max(la);
+    }
+
+    // Parsear TODOs publicados como "todo_1" => "done:Título" | "prog:Título" | "open:Título"
+    let mut indexed_todos: Vec<(usize, SessionTodo)> = Vec::new();
+    for (k, v) in tokens {
+        if let Some(idx_str) = k.strip_prefix("todo_")
+            && let Some((prefix, raw_title)) = v.split_once(':')
+        {
+            let title = raw_title.trim();
+            if title.is_empty() {
+                continue;
+            }
+            let status = match prefix.trim() {
+                "done" => "done",
+                "prog" | "in_progress" => "in_progress",
+                _ => "pending",
+            };
+            let idx = idx_str.parse::<usize>().unwrap_or(usize::MAX);
+            indexed_todos.push((
+                idx,
+                SessionTodo {
+                    title: title.to_string(),
+                    status: status.to_string(),
+                },
+            ));
+        }
+    }
+    if !indexed_todos.is_empty() {
+        indexed_todos.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.title.cmp(&b.1.title)));
+        session.todos = indexed_todos.into_iter().map(|(_, t)| t).collect();
+    }
+
+    // Atribución de prefijos de cuenta (Cliproxy/CPAMC) si el modelo provino de profile
+    if !session.model.is_empty() && session.model != "sin-modelo" {
+        let mut known_prefixes: Vec<String> = accounts_list
+            .iter()
+            .map(|a| a.prefix.to_lowercase())
+            .collect();
+        known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
+
+        if let Some(pfx) = extract_prefix(&session.agent, &session.model, &known_prefixes) {
+            session.local_prefix = Some(pfx.clone());
+            session.all_active_prefixes.insert(pfx);
+        }
+        for pp in resolve_pool_account_prefixes(&session.model, &known_prefixes) {
+            session.all_active_prefixes.insert(pp);
+        }
+    }
+}
+
 /// Intenta resolver una sesión activa de Pi / Gentle Shell a partir de los panes de Herdr
-/// o de la variable de entorno `PI_SESSION_PATH`.
+/// (incluyendo telemetría en vivo vía `metadata_tokens`) o de la variable de entorno `PI_SESSION_PATH`.
 pub fn try_read_pi_session(
     target_dir: &str,
     herdr_panes: &[HerdrPane],
@@ -395,7 +515,7 @@ pub fn try_read_pi_session(
             p.agent.as_deref(),
             Some("pi") | Some("gentle-shell") | Some("gs2")
         );
-        has_jsonl || is_pi_agent
+        has_jsonl || is_pi_agent || !p.tokens.is_empty()
     };
 
     let sibling = my_tab_id.and_then(|tid| {
@@ -423,9 +543,35 @@ pub fn try_read_pi_session(
             // Si hay un archivo hermano más reciente en el mismo directorio (ej. tras `/new` en Pi),
             // usar el más reciente.
             let newest = newest_jsonl_in_same_dir(&path).unwrap_or(path);
-            let ses = read_pi_session_file(&newest, accounts_list, status)?;
+            let mut ses = read_pi_session_file(&newest, accounts_list, status)?;
+            apply_pane_metadata_tokens(&mut ses, &target_pane.tokens, accounts_list);
             return Some((newest, ses));
         }
+    }
+
+    // 2. Si aún no existe archivo .jsonl en disco pero el pane emite `metadata_tokens` en memoria (TelarDev IPC):
+    if !target_pane.tokens.is_empty() {
+        let agent_name = target_pane.agent.as_deref().unwrap_or("pi");
+        let mut ses = AgentSession {
+            provider_name: agent_name.to_string(),
+            agent: agent_name.to_string(),
+            model: "sin-modelo".to_string(),
+            model_short: "sin-modelo".to_string(),
+            context_limit: 200_000,
+            agent_status: if status.is_empty() || status == "unknown" {
+                "idle".to_string()
+            } else {
+                status.to_string()
+            },
+            ..Default::default()
+        };
+        apply_pane_metadata_tokens(&mut ses, &target_pane.tokens, accounts_list);
+        let fallback_path = target_pane
+            .agent_session_id
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("memory://telar-metadata-tokens"));
+        return Some((fallback_path, ses));
     }
 
     None

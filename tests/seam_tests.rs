@@ -38,6 +38,7 @@ mod tests {
             agent_status: Some("working".to_string()),
             agent: Some("opencode".to_string()),
             agent_session_id: Some("ses_123".to_string()),
+            ..Default::default()
         };
         assert_eq!(pane.pane_id, "w1:p1");
         assert!(pane.focused);
@@ -734,6 +735,7 @@ mod tests {
             agent_status: Some("working".to_string()),
             agent: Some("opencode".to_string()),
             agent_session_id: None,
+            ..Default::default()
         };
 
         // Debe resolver ses_active y NO ses_archived
@@ -873,6 +875,7 @@ mod tests {
             agent_status: Some("idle".to_string()),
             agent: Some("opencode".to_string()),
             agent_session_id: Some("ses_cwd".to_string()),
+            ..Default::default()
         };
 
         let pane_focused = HerdrPane {
@@ -886,6 +889,7 @@ mod tests {
             agent_status: Some("idle".to_string()),
             agent: Some("opencode".to_string()),
             agent_session_id: Some("ses_focused".to_string()),
+            ..Default::default()
         };
 
         let pane_working = HerdrPane {
@@ -899,6 +903,7 @@ mod tests {
             agent_status: Some("working".to_string()),
             agent: Some("opencode".to_string()),
             agent_session_id: Some("ses_working".to_string()),
+            ..Default::default()
         };
 
         // 1. focused_pane debe tener prioridad sobre generic current_cwd_pane
@@ -1772,6 +1777,7 @@ mod tests {
             None,
             state.selected_diff_file.as_deref(),
             &state.selected_diff_lines,
+            &state.hidden_cards,
             48,
         );
         state.card_bounds = render_out.bounds;
@@ -1800,6 +1806,7 @@ mod tests {
             None,
             state.selected_diff_file.as_deref(),
             &state.selected_diff_lines,
+            &state.hidden_cards,
             48,
         );
         let screen_clean = ui::strip_ansi(&render_out2.lines.join("\n"));
@@ -2031,5 +2038,353 @@ mod tests {
         assert!(screen_clean.contains("[AGOTÁNDOSE]"));
         assert!(screen_clean.contains("DeepSeek Wk"));
         assert!(screen_clean.contains("DeepSeek 5h"));
+    }
+
+    #[test]
+    fn test_read_git_head_short_zero_subprocess_and_packed_refs() {
+        use hudr2::git::{read_git_head_short, read_git_head_short_for_dir};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let git_dir = tmp.path().join(".git");
+        let heads_dir = git_dir.join("refs").join("heads");
+        std::fs::create_dir_all(&heads_dir).unwrap();
+
+        // 1. Referencia suelta en .git/refs/heads/main
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(
+            heads_dir.join("main"),
+            "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_git_head_short(&git_dir).as_deref(),
+            Some("a1b2c3d")
+        );
+        assert_eq!(
+            read_git_head_short_for_dir(tmp.path().to_str().unwrap()).as_deref(),
+            Some("a1b2c3d")
+        );
+
+        // 2. Fallback a packed-refs cuando la rama no tiene archivo suelto
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/telar\n").unwrap();
+        std::fs::write(
+            git_dir.join("packed-refs"),
+            "# pack-refs with: peeled fully-peeled sorted\n9f8e7d6c5b4a39281726354433221100aabbccdd refs/heads/feature/telar\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_git_head_short(&git_dir).as_deref(),
+            Some("9f8e7d6")
+        );
+
+        // 3. Detached HEAD directo (40 hex chars)
+        std::fs::write(
+            git_dir.join("HEAD"),
+            "deadbeefcafebabe1234567890abcdef12345678\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_git_head_short(&git_dir).as_deref(),
+            Some("deadbee")
+        );
+
+        // 4. Worktree con archivo .git apuntando a gitdir + commondir
+        let wt_git_dir = git_dir.join("worktrees").join("wt1");
+        std::fs::create_dir_all(&wt_git_dir).unwrap();
+        std::fs::write(wt_git_dir.join("HEAD"), "ref: refs/heads/feature/telar\n").unwrap();
+        std::fs::write(wt_git_dir.join("commondir"), "../..\n").unwrap();
+
+        let wt_root = tmp.path().join("wt1_workspace");
+        std::fs::create_dir_all(&wt_root).unwrap();
+        std::fs::write(
+            wt_root.join(".git"),
+            format!("gitdir: {}\n", wt_git_dir.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_git_head_short_for_dir(wt_root.to_str().unwrap()).as_deref(),
+            Some("9f8e7d6")
+        );
+    }
+
+    #[test]
+    fn test_cross_session_conflicts_radar_and_ui_alert() {
+        use hudr2::git::detect_cross_session_conflicts;
+
+        // 1. Detección entre dos sesiones con rutas normalizadas
+        let s1 = vec!["./src\\ui.rs".to_string(), "src/main.rs".to_string()];
+        let s2 = vec!["src/ui.rs".to_string(), "Cargo.toml".to_string()];
+        let s3 = vec!["README.md".to_string()];
+
+        let conflicts = detect_cross_session_conflicts(&[s1.clone(), s2]);
+        assert_eq!(conflicts, vec!["src/ui.rs".to_string()]);
+
+        let no_conflicts = detect_cross_session_conflicts(&[s1, s3]);
+        assert!(no_conflicts.is_empty());
+
+        // 2. Renderizado en la tarjeta Cambios (Git) respetando anchos estrechos y estándar
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        state.snapshot.git.branch = "main".to_string();
+        state.snapshot.git.cross_session_conflicts =
+            vec!["src/ui.rs".to_string(), "src/git.rs".to_string()];
+
+        for w in [36usize, 48usize] {
+            let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, w);
+            for line in &render_out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let clean = ui::strip_ansi(&render_out.lines.join("\n"));
+            assert!(clean.contains("! 2 colisión") || clean.contains("! CONFLICTO:"));
+            assert!(clean.contains("src/ui.rs"));
+        }
+    }
+
+    #[test]
+    fn test_herdr_metadata_tokens_parsing_and_pi_live_telemetry() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use hudr2::herdr::HerdrClient;
+        use hudr2::models::AccountQuota;
+        use hudr2::pi::try_read_pi_session;
+        use serde_json::json;
+
+        let pane_json = json!({
+            "pane_id": "w1:p9",
+            "tab_id": "w1:t1",
+            "workspace_id": "w1",
+            "cwd": "D:/telar_proj",
+            "focused": true,
+            "agent_status": "working",
+            "agent": "pi",
+            "tokens": {
+                "profile": "cliproxy/agy2_1/claude-sonnet-4-5",
+                "ctx_tok": "64000",
+                "ctx_win": "200000",
+                "tok_in": "52000",
+                "tok_out": "12000",
+                "cost": "0.185",
+                "git_files": "4",
+                "git_lines": "120",
+                "todo_2": "prog:Integrar metadata_tokens",
+                "todo_1": "done:Analizar TelarDev"
+            }
+        });
+
+        let pane = HerdrClient::parse_pane_json(&pane_json).expect("debe parsear pane con tokens");
+        assert_eq!(
+            pane.tokens.get("ctx_tok").map(String::as_str),
+            Some("64000")
+        );
+
+        let accounts = vec![AccountQuota {
+            prefix: "agy2_1".to_string(),
+            ..Default::default()
+        }];
+
+        let (_, ses) = try_read_pi_session(
+            "D:/telar_proj",
+            &[pane],
+            &accounts,
+            Some("w1:hud"),
+            Some("w1:t1"),
+        )
+        .expect("debe construir sesión viva desde metadata_tokens sin requerir .jsonl en disco");
+
+        assert_eq!(ses.model_short, "claude-sonnet-4-5");
+        assert_eq!(ses.local_prefix.as_deref(), Some("agy2_1"));
+        assert_eq!(ses.active_turn_tokens, 64_000);
+        assert_eq!(ses.context_limit, 200_000);
+        assert_eq!(ses.tokens_input, 52_000);
+        assert_eq!(ses.tokens_output, 12_000);
+        assert!((ses.cost - 0.185).abs() < 1e-6);
+        assert_eq!(ses.attributed_changes.files_count, 4);
+        assert_eq!(ses.attributed_changes.additions, 120);
+        assert_eq!(ses.todos.len(), 2);
+        assert_eq!(ses.todos[0].title, "Analizar TelarDev");
+        assert_eq!(ses.todos[0].status, "done");
+        assert_eq!(ses.todos[1].title, "Integrar metadata_tokens");
+        assert_eq!(ses.todos[1].status, "in_progress");
+    }
+
+    #[test]
+    fn test_quick_peek_modal_lifecycle_scroll_and_sensitive_guard() {
+        let mut state = AppState::new();
+
+        // 1. Archivo sensible siempre queda bloqueado en Quick Peek
+        state.open_quick_peek(".env.production");
+        let peek_sec = state.quick_peek.as_ref().expect("quick_peek debe abrirse");
+        assert_eq!(
+            peek_sec.lines,
+            vec!["[archivo sensible protegido - diff oculto]"]
+        );
+        state.close_quick_peek();
+        assert!(state.quick_peek.is_none());
+
+        // 2. Quick Peek con múltiples líneas, scroll y cierre por clic en el modal
+        state.quick_peek = Some(hudr2::state::QuickPeekState {
+            title: "src/git.rs".to_string(),
+            file_path: "src/git.rs".to_string(),
+            lines: (1..=20).map(|i| format!("+línea de prueba {i}")).collect(),
+            scroll: 0,
+        });
+
+        state.scroll_down();
+        assert_eq!(state.quick_peek.as_ref().unwrap().scroll, 2);
+        state.scroll_up();
+        assert_eq!(state.quick_peek.as_ref().unwrap().scroll, 0);
+
+        let mut render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        ui::apply_quick_peek_overlay(
+            &mut render_out,
+            state.quick_peek.as_ref().unwrap(),
+            0,
+            48,
+            24,
+        );
+        state.card_bounds = render_out.bounds.clone();
+
+        let clean = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(clean.contains("Quick Peek"));
+        assert!(clean.contains("src/git.rs"));
+        assert!(clean.contains("+línea de prueba 1"));
+
+        let close_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.action_type == Some("close_quick_peek"))
+            .expect("debe existir bound para cerrar Quick Peek");
+        let click_res = state.handle_mouse_click(close_bound.start_line, 0);
+        assert_eq!(click_res, Some(ClickAction::CloseQuickPeek));
+        assert!(state.quick_peek.is_none());
+    }
+
+    #[test]
+    fn test_tarjetas_card_renders_and_toggles_visibility() {
+        let mut state = AppState::new();
+        // Expandir card de Tarjetas (idx 10)
+        state.collapsed_cards[10] = false;
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let clean = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // Comprobar que aparecen los items con sus casillas activas y fija
+        assert!(clean.contains("Tarjetas"), "debe mostrar el título Tarjetas");
+        assert!(clean.contains("[✓] Estado"));
+        assert!(clean.contains("[✓] Contexto"));
+        assert!(clean.contains("[✓] Proyecto"));
+        assert!(clean.contains("[✓] ⚙ Tarjetas"));
+        assert!(clean.contains("fija"));
+
+        // Ocultar card "proyecto"
+        state.toggle_card_visibility("proyecto");
+        assert!(state.is_card_hidden("proyecto"));
+
+        let render_out_hidden = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let clean_hidden = ui::strip_ansi(&render_out_hidden.lines.join("\n"));
+
+        // La tarjeta Proyecto NO debe renderizarse en absoluto
+        assert!(!clean_hidden.contains("~ Proyecto ·"));
+        // Pero en la card Tarjetas debe figurar como [ ] Proyecto oculta
+        assert!(clean_hidden.contains("[ ] Proyecto"));
+        assert!(clean_hidden.contains("oculta"));
+
+        // Reactivar "proyecto"
+        state.toggle_card_visibility("proyecto");
+        assert!(!state.is_card_hidden("proyecto"));
+
+        let render_out_restored = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let clean_restored = ui::strip_ansi(&render_out_restored.lines.join("\n"));
+        assert!(clean_restored.contains("[✓] Proyecto"));
+        assert!(clean_restored.contains("~ Proyecto ·"));
+    }
+
+    #[test]
+    fn test_tarjetas_cannot_hide_itself() {
+        let mut state = AppState::new();
+        state.toggle_card_visibility("tarjetas");
+        assert!(!state.is_card_hidden("tarjetas"), "Tarjetas no puede ocultarse a sí misma");
+    }
+
+    #[test]
+    fn test_tarjetas_mouse_click_toggles_visibility() {
+        let mut state = AppState::new();
+        state.collapsed_cards[10] = false; // Expandir
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        state.card_bounds = render_out.bounds;
+
+        // Buscar el bound de toggle para "engram"
+        let engram_toggle = state
+            .card_bounds
+            .iter()
+            .find(|b| {
+                b.action_type == Some("toggle_card_visibility")
+                    && b.action_path.as_deref() == Some("engram")
+            })
+            .expect("debe existir bound para alternar visibilidad de engram");
+
+        let click_res = state.handle_mouse_click(engram_toggle.start_line, 0);
+        assert_eq!(
+            click_res,
+            Some(ClickAction::ToggleCardVisibility("engram".to_string()))
+        );
+        assert!(state.is_card_hidden("engram"), "engram debe quedar oculto tras el clic");
+    }
+
+    #[test]
+    fn test_tarjetas_config_persistence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        let mut st = AppState::with_config(Some(cfg_path.clone()), None);
+        st.toggle_card_visibility("ecosystem");
+        st.toggle_card_visibility("engram");
+        st.toggle_card(10); // expandir tarjetas
+
+        assert!(cfg_path.exists(), "hudr2.json debe existir tras persistencia atómica");
+
+        // Cargar en un nuevo AppState
+        let st2 = AppState::with_config(Some(cfg_path), None);
+        assert!(st2.is_card_hidden("ecosystem"));
+        assert!(st2.is_card_hidden("engram"));
+        assert!(!st2.is_card_hidden("estado"));
+        assert!(!st2.collapsed_cards[10]); // recuerda el estado colapsado/expandido
     }
 }

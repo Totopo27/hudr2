@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HerdrPane {
     pub pane_id: String,
     pub tab_id: Option<String>,
@@ -13,6 +13,8 @@ pub struct HerdrPane {
     pub agent_status: Option<String>,
     pub agent: Option<String>,
     pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub tokens: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -87,6 +89,7 @@ pub struct GitFileChange {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GitTelemetry {
     pub branch: String,
+    pub head_short: Option<String>,
     pub modified: usize,
     pub untracked: usize,
     pub staged: usize,
@@ -97,6 +100,7 @@ pub struct GitTelemetry {
     pub recent_commits: Vec<String>,
     pub ahead_behind: Option<(usize, usize)>,
     pub files: Vec<GitFileChange>,
+    pub cross_session_conflicts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

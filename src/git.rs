@@ -11,6 +11,7 @@ struct GitCacheEntry {
     telemetry: GitTelemetry,
     head_mtime: Option<SystemTime>,
     index_mtime: Option<SystemTime>,
+    head_short: Option<String>,
     last_check: Instant,
 }
 
@@ -137,6 +138,158 @@ pub fn parse_head_branch(head_content: &str) -> Option<String> {
     }
 }
 
+/// Resuelve el directorio común de Git (`commondir`) cuando `.git` pertenece a un worktree,
+/// o devuelve `git_dir` si es un repositorio estándar.
+fn resolve_common_git_dir(git_dir: &Path) -> PathBuf {
+    let commondir_file = git_dir.join("commondir");
+    if let Ok(raw) = std::fs::read_to_string(&commondir_file) {
+        let rel = raw.trim();
+        if !rel.is_empty() {
+            let p = Path::new(rel);
+            let resolved = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                git_dir.join(p)
+            };
+            if resolved.exists() {
+                return resolved;
+            }
+        }
+    }
+    git_dir.to_path_buf()
+}
+
+/// Lee el short SHA (7 caracteres) de `HEAD` directamente desde `.git/HEAD`, `refs/`
+/// o `packed-refs` sin lanzar ningún subproceso (`git`). Soporta repositorios normales y worktrees.
+pub fn read_git_head_short(git_dir: &Path) -> Option<String> {
+    let head_raw = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let trimmed = head_raw.trim();
+
+    if let Some(branch_ref) = trimmed.strip_prefix("ref:") {
+        let branch_ref = branch_ref.trim();
+        if branch_ref.is_empty() {
+            return None;
+        }
+        let common_dir = resolve_common_git_dir(git_dir);
+
+        // 1. Intentar leer la referencia suelta en git_dir o commondir
+        for base in [git_dir, common_dir.as_path()] {
+            let ref_path = base.join(branch_ref);
+            if let Ok(ref_content) = std::fs::read_to_string(&ref_path) {
+                let sha = ref_content.trim();
+                if sha.len() >= 7 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(sha[..7].to_string());
+                }
+            }
+        }
+
+        // 2. Fallback: buscar en packed-refs sin lanzar git
+        for base in [git_dir, common_dir.as_path()] {
+            if let Ok(packed) = std::fs::read_to_string(base.join("packed-refs")) {
+                for line in packed.lines() {
+                    let line = line.trim();
+                    if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+                        continue;
+                    }
+                    let mut parts = line.split_whitespace();
+                    if let (Some(sha), Some(rname)) = (parts.next(), parts.next())
+                        && rname == branch_ref
+                        && sha.len() >= 7
+                        && sha.chars().all(|c| c.is_ascii_hexdigit())
+                    {
+                        return Some(sha[..7].to_string());
+                    }
+                }
+            }
+        }
+        None
+    } else if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(trimmed[..7].to_string())
+    } else {
+        None
+    }
+}
+
+/// Resuelve el short SHA (7 caracteres) de `HEAD` a partir de un directorio de trabajo sin subprocesos.
+pub fn read_git_head_short_for_dir(target_dir: &str) -> Option<String> {
+    let (_, git_dir) = find_git_root_and_dir(target_dir)?;
+    read_git_head_short(&git_dir)
+}
+
+/// Detecta colisiones de archivos en caliente entre dos o más sesiones activas.
+/// Devuelve la lista ordenada y sin duplicados de archivos que están siendo modificados
+/// simultáneamente por más de una sesión.
+pub fn detect_cross_session_conflicts(session_file_sets: &[Vec<String>]) -> Vec<String> {
+    if session_file_sets.len() < 2 {
+        return Vec::new();
+    }
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut conflicts = std::collections::BTreeSet::new();
+
+    for (idx, files) in session_file_sets.iter().enumerate() {
+        for file in files {
+            let norm = file.trim().replace('\\', "/");
+            let clean = norm.strip_prefix("./").unwrap_or(&norm).trim();
+            if clean.is_empty() {
+                continue;
+            }
+            if let Some(prev_idx) = seen.insert(clean.to_string(), idx)
+                && prev_idx != idx
+            {
+                conflicts.insert(clean.to_string());
+            }
+        }
+    }
+    conflicts.into_iter().collect()
+}
+
+/// Recolecta colisiones de archivos en caliente comparando el directorio actual con otros panes/worktrees activos en Herdr/Telar.
+pub fn collect_cross_session_conflicts(
+    primary_dir: &str,
+    primary_files: &[GitFileChange],
+    panes: &[crate::models::HerdrPane],
+) -> Vec<String> {
+    let primary_modified: Vec<String> = primary_files
+        .iter()
+        .filter(|f| f.status_code != "?")
+        .map(|f| f.path.clone())
+        .collect();
+    if primary_modified.is_empty() || panes.is_empty() {
+        return Vec::new();
+    }
+
+    let norm_primary = crate::paths::normalize_path(primary_dir);
+    let mut seen_dirs = std::collections::HashSet::new();
+    seen_dirs.insert(norm_primary);
+
+    let mut all_sets = vec![primary_modified];
+
+    for pane in panes {
+        let Some(ref cwd) = pane.cwd else {
+            continue;
+        };
+        let norm_cwd = crate::paths::normalize_path(cwd);
+        if norm_cwd.is_empty() || !seen_dirs.insert(norm_cwd) {
+            continue;
+        }
+        if !Path::new(cwd).exists() {
+            continue;
+        }
+        let other_git = read_git_telemetry(cwd);
+        let other_modified: Vec<String> = other_git
+            .files
+            .into_iter()
+            .filter(|f| f.status_code != "?")
+            .map(|f| f.path)
+            .collect();
+        if !other_modified.is_empty() {
+            all_sets.push(other_modified);
+        }
+    }
+
+    detect_cross_session_conflicts(&all_sets)
+}
+
 /// Detecta si una ruta corresponde a un archivo sensible (credenciales, claves, .env)
 /// cuyo contenido o diff jamás debe leerse ni mostrarse en la barra lateral.
 pub fn is_sensitive_file(path: &str) -> bool {
@@ -238,10 +391,21 @@ pub fn apply_numstat_z(files: &mut [GitFileChange], out: &str) -> (usize, usize)
 
 const UNTRACKED_PREVIEW_MAX_BYTES: u64 = 64 * 1024;
 const DIFF_PREVIEW_MAX_LINES: usize = 24;
+const QUICK_PEEK_MAX_LINES: usize = 120;
 
 /// Obtiene una previsualización segura y acotada del diff de un archivo en el árbol de trabajo.
 /// Nunca lee archivos sensibles ni sigue enlaces simbólicos.
 pub fn read_file_diff_preview(target_dir: &str, rel_path: &str) -> Vec<String> {
+    read_file_preview_with_limit(target_dir, rel_path, DIFF_PREVIEW_MAX_LINES)
+}
+
+/// Obtiene una previsualización extendida y segura (hasta 120 líneas) para el modal flotante Quick Peek.
+/// Protege estrictamente archivos sensibles (`is_sensitive_file`) y enlaces simbólicos.
+pub fn read_file_quick_peek(target_dir: &str, rel_path: &str) -> Vec<String> {
+    read_file_preview_with_limit(target_dir, rel_path, QUICK_PEEK_MAX_LINES)
+}
+
+fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usize) -> Vec<String> {
     if is_sensitive_file(rel_path) {
         return vec!["[archivo sensible protegido - diff oculto]".to_string()];
     }
@@ -274,11 +438,11 @@ pub fn read_file_diff_preview(target_dir: &str, rel_path: &str) -> Vec<String> {
             })
             .collect();
         let total = all_lines.len();
-        for l in all_lines.into_iter().take(DIFF_PREVIEW_MAX_LINES) {
+        for l in all_lines.into_iter().take(max_lines) {
             lines.push(l.to_string());
         }
-        if total > DIFF_PREVIEW_MAX_LINES {
-            lines.push(format!("... (+{} líneas más)", total - DIFF_PREVIEW_MAX_LINES));
+        if total > max_lines {
+            lines.push(format!("... (+{} líneas más)", total - max_lines));
         }
         return lines;
     }
@@ -303,11 +467,11 @@ pub fn read_file_diff_preview(target_dir: &str, rel_path: &str) -> Vec<String> {
                     let all_lines: Vec<&str> = text.lines().collect();
                     let total = all_lines.len();
                     let mut out = vec!["@@ archivo nuevo @@".to_string()];
-                    for l in all_lines.into_iter().take(DIFF_PREVIEW_MAX_LINES) {
+                    for l in all_lines.into_iter().take(max_lines) {
                         out.push(format!("+{l}"));
                     }
-                    if total > DIFF_PREVIEW_MAX_LINES {
-                        out.push(format!("... (+{} líneas más)", total - DIFF_PREVIEW_MAX_LINES));
+                    if total > max_lines {
+                        out.push(format!("... (+{} líneas más)", total - max_lines));
                     }
                     out
                 }
@@ -322,6 +486,7 @@ pub fn read_file_diff_preview(target_dir: &str, rel_path: &str) -> Vec<String> {
 pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let mut git = GitTelemetry {
         branch: "main".to_string(),
+        head_short: None,
         modified: 0,
         untracked: 0,
         staged: 0,
@@ -332,6 +497,7 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
         recent_commits: Vec::new(),
         ahead_behind: None,
         files: Vec::new(),
+        cross_session_conflicts: Vec::new(),
     };
 
     let (repo_root, git_dir) = match find_git_root_and_dir(target_dir) {
@@ -347,17 +513,21 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let index_mtime = std::fs::metadata(&index_path)
         .and_then(|m| m.modified())
         .ok();
+    // Lectura directa (0 subprocesos) del short SHA de HEAD desde .git/HEAD, refs/ o packed-refs
+    let current_head_short = read_git_head_short(&git_dir);
     let now = Instant::now();
     let norm_dir = crate::paths::normalize_path(target_dir);
 
-    // Comprobar caché por mtime (.git/index y .git/HEAD) o ventana de 5s ociosa
+    // Comprobar caché por mtime (.git/index, .git/HEAD y short SHA de HEAD) o ventana de 5s ociosa
     if let Ok(guard) = GIT_CACHE.lock()
         && let Some(entry) = guard.get(&norm_dir)
     {
         let mtime_matches = head_mtime.is_some()
             && entry.head_mtime == head_mtime
-            && entry.index_mtime == index_mtime;
-        let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5);
+            && entry.index_mtime == index_mtime
+            && entry.head_short == current_head_short;
+        let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5)
+            && entry.head_short == current_head_short;
 
         if mtime_matches || within_idle_ttl {
             return entry.telemetry.clone();
@@ -379,6 +549,7 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     } else {
         return git;
     }
+    git.head_short = current_head_short.clone();
 
     // 2. Status porcelain en la raíz del repositorio (-z, sin renames, todos los untracked)
     if let Some(status_out) = run_git_cmd(
@@ -425,13 +596,18 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
         }
     }
 
-    // 5. Log reciente (últimos 2 commits)
+    // 5. Log reciente (últimos 2 commits) con fallback sin subproceso a head_short
     if let Some(log_out) = run_git_cmd(&repo_root, &["log", "--oneline", "-n", "2"], 3) {
         for line in log_out.lines() {
             if !line.trim().is_empty() {
                 git.recent_commits.push(line.trim().to_string());
             }
         }
+    }
+    if git.recent_commits.is_empty()
+        && let Some(ref sha) = git.head_short
+    {
+        git.recent_commits.push(format!("{sha} HEAD"));
     }
 
     if let Ok(mut guard) = GIT_CACHE.lock() {
@@ -441,6 +617,7 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
                 telemetry: git.clone(),
                 head_mtime,
                 index_mtime,
+                head_short: current_head_short,
                 last_check: now,
             },
         );

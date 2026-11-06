@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum HerdrWireEvent {
     SubscriptionStarted,
     PaneUpdated(HerdrPane),
@@ -24,24 +25,37 @@ pub struct HerdrClient;
 
 impl HerdrClient {
     pub fn resolve_ipc_path() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("HERDR_SOCKET_PATH") {
-            let trimmed = p.trim();
-            if !trimmed.is_empty() {
-                return Some(PathBuf::from(trimmed));
+        for env_key in ["HERDR_SOCKET_PATH", "TELAR_SOCKET_PATH"] {
+            if let Ok(p) = std::env::var(env_key) {
+                let trimmed = p.trim();
+                if !trimmed.is_empty() {
+                    return Some(PathBuf::from(trimmed));
+                }
             }
         }
         #[cfg(unix)]
         {
             if let Some(home) = dirs::home_dir() {
-                let sock = home.join(".config").join("herdr").join("herdr.sock");
-                if sock.exists() {
-                    return Some(sock);
+                for (dir, file) in [
+                    ("herdr", "herdr.sock"),
+                    ("telardev", "telardev.sock"),
+                    ("telar", "telar.sock"),
+                ] {
+                    let sock = home.join(".config").join(dir).join(file);
+                    if sock.exists() {
+                        return Some(sock);
+                    }
                 }
             }
         }
         #[cfg(windows)]
         {
-            for candidate in [r"\\.\pipe\herdr", r"\\.\pipe\herdr.sock"] {
+            for candidate in [
+                r"\\.\pipe\herdr",
+                r"\\.\pipe\herdr.sock",
+                r"\\.\pipe\telardev",
+                r"\\.\pipe\telar",
+            ] {
                 let p = PathBuf::from(candidate);
                 if p.exists() {
                     return Some(p);
@@ -159,6 +173,14 @@ impl HerdrClient {
             .and_then(|s| s.get("value"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let mut tokens = std::collections::HashMap::new();
+        if let Some(tok_obj) = item.get("tokens").and_then(Value::as_object) {
+            for (k, v) in tok_obj {
+                if let Some(s) = v.as_str() {
+                    tokens.insert(k.clone(), s.to_string());
+                }
+            }
+        }
 
         Some(HerdrPane {
             pane_id,
@@ -171,6 +193,7 @@ impl HerdrClient {
             agent_status,
             agent,
             agent_session_id,
+            tokens,
         })
     }
 
@@ -207,25 +230,34 @@ impl HerdrClient {
     }
 
     fn run_herdr_cli(args: &[&str]) -> Option<Value> {
-        let mut cmd = Command::new("herdr");
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+        for bin in ["herdr", "telardev", "telar"] {
+            let mut cmd = Command::new(bin);
+            cmd.args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
 
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
 
-        let output = cmd.output().ok()?;
-        if !output.status.success() {
-            return None;
+            let Ok(output) = cmd.output() else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let Ok(raw) = String::from_utf8(output.stdout) else {
+                continue;
+            };
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                return Some(v);
+            }
         }
-        let raw = String::from_utf8(output.stdout).ok()?;
-        serde_json::from_str::<Value>(&raw).ok()
+        None
     }
 
     pub fn get_panes() -> Vec<HerdrPane> {

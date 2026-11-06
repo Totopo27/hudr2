@@ -105,6 +105,8 @@ pub fn clean_version_output(tool_name: &str, raw: &str) -> String {
     let known_prefixes = [
         tool_name,
         "engram",
+        "telardev",
+        "telar",
         "herdr",
         "gentle-ai",
         "gentle-shell",
@@ -235,8 +237,10 @@ fn collect_ecosystem_telemetry() -> EcosystemTelemetry {
     };
     tools.push(engram_info);
 
-    // 6. herdr
-    let herdr_raw = run_version_cmd("herdr", &["--version"]);
+    // 6. herdr / telardev
+    let herdr_raw = run_version_cmd("herdr", &["--version"])
+        .or_else(|| run_version_cmd("telardev", &["--version"]))
+        .or_else(|| run_version_cmd("telar", &["--version"]));
     let herdr_info = match herdr_raw {
         Some(raw) => ToolVersionInfo {
             name: "herdr".to_string(),
