@@ -246,6 +246,130 @@ pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_js
     }
 }
 
+/// Métricas efectivas de salud de una cuenta evaluadas dinámicamente para la familia del modelo activo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EffectiveAccountHealth {
+    pub rem_5h: u8,
+    pub reset_5h: String,
+    pub rem_wk: u8,
+    pub reset_wk: String,
+    pub is_critical: bool,
+    pub is_warning: bool,
+    pub family: &'static str,
+}
+
+/// Detecta la familia de modelo (`"Gemini"`, `"Claude"`, `"GPT"`, `"DeepSeek"`, `"Qwen"`)
+/// a partir del identificador del modelo activo en la sesión.
+pub fn resolve_model_family(model_str: &str) -> Option<&'static str> {
+    let lower = model_str.to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+    if lower.contains("claude")
+        || lower.contains("sonnet")
+        || lower.contains("opus")
+        || lower.contains("haiku")
+        || lower.contains("anthropic")
+    {
+        Some("Claude")
+    } else if lower.contains("deepseek") {
+        Some("DeepSeek")
+    } else if lower.contains("gpt")
+        || lower.contains("openai")
+        || lower.contains("chatgpt")
+        || lower.contains("codex")
+        || lower.contains("/o1")
+        || lower.starts_with("o1")
+        || lower.contains("/o3")
+        || lower.starts_with("o3")
+        || lower.contains("/o4")
+        || lower.starts_with("o4")
+    {
+        Some("GPT")
+    } else if lower.contains("qwen") || lower.contains("qwq") {
+        Some("Qwen")
+    } else if lower.contains("gemini") || lower.contains("gemma") {
+        Some("Gemini")
+    } else {
+        None
+    }
+}
+
+/// Evalúa la salud y los porcentajes `5h` / `Wk` de una cuenta según el modelo activo en la sesión.
+/// Si el usuario usa Claude, GPT, DeepSeek, Qwen o Gemini, toma los pools de esa familia;
+/// si no hay modelo específico o el pool no existe, usa las métricas base de la cuenta (Gemini / default).
+pub fn evaluate_account_for_model(
+    acc: &AccountQuota,
+    active_model: &str,
+) -> EffectiveAccountHealth {
+    if let Some(family) = resolve_model_family(active_model) {
+        let find_family_pools = |fam_prefix: &str| -> Option<(&QuotaPool, &QuotaPool)> {
+            let fam_lower = fam_prefix.to_lowercase();
+            let p_5h = acc.pools.iter().find(|p| {
+                let l = p.label.to_lowercase();
+                l.starts_with(&fam_lower) && l.contains("5h")
+            });
+            let p_wk = acc.pools.iter().find(|p| {
+                let l = p.label.to_lowercase();
+                l.starts_with(&fam_lower) && l.contains("wk")
+            });
+            match (p_5h, p_wk) {
+                (Some(h), Some(w)) => Some((h, w)),
+                _ => None,
+            }
+        };
+
+        // Para GPT, si el proveedor agrupa Claude/GPT bajo "Claude *", hacer fallback a Claude
+        let matched = find_family_pools(family).or_else(|| {
+            if family == "GPT" {
+                find_family_pools("Claude")
+            } else {
+                None
+            }
+        });
+
+        if let Some((pool_5h, pool_wk)) = matched {
+            let rem_5h = pool_5h.percent;
+            let rem_wk = pool_wk.percent;
+            let worst_used =
+                std::cmp::max(100u8.saturating_sub(rem_5h), 100u8.saturating_sub(rem_wk));
+            let is_critical = !acc.has_error && worst_used >= 85;
+            let is_warning = !acc.has_error && (70..85).contains(&worst_used);
+            return EffectiveAccountHealth {
+                rem_5h,
+                reset_5h: pool_5h.reset.clone(),
+                rem_wk,
+                reset_wk: pool_wk.reset.clone(),
+                is_critical,
+                is_warning,
+                family,
+            };
+        }
+    }
+
+    EffectiveAccountHealth {
+        rem_5h: acc.rem_5h,
+        reset_5h: acc.reset_5h.clone(),
+        rem_wk: acc.rem_wk,
+        reset_wk: acc.reset_wk.clone(),
+        is_critical: acc.is_critical,
+        is_warning: acc.is_warning,
+        family: "Gemini",
+    }
+}
+
+/// Sincroniza los campos de resumen (`rem_5h`, `rem_wk`, `is_critical`, `is_warning`) de la cuenta
+/// en función del modelo activo en la sesión.
+pub fn sync_account_health_for_model(acc: &mut AccountQuota, active_model: &str) {
+    let eff = evaluate_account_for_model(acc, active_model);
+    acc.rem_5h = eff.rem_5h;
+    acc.reset_5h = eff.reset_5h;
+    acc.rem_wk = eff.rem_wk;
+    acc.reset_wk = eff.reset_wk;
+    acc.is_critical = eff.is_critical;
+    acc.is_warning = eff.is_warning;
+}
+
 /// Aplica los grupos y buckets recibidos de CLIProxy a la estructura `AccountQuota`.
 pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
     acc.has_error = false;
@@ -264,6 +388,19 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         let mut cla_wk_reset = "6d 23h".to_string();
         let mut cla_5h_iso: Option<String> = None;
         let mut cla_wk_iso: Option<String> = None;
+        let mut has_explicit_claude = false;
+
+        // Pools adicionales dinámicos (GPT dedicado, DeepSeek, Qwen, etc.)
+        struct ExtraFamilyPool {
+            family: &'static str,
+            rem_5h: u8,
+            reset_5h: String,
+            iso_5h: Option<String>,
+            rem_wk: u8,
+            reset_wk: String,
+            iso_wk: Option<String>,
+        }
+        let mut extra_families: Vec<ExtraFamilyPool> = Vec::new();
 
         for grp in groups {
             let name = grp
@@ -271,6 +408,9 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                 .and_then(|d| d.as_str())
                 .unwrap_or("")
                 .to_lowercase();
+            if name.contains("claude") {
+                has_explicit_claude = true;
+            }
             if let Some(buckets) = grp.get("buckets").and_then(|b| b.as_array()) {
                 for b in buckets {
                     let window = b.get("window").and_then(|w| w.as_str()).unwrap_or("");
@@ -295,7 +435,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                                 gem_wk_iso = Some(rt.to_string());
                             }
                         }
-                    } else if name.contains("claude") || name.contains("gpt") {
+                    } else if name.contains("claude") {
                         if window == "5h" || window.contains('5') {
                             cla_5h = pct;
                             if let Some(rt) = reset_time {
@@ -310,6 +450,59 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                             }
                         }
                     }
+
+                    let extra_family = if name.contains("gpt") && !name.contains("claude") {
+                        Some("GPT")
+                    } else if name.contains("deepseek") {
+                        Some("DeepSeek")
+                    } else if name.contains("qwen") {
+                        Some("Qwen")
+                    } else {
+                        None
+                    };
+
+                    if let Some(fam) = extra_family {
+                        let entry = if let Some(existing) =
+                            extra_families.iter_mut().find(|e| e.family == fam)
+                        {
+                            existing
+                        } else {
+                            extra_families.push(ExtraFamilyPool {
+                                family: fam,
+                                rem_5h: 100,
+                                reset_5h: "4h 59m".to_string(),
+                                iso_5h: None,
+                                rem_wk: 100,
+                                reset_wk: "6d 23h".to_string(),
+                                iso_wk: None,
+                            });
+                            extra_families.last_mut().unwrap()
+                        };
+
+                        if window == "5h" || window.contains('5') {
+                            entry.rem_5h = pct;
+                            if let Some(rt) = reset_time {
+                                entry.reset_5h = format_relative_reset(rt);
+                                entry.iso_5h = Some(rt.to_string());
+                            }
+                            if fam == "GPT" && !has_explicit_claude {
+                                cla_5h = pct;
+                                cla_5h_reset = entry.reset_5h.clone();
+                                cla_5h_iso = entry.iso_5h.clone();
+                            }
+                        } else if window == "weekly" || window.contains("week") {
+                            entry.rem_wk = pct;
+                            if let Some(rt) = reset_time {
+                                entry.reset_wk = format_relative_reset(rt);
+                                entry.iso_wk = Some(rt.to_string());
+                            }
+                            if fam == "GPT" && !has_explicit_claude {
+                                cla_wk = pct;
+                                cla_wk_reset = entry.reset_wk.clone();
+                                cla_wk_iso = entry.iso_wk.clone();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -319,7 +512,9 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         acc.reset_5h = gem_5h_reset.clone();
         acc.reset_wk = gem_wk_reset.clone();
 
-        // Gemini es la métrica soberana para salud y alertas de migración.
+        // Por defecto (sin sesión o con Gemini), las métricas base reflejan Gemini;
+        // evaluate_account_for_model / sync_account_health_for_model las adapta dinámicamente
+        // cuando la sesión activa usa Claude, GPT, DeepSeek, Qwen u otro modelo.
         let worst_used =
             std::cmp::max(100u8.saturating_sub(gem_5h), 100u8.saturating_sub(gem_wk));
         acc.is_critical = worst_used >= 85;
@@ -330,7 +525,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         let cla_wk_pace = calculate_quota_pace(cla_wk, true, cla_wk_iso.as_deref());
         let cla_5h_pace = calculate_quota_pace(cla_5h, false, cla_5h_iso.as_deref());
 
-        acc.pools = vec![
+        let mut pools = vec![
             QuotaPool {
                 label: "Gemini Wk".to_string(),
                 percent: gem_wk,
@@ -356,6 +551,25 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                 pace: cla_5h_pace,
             },
         ];
+
+        for extra in extra_families {
+            let wk_pace = calculate_quota_pace(extra.rem_wk, true, extra.iso_wk.as_deref());
+            let h5_pace = calculate_quota_pace(extra.rem_5h, false, extra.iso_5h.as_deref());
+            pools.push(QuotaPool {
+                label: format!("{} Wk", extra.family),
+                percent: extra.rem_wk,
+                reset: extra.reset_wk,
+                pace: wk_pace,
+            });
+            pools.push(QuotaPool {
+                label: format!("{} 5h", extra.family),
+                percent: extra.rem_5h,
+                reset: extra.reset_5h,
+                pace: h5_pace,
+            });
+        }
+
+        acc.pools = pools;
     }
 }
 

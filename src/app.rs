@@ -106,6 +106,14 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
 
         // Descubrir cuentas preservando los valores de cuota ya obtenidos
         QuotaCollector::discover_accounts(&mut state.snapshot.accounts);
+        let active_model = if !state.snapshot.agent_session.model.is_empty() {
+            state.snapshot.agent_session.model.clone()
+        } else {
+            state.snapshot.agent_session.model_short.clone()
+        };
+        for acc in &mut state.snapshot.accounts {
+            QuotaCollector::sync_account_health_for_model(acc, &active_model);
+        }
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
 
@@ -221,6 +229,12 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
         any_updated = true;
 
         let mut state = app_state.write().await;
+        let active_model = if !state.snapshot.agent_session.model.is_empty() {
+            state.snapshot.agent_session.model.clone()
+        } else {
+            state.snapshot.agent_session.model_short.clone()
+        };
+        QuotaCollector::sync_account_health_for_model(&mut acc, &active_model);
         if let Some(existing) = state
             .snapshot
             .accounts

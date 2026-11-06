@@ -1939,4 +1939,97 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_dynamic_model_family_quota_health_claude_gpt_deepseek_gemini() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::QuotaCollector;
+
+        let mut acc = AccountQuota {
+            prefix: "agy".to_string(),
+            email: "agy@example.com".to_string(),
+            auth_file: "auth.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 59m".to_string(),
+            rem_wk: 100,
+            reset_wk: "4d 23h".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![],
+        };
+
+        let payload = serde_json::json!({
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        { "window": "5h", "remainingFraction": 0.92, "resetTime": "2026-11-06T18:00:00Z" },
+                        { "window": "weekly", "remainingFraction": 0.90, "resetTime": "2026-11-12T12:00:00Z" }
+                    ]
+                },
+                {
+                    "displayName": "Claude Models",
+                    "buckets": [
+                        { "window": "5h", "remainingFraction": 0.08, "resetTime": "2026-11-06T18:00:00Z" },
+                        { "window": "weekly", "remainingFraction": 0.45, "resetTime": "2026-11-12T12:00:00Z" }
+                    ]
+                },
+                {
+                    "displayName": "DeepSeek Models",
+                    "buckets": [
+                        { "window": "5h", "remainingFraction": 0.25, "resetTime": "2026-11-06T18:00:00Z" },
+                        { "window": "weekly", "remainingFraction": 0.80, "resetTime": "2026-11-12T12:00:00Z" }
+                    ]
+                }
+            ]
+        });
+
+        QuotaCollector::apply_quota_data(&mut acc, &payload);
+
+        // 1. Con modelo Gemini: saludable (92% 5h, 90% Wk)
+        let eff_gem = QuotaCollector::evaluate_account_for_model(&acc, "gemini-3.8-flash-high");
+        assert_eq!(eff_gem.family, "Gemini");
+        assert_eq!(eff_gem.rem_5h, 92);
+        assert!(!eff_gem.is_critical);
+        assert!(!eff_gem.is_warning);
+
+        // 2. Con modelo Claude: crítico (8% 5h <= 15%)
+        let eff_cla = QuotaCollector::evaluate_account_for_model(&acc, "claude-sonnet-4-5");
+        assert_eq!(eff_cla.family, "Claude");
+        assert_eq!(eff_cla.rem_5h, 8);
+        assert_eq!(eff_cla.rem_wk, 45);
+        assert!(eff_cla.is_critical, "Claude al 8% debe marcarse crítico cuando la sesión usa Claude");
+
+        // 3. Con modelo GPT (compartiendo bucket con Claude cuando no hay bucket GPT separado): crítico (8%)
+        let eff_gpt = QuotaCollector::evaluate_account_for_model(&acc, "gpt-4o");
+        assert_eq!(eff_gpt.family, "GPT");
+        assert_eq!(eff_gpt.rem_5h, 8);
+        assert!(eff_gpt.is_critical);
+
+        // 4. Con modelo DeepSeek: en warning (25% restante => 75% usado, entre 70% y 85%)
+        let eff_ds = QuotaCollector::evaluate_account_for_model(&acc, "deepseek-r1");
+        assert_eq!(eff_ds.family, "DeepSeek");
+        assert_eq!(eff_ds.rem_5h, 25);
+        assert!(!eff_ds.is_critical);
+        assert!(eff_ds.is_warning);
+
+        // 5. Renderizado UI en Integraciones cuando la sesión activa usa Claude:
+        let mut state = AppState::new();
+        state.snapshot.accounts.push(acc);
+        state.snapshot.agent_session.model = "claude-sonnet-4-5".to_string();
+        state.snapshot.agent_session.local_prefix = Some("agy".to_string());
+        state.snapshot.agent_session.all_active_prefixes.insert("agy".to_string());
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_clean = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(
+            screen_clean.contains("! 1 crític"),
+            "Integraciones debe mostrar '! 1 crític' cuando el modelo activo en sesión es Claude y su pool está al 8%"
+        );
+        assert!(screen_clean.contains("[AGOTÁNDOSE]"));
+        assert!(screen_clean.contains("DeepSeek Wk"));
+        assert!(screen_clean.contains("DeepSeek 5h"));
+    }
 }

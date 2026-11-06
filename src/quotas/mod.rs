@@ -34,9 +34,25 @@ impl QuotaManager {
     pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_json::Value) {
         cliproxy::apply_quota_error(acc, status, err_val);
     }
+
+    /// Evalúa dinámicamente la salud de la cuenta para la familia del modelo activo en la sesión.
+    pub fn evaluate_account_for_model(
+        acc: &AccountQuota,
+        active_model: &str,
+    ) -> cliproxy::EffectiveAccountHealth {
+        cliproxy::evaluate_account_for_model(acc, active_model)
+    }
+
+    /// Sincroniza los campos `rem_5h`, `rem_wk`, `is_critical`, `is_warning` de la cuenta según el modelo activo.
+    pub fn sync_account_health_for_model(acc: &mut AccountQuota, active_model: &str) {
+        cliproxy::sync_account_health_for_model(acc, active_model);
+    }
 }
 
 /// Alias / fachada para mantener compatibilidad total con llamadas existentes a `QuotaCollector`.
 pub type QuotaCollector = QuotaManager;
 
-pub use cliproxy::{calculate_quota_pace, format_relative_reset};
+pub use cliproxy::{
+    EffectiveAccountHealth, calculate_quota_pace, evaluate_account_for_model,
+    format_relative_reset, resolve_model_family, sync_account_health_for_model,
+};

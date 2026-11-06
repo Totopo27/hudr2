@@ -468,8 +468,19 @@ pub fn render_screen_with_diff(
 
     // 5. Integraciones Card (3)
     let int_start = lines.len();
+    let active_model = if !snap.agent_session.model.is_empty() {
+        snap.agent_session.model.as_str()
+    } else {
+        snap.agent_session.model_short.as_str()
+    };
     let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
-    let critical_count = snap.accounts.iter().filter(|a| a.is_critical).count();
+    let critical_count = snap
+        .accounts
+        .iter()
+        .filter(|a| {
+            crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model).is_critical
+        })
+        .count();
     let int_title = if critical_count > 0 {
         format!(
             "{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
@@ -487,6 +498,8 @@ pub fn render_screen_with_diff(
             ));
         } else {
             for acc in &snap.accounts {
+                let eff =
+                    crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
                 let is_local = snap
                     .agent_session
                     .local_prefix
@@ -504,13 +517,13 @@ pub fn render_screen_with_diff(
                         AMBER,
                         format!("{AMBER}[{}]{RESET}", acc.error_msg),
                     )
-                } else if acc.is_critical {
+                } else if eff.is_critical {
                     (
                         format!("{BOLD}{CORAL}!{RESET}"),
                         CORAL,
                         format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}"),
                     )
-                } else if acc.is_warning {
+                } else if eff.is_warning {
                     (
                         format!("{BOLD}{AMBER}!{RESET}"),
                         AMBER,
@@ -520,19 +533,19 @@ pub fn render_screen_with_diff(
                     (
                         format!("{ACCENT_PINK}>{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
                     )
                 } else if is_any_active {
                     (
                         format!("{ACCENT_PRIMARY}\u{25cf}{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
                     )
                 } else {
                     (
                         format!("{MINT}\u{25cf}{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", acc.reset_5h),
+                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
                     )
                 };
 
@@ -544,18 +557,18 @@ pub fn render_screen_with_diff(
                 } else {
                     format!("{TEXT_MUTED}{pfx_clean}{RESET}")
                 };
-                let bar = render_gauge_inline(acc.rem_5h, 3, pct_color);
-                let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", acc.rem_5h);
-                let wk_color = if acc.is_critical {
+                let bar = render_gauge_inline(eff.rem_5h, 3, pct_color);
+                let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
+                let wk_color = if eff.is_critical {
                     CORAL
-                } else if acc.is_warning {
+                } else if eff.is_warning {
                     AMBER
                 } else {
                     MINT
                 };
                 let pct_wk = format!(
                     "{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
-                    acc.rem_wk
+                    eff.rem_wk
                 );
 
                 let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h} {pct_wk}");
@@ -579,15 +592,17 @@ pub fn render_screen_with_diff(
     }
 
     // Alertas de cuentas críticas activas + Flash notice dentro de Integraciones
-    let target_healthy = crate::cleanup::get_best_healthy_target_prefix(
+    let target_healthy = crate::cleanup::get_best_healthy_target_prefix_for_model(
         &snap.accounts,
         &snap.agent_session.all_active_prefixes,
+        active_model,
     );
     let active_critical_accs: Vec<&crate::models::AccountQuota> = snap
         .accounts
         .iter()
         .filter(|a| {
-            (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
                 && snap
                     .agent_session
                     .all_active_prefixes
@@ -986,7 +1001,8 @@ pub fn render_screen_with_diff(
         "{TEXT_DIM} 1-9: colap \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
     ));
     let has_active_critical = snap.accounts.iter().any(|a| {
-        (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+        let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+        (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
             && snap
                 .agent_session
                 .all_active_prefixes

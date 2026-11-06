@@ -37,16 +37,18 @@ pub fn get_best_healthy_target_prefix(
     accounts_list: &[AccountQuota],
     active_prefixes: &HashSet<String>,
 ) -> String {
+    get_best_healthy_target_prefix_for_model(accounts_list, active_prefixes, "")
+}
+
+pub fn get_best_healthy_target_prefix_for_model(
+    accounts_list: &[AccountQuota],
+    active_prefixes: &HashSet<String>,
+    active_model: &str,
+) -> String {
     let compute_health_score = |acc: &AccountQuota| -> i32 {
-        let rem_5h = acc.rem_5h as i32;
-        let mut rem_wk = 100i32;
-        if let Some(wk_pool) = acc
-            .pools
-            .iter()
-            .find(|p| p.label.to_lowercase().contains("wk"))
-        {
-            rem_wk = wk_pool.percent as i32;
-        }
+        let eff = crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
+        let rem_5h = eff.rem_5h as i32;
+        let rem_wk = eff.rem_wk as i32;
         if rem_wk < 10 {
             return 0;
         }
@@ -56,16 +58,20 @@ pub fn get_best_healthy_target_prefix(
     // 1. Si hay alguna cuenta activa que esté sana (> 30% libre y sin error), preferir esa
     for p in active_prefixes {
         if let Some(acc) = accounts_list.iter().find(|a| {
-            a.prefix.to_lowercase() == *p && !a.is_critical && !a.has_error && a.rem_5h > 30
+            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            a.prefix.to_lowercase() == *p && !eff.is_critical && !a.has_error && eff.rem_5h > 30
         }) {
             return acc.prefix.clone();
         }
     }
 
-    // 2. Si no, elegir la cuenta con mayor score de salud balanceado
+    // 2. Si no, elegir la cuenta con mayor score de salud balanceado para el modelo activo
     let mut healthy: Vec<&AccountQuota> = accounts_list
         .iter()
-        .filter(|a| !a.is_critical && !a.has_error)
+        .filter(|a| {
+            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            !eff.is_critical && !a.has_error
+        })
         .collect();
 
     healthy.sort_by_key(|a| std::cmp::Reverse(compute_health_score(a)));
