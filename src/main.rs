@@ -1,69 +1,348 @@
+use hudr2::herdr::{HerdrClient, HerdrWireEvent};
 use hudr2::{app, state, ui};
 
+use crossterm::ExecutableCommand;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-    MouseEventKind,
+    self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
+use crossterm::style::Print;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode, size,
 };
+use notify::{RecursiveMode, Watcher};
 use std::error::Error;
 use std::io::{Write, stdout};
-use std::time::Duration;
-use tokio::time::sleep;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::{RwLock, mpsc};
+
+/// Secuencias SGR de ratón "button-only" (1000 + 1006): reporta clics y rueda,
+/// pero NUNCA movimiento del cursor (1003), evitando despertar el proceso al mover el mouse.
+const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
+
+const HELP_TEXT: &str = "\
+hudr2 [--once] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
+
+Sidebar de telemetría reactiva para Herdr/Telar, OpenCode y Pi / Gentle Shell.
+
+Opciones:
+  --once             Imprime una captura completa en texto plano y termina de inmediato
+  --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
+  --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
+  --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
+  -h, --help         Muestra esta ayuda";
+
+struct CliArgs {
+    once: bool,
+    pane_id: Option<String>,
+    cwd: Option<String>,
+    config_path: Option<PathBuf>,
+    show_help: bool,
+}
+
+fn parse_cli_args() -> CliArgs {
+    let mut args = std::env::args().skip(1);
+    let mut once = false;
+    let mut pane_id = None;
+    let mut cwd = None;
+    let mut config_path = None;
+    let mut show_help = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--once" => once = true,
+            "-h" | "--help" => show_help = true,
+            "--pane" => {
+                if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
+                    pane_id = Some(v);
+                }
+            }
+            "--cwd" => {
+                if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
+                    cwd = Some(v);
+                }
+            }
+            "--config" => {
+                if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
+                    config_path = Some(PathBuf::from(v));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    CliArgs {
+        once,
+        pane_id,
+        cwd,
+        config_path,
+        show_help,
+    }
+}
+
+fn restore_terminal() {
+    let _ = disable_raw_mode();
+    let mut out = stdout();
+    let _ = out.execute(Print(MOUSE_OFF));
+    let _ = out.execute(LeaveAlternateScreen);
+    let _ = out.execute(crossterm::cursor::Show);
+}
+
+struct TerminalGuard;
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        restore_terminal();
+    }
+}
+
+#[derive(Debug)]
+enum MainMsg {
+    Terminal(Event),
+    DataChanged { git_touched: bool },
+    QuotaTick,
+    Quit,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let cli = parse_cli_args();
+    if cli.show_help {
+        println!("{HELP_TEXT}");
+        return Ok(());
+    }
+
+    let resolved_config = cli
+        .config_path
+        .or_else(|| Some(hudr2::paths::resolve_hudr2_config_path()));
+    let app_state = Arc::new(RwLock::new(state::AppState::with_config(
+        resolved_config,
+        cli.cwd.clone(),
+    )));
+
+    // 1. Carga inicial rápida de datos locales
+    app::refresh_all(&app_state).await;
+
+    // Modo --once: imprime todas las tarjetas sin entrar en modo raw ni alternate screen y termina
+    if cli.once {
+        let state = app_state.read().await;
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            state.flash_notice.as_deref(),
+            state.selected_diff_file.as_deref(),
+            &state.selected_diff_lines,
+            48,
+        );
+        for line in render_out.lines {
+            println!("{line}");
+        }
+        return Ok(());
+    }
+
+    // Configurar hook de pánico y guard RAII para restaurar siempre la terminal
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        prev_hook(info);
+    }));
+    let _term_guard = TerminalGuard;
+
     enable_raw_mode()?;
     let mut out = stdout();
     crossterm::execute!(
         out,
         EnterAlternateScreen,
-        EnableMouseCapture,
+        Print(MOUSE_ON),
         crossterm::cursor::Hide
     )?;
 
-    let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(state::AppState::new()));
-
-    // 1. Carga inicial rápida de datos locales
-    app::refresh_all(&app_state).await;
-
     // 2. Disparar de inmediato la consulta de cuotas de red en segundo plano (snapshot inicial completo)
+    let (tx, mut rx) = mpsc::unbounded_channel::<MainMsg>();
+
     if hudr2::quotas::QuotaCollector::is_available() {
         let initial_fetch_state = app_state.clone();
+        let tx_quota = tx.clone();
         tokio::spawn(async move {
             app::force_refresh(&initial_fetch_state, false, true).await;
+            let _ = tx_quota.send(MainMsg::DataChanged { git_touched: false });
         });
     }
 
-    // 3. Background worker periódico adaptativo:
-    // - Si el agente está trabajando (working): sleep 1500ms
-    // - Si el agente está ocioso (!= working): sleep 4000ms
-    // Refresca cuotas de red cada 5 minutos (300s) automáticamente para cuentas activas
-    let bg_state = app_state.clone();
+    // 3. Hilo bloqueante dedicado para eventos de entrada (teclado, clics/scroll SGR y resize)
+    let tx_input = tx.clone();
+    std::thread::spawn(move || {
+        while let Ok(ev) = event::read() {
+            let forward = match &ev {
+                Event::Resize(_, _) => true,
+                Event::Key(k) => k.kind == KeyEventKind::Press,
+                Event::Mouse(m) => matches!(
+                    m.kind,
+                    MouseEventKind::Down(MouseButton::Left)
+                        | MouseEventKind::ScrollUp
+                        | MouseEventKind::ScrollDown
+                ),
+                _ => false,
+            };
+            if forward && tx_input.send(MainMsg::Terminal(ev)).is_err() {
+                break;
+            }
+        }
+    });
+
+    // 4. Suscriptor IPC en vivo a Herdr (events.subscribe)
+    let bound_pane = cli.pane_id.clone().or_else(|| {
+        std::env::var("HERDR_PANE_ID")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    });
+    let tx_herdr = tx.clone();
+    let bound_for_sub = bound_pane.clone();
+    HerdrClient::spawn_event_subscriber(bound_for_sub.clone(), move |wire_ev| match wire_ev {
+        HerdrWireEvent::PaneClosed(closed_id) => {
+            if bound_for_sub.as_deref() == Some(closed_id.as_str()) {
+                let _ = tx_herdr.send(MainMsg::Quit);
+            } else {
+                let _ = tx_herdr.send(MainMsg::DataChanged { git_touched: false });
+            }
+        }
+        HerdrWireEvent::PaneUpdated(_)
+        | HerdrWireEvent::StatusChanged { .. }
+        | HerdrWireEvent::WorkspaceFocused
+        | HerdrWireEvent::SubscriptionStarted => {
+            let _ = tx_herdr.send(MainMsg::DataChanged { git_touched: false });
+        }
+        HerdrWireEvent::Disconnected => {}
+    });
+
+    // 5. File Watcher nativo (notify) con debounce de 300ms sobre .git, opencode.db y engram.db
+    let project_dir_for_watch = app_state.read().await.snapshot.project_dir.clone();
+    let tx_watch = tx.clone();
+    std::thread::spawn(move || {
+        let (raw_tx, raw_rx) = std::sync::mpsc::channel::<notify::Event>();
+        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = res {
+                let _ = raw_tx.send(ev);
+            }
+        }) {
+            Ok(w) => w,
+            Err(_) => return,
+        };
+
+        // Vigilar .git (HEAD, index, refs)
+        if let Some(git_dir) = hudr2::git::find_git_dir_for_watch(&project_dir_for_watch) {
+            let _ = watcher.watch(&git_dir, RecursiveMode::NonRecursive);
+            let refs_dir = git_dir.join("refs");
+            if refs_dir.exists() {
+                let _ = watcher.watch(&refs_dir, RecursiveMode::Recursive);
+            }
+        }
+
+        // Vigilar directorio de opencode.db y engram.db
+        for db_path in [
+            hudr2::paths::resolve_opencode_db_path(),
+            hudr2::paths::resolve_engram_db_path(),
+        ] {
+            if let Some(parent) = db_path.parent()
+                && parent.exists()
+            {
+                let _ = watcher.watch(parent, RecursiveMode::NonRecursive);
+            }
+        }
+
+        // Vigilar sesiones de Pi / Gentle Shell si existen
+        if let Some(home) = dirs::home_dir() {
+            for agent_sessions in [
+                home.join(".gentle-shell").join("agent").join("sessions"),
+                home.join(".pi").join("agent").join("sessions"),
+            ] {
+                if agent_sessions.exists() {
+                    let _ = watcher.watch(&agent_sessions, RecursiveMode::Recursive);
+                }
+            }
+        }
+
+        let mut deadline: Option<Instant> = None;
+        let mut pending_git = false;
+
+        loop {
+            let msg = match deadline {
+                Some(d) => raw_rx.recv_timeout(d.saturating_duration_since(Instant::now())),
+                None => raw_rx
+                    .recv()
+                    .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+            };
+
+            match msg {
+                Ok(ev) => {
+                    if !matches!(
+                        ev.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Modify(_)
+                            | notify::EventKind::Remove(_)
+                    ) {
+                        continue;
+                    }
+                    let is_git = ev.paths.iter().any(|p| {
+                        let name = p.file_name().unwrap_or_default();
+                        name == "HEAD"
+                            || name == "index"
+                            || p.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == "refs")
+                    });
+                    if is_git {
+                        pending_git = true;
+                    }
+                    deadline = Some(Instant::now() + Duration::from_millis(300));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    deadline = None;
+                    let git_touched = std::mem::replace(&mut pending_git, false);
+                    if tx_watch.send(MainMsg::DataChanged { git_touched }).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    });
+
+    // 6. Timer de respaldo suave (para entornos sin socket IPC de Herdr) y refresco de cuotas cada 120s
+    let tx_timer = tx.clone();
+    let timer_state = app_state.clone();
     tokio::spawn(async move {
         let mut last_quota_refresh = tokio::time::Instant::now();
+        let has_ipc = HerdrClient::resolve_ipc_path().is_some();
         loop {
-            let sleep_duration = {
-                let state = bg_state.read().await;
-                if state.snapshot.agent_session.agent_status == "working" {
-                    Duration::from_millis(1500)
+            let sleep_dur = {
+                let st = timer_state.read().await;
+                if st.snapshot.agent_session.agent_status == "working" {
+                    if has_ipc {
+                        Duration::from_secs(4)
+                    } else {
+                        Duration::from_millis(2000)
+                    }
+                } else if has_ipc {
+                    Duration::from_secs(12)
                 } else {
-                    Duration::from_millis(4000)
+                    Duration::from_secs(5)
                 }
             };
-            sleep(sleep_duration).await;
+            tokio::time::sleep(sleep_dur).await;
 
-            app::refresh_all(&bg_state).await;
+            if tx_timer
+                .send(MainMsg::DataChanged { git_touched: false })
+                .is_err()
+            {
+                break;
+            }
 
             if hudr2::quotas::QuotaCollector::is_available()
-                && last_quota_refresh.elapsed() >= Duration::from_secs(300)
+                && last_quota_refresh.elapsed() >= Duration::from_secs(120)
             {
                 last_quota_refresh = tokio::time::Instant::now();
-                let s_clone = bg_state.clone();
-                tokio::spawn(async move {
-                    app::force_refresh(&s_clone, false, false).await;
-                });
+                let _ = tx_timer.send(MainMsg::QuotaTick);
             }
         }
     });
@@ -73,14 +352,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     while !should_quit {
         // 1a. Expirar aviso flash si existe
-        if app_state.read().await.flash_notice.is_some() {
-            let mut state = app_state.write().await;
-            if state.check_flash_notice_expiry() {
-                state.needs_redraw = true;
-            }
+        let flash_wait = {
+            let st = app_state.read().await;
+            st.flash_notice_until
+                .map(|until| until.saturating_duration_since(Instant::now()))
+        };
+        if flash_wait.is_some_and(|d| d.is_zero()) {
+            let mut st = app_state.write().await;
+            st.check_flash_notice_expiry();
         }
 
-        // 1b. Renderizado condicional bajo demanda (needs_redraw)
+        // 1b. Renderizado condicional bajo demanda (solo cuando needs_redraw == true)
         let should_render = app_state.read().await.needs_redraw;
         if should_render {
             let (cols, rows) = size().unwrap_or((48, 36));
@@ -89,10 +371,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let render_out = {
                 let state = app_state.read().await;
-                ui::render_screen(
+                ui::render_screen_with_diff(
                     &state.snapshot,
                     &state.collapsed_cards,
                     state.flash_notice.as_deref(),
+                    state.selected_diff_file.as_deref(),
+                    &state.selected_diff_lines,
                     width,
                 )
             };
@@ -130,15 +414,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = out.flush();
         }
 
-        // 2. Procesar Eventos de Teclado, Mouse y Resize
-        if event::poll(Duration::from_millis(50))? {
-            let mut ev_opt = Some(event::read()?);
-            while let Some(ev) = ev_opt {
-                match ev {
+        // 2. Esperar el próximo evento sin consumir CPU (0% en reposo)
+        let next_msg = if let Some(wait_dur) = app_state
+            .read()
+            .await
+            .flash_notice_until
+            .map(|u| u.saturating_duration_since(Instant::now()))
+        {
+            match tokio::time::timeout(wait_dur, rx.recv()).await {
+                Ok(Some(m)) => Some(m),
+                Ok(None) => break,
+                Err(_) => {
+                    let mut st = app_state.write().await;
+                    st.check_flash_notice_expiry();
+                    continue;
+                }
+            }
+        } else {
+            match rx.recv().await {
+                Some(m) => Some(m),
+                None => break,
+            }
+        };
+
+        let mut refresh_needed = false;
+        let mut git_dirty = false;
+        let mut quota_tick = false;
+
+        let mut current_msg = next_msg;
+        while let Some(msg) = current_msg {
+            match msg {
+                MainMsg::Quit => {
+                    should_quit = true;
+                    break;
+                }
+                MainMsg::DataChanged { git_touched } => {
+                    refresh_needed = true;
+                    if git_touched {
+                        git_dirty = true;
+                    }
+                }
+                MainMsg::QuotaTick => {
+                    quota_tick = true;
+                }
+                MainMsg::Terminal(ev) => match ev {
                     Event::Resize(_, _) => {
                         app_state.write().await.needs_redraw = true;
                     }
-                    // Eventos de Mouse (Clics y Rueda de Scroll)
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let mut state = app_state.write().await;
@@ -149,8 +471,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 match action {
                                     state::ClickAction::SyncIntegrations => {
                                         let state_ref = app_state.clone();
+                                        let tx_done = tx.clone();
                                         tokio::spawn(async move {
                                             app::sync_integrations_action(&state_ref).await;
+                                            let _ = tx_done
+                                                .send(MainMsg::DataChanged { git_touched: false });
                                         });
                                     }
                                     state::ClickAction::OpenFolder(path_to_open) => {
@@ -166,21 +491,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             app::open_folder_in_explorer(&path_to_open);
                                         });
                                     }
-                                    state::ClickAction::ToggledCard(_) => {}
+                                    state::ClickAction::ToggledCard(_)
+                                    | state::ClickAction::ToggleGitFileDiff(_) => {}
                                 }
                             }
                         }
                         MouseEventKind::ScrollUp => {
-                            let mut state = app_state.write().await;
-                            state.scroll_up();
+                            app_state.write().await.scroll_up();
                         }
                         MouseEventKind::ScrollDown => {
-                            let mut state = app_state.write().await;
-                            state.scroll_down();
+                            app_state.write().await.scroll_down();
                         }
                         _ => {}
                     },
-                    // Eventos de Teclado
                     Event::Key(key) => {
                         if key.modifiers.contains(KeyModifiers::CONTROL)
                             && key.code == KeyCode::Char('c')
@@ -201,16 +524,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 KeyCode::Char('7') => state.toggle_card(6), // Engram
                                 KeyCode::Char('8') => state.toggle_card(7), // Herramientas
                                 KeyCode::Char('9') => state.toggle_card(8), // MCP
+                                KeyCode::Char('0') | KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
                                 KeyCode::Char('s') => {
                                     let state_ref = app_state.clone();
+                                    let tx_done = tx.clone();
                                     tokio::spawn(async move {
                                         app::sync_integrations_action(&state_ref).await;
+                                        let _ = tx_done
+                                            .send(MainMsg::DataChanged { git_touched: false });
                                     });
                                 }
                                 KeyCode::Char('r') => {
                                     let state_ref = app_state.clone();
+                                    let tx_done = tx.clone();
                                     tokio::spawn(async move {
                                         app::force_refresh(&state_ref, true, true).await;
+                                        let _ = tx_done
+                                            .send(MainMsg::DataChanged { git_touched: false });
                                     });
                                 }
                                 KeyCode::Char('o') => {
@@ -230,14 +560,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                                 KeyCode::Char('d') => {
                                     let state_ref = app_state.clone();
+                                    let tx_done = tx.clone();
                                     tokio::spawn(async move {
                                         app::release_sessions_action(&state_ref).await;
+                                        let _ = tx_done
+                                            .send(MainMsg::DataChanged { git_touched: false });
                                     });
                                 }
                                 KeyCode::Char('x') => {
                                     let state_ref = app_state.clone();
+                                    let tx_done = tx.clone();
                                     tokio::spawn(async move {
                                         app::migrate_sessions_action(&state_ref).await;
+                                        let _ = tx_done
+                                            .send(MainMsg::DataChanged { git_touched: false });
                                     });
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
@@ -247,24 +583,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                     _ => {}
-                }
-
-                if event::poll(Duration::from_millis(0))? {
-                    ev_opt = Some(event::read()?);
-                } else {
-                    ev_opt = None;
-                }
+                },
             }
+
+            current_msg = rx.try_recv().ok();
+        }
+
+        if should_quit {
+            break;
+        }
+
+        if git_dirty {
+            hudr2::git::clear_git_cache();
+        }
+        if refresh_needed {
+            app::refresh_all(&app_state).await;
+        }
+        if quota_tick {
+            let s_clone = app_state.clone();
+            let tx_done = tx.clone();
+            tokio::spawn(async move {
+                app::force_refresh(&s_clone, false, false).await;
+                let _ = tx_done.send(MainMsg::DataChanged { git_touched: false });
+            });
         }
     }
 
-    crossterm::execute!(
-        stdout(),
-        DisableMouseCapture,
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    )?;
-    disable_raw_mode()?;
-
+    restore_terminal();
     Ok(())
 }

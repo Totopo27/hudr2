@@ -1,15 +1,83 @@
 use crate::models::TelemetrySnapshot;
 use crate::ui::CardBounds;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
+
+pub const CARD_KEYS: [&str; 10] = [
+    "estado",
+    "contexto",
+    "proyecto",
+    "integraciones",
+    "pools",
+    "git",
+    "engram",
+    "tools",
+    "mcp",
+    "ecosystem",
+];
+
+pub const DEFAULT_COLLAPSED: [bool; 10] = [
+    false, false, true, false, false, false, false, false, false, false,
+];
+
+/// Carga el estado de tarjetas colapsadas desde un archivo JSON (`{"collapsed": ["proyecto", ...]}`).
+/// Si el archivo no existe o es inválido, devuelve los valores por defecto.
+pub fn load_collapsed_config(path: &Path) -> [bool; 10] {
+    let Ok(bytes) = std::fs::read(path) else {
+        return DEFAULT_COLLAPSED;
+    };
+    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+        return DEFAULT_COLLAPSED;
+    };
+    let Some(arr) = v.get("collapsed").and_then(Value::as_array) else {
+        return DEFAULT_COLLAPSED;
+    };
+    let mut out = [false; 10];
+    for item in arr.iter().filter_map(Value::as_str) {
+        if let Some(idx) = CARD_KEYS.iter().position(|&k| k == item) {
+            out[idx] = true;
+        }
+    }
+    out
+}
+
+/// Guarda de forma atómica (`<file>.tmp` + `rename`) las tarjetas colapsadas.
+/// Si el directorio padre existe (o puede crearse en la ruta de config estándar), persiste sin corromper archivos.
+pub fn save_collapsed_config(path: &Path, collapsed: &[bool; 10]) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let names: Vec<&str> = CARD_KEYS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &k)| if collapsed[i] { Some(k) } else { None })
+        .collect();
+    let payload = json!({ "collapsed": names });
+    let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)
+        .and_then(|_| std::fs::rename(&tmp, path))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            e.to_string()
+        })
+}
 
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub snapshot: TelemetrySnapshot,
-    pub collapsed_cards: [bool; 9],
+    pub collapsed_cards: [bool; 10],
     pub scroll_offset: usize,
     pub card_bounds: Vec<CardBounds>,
     pub flash_notice: Option<String>,
     pub flash_notice_until: Option<std::time::Instant>,
     pub needs_redraw: bool,
+    pub config_path: Option<PathBuf>,
+    pub selected_diff_file: Option<String>,
+    pub selected_diff_lines: Vec<String>,
 }
 
 impl AppState {
@@ -23,14 +91,35 @@ impl AppState {
                 project_dir: cwd,
                 ..Default::default()
             },
-            // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp]
+            // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem]
             // proyecto (idx 2) viene colapsado por defecto como en hudr original
-            collapsed_cards: [false, false, true, false, false, false, false, false, false],
+            collapsed_cards: DEFAULT_COLLAPSED,
             scroll_offset: 0,
             card_bounds: Vec::new(),
             flash_notice: None,
             flash_notice_until: None,
             needs_redraw: true,
+            config_path: None,
+            selected_diff_file: None,
+            selected_diff_lines: Vec::new(),
+        }
+    }
+
+    pub fn with_config(config_path: Option<PathBuf>, custom_cwd: Option<String>) -> Self {
+        let mut s = Self::new();
+        if let Some(cwd) = custom_cwd {
+            s.snapshot.project_dir = cwd;
+        }
+        if let Some(ref p) = config_path {
+            s.collapsed_cards = load_collapsed_config(p);
+        }
+        s.config_path = config_path;
+        s
+    }
+
+    fn persist_collapsed_if_configured(&self) {
+        if let Some(ref path) = self.config_path {
+            let _ = save_collapsed_config(path, &self.collapsed_cards);
         }
     }
 
@@ -62,12 +151,26 @@ impl AppState {
         if index < self.collapsed_cards.len() {
             self.collapsed_cards[index] = !self.collapsed_cards[index];
             self.needs_redraw = true;
+            self.persist_collapsed_if_configured();
         }
     }
 
     pub fn toggle_all_collapse(&mut self) {
         let any_open = self.collapsed_cards.iter().any(|&c| !c);
         self.collapsed_cards.fill(any_open);
+        self.needs_redraw = true;
+        self.persist_collapsed_if_configured();
+    }
+
+    pub fn toggle_git_file_diff(&mut self, rel_path: &str) {
+        if self.selected_diff_file.as_deref() == Some(rel_path) {
+            self.selected_diff_file = None;
+            self.selected_diff_lines.clear();
+        } else {
+            self.selected_diff_file = Some(rel_path.to_string());
+            self.selected_diff_lines =
+                crate::git::read_file_diff_preview(&self.snapshot.project_dir, rel_path);
+        }
         self.needs_redraw = true;
     }
 
@@ -91,18 +194,28 @@ impl AppState {
         self.needs_redraw = true;
         let absolute_line = clicked_row + actual_scroll_offset;
 
-        // 1. Prioridad: Acciones especiales exactas (abrir carpeta o sincronizar)
+        // 1. Prioridad: Acciones especiales exactas (abrir carpeta, sincronizar o previsualizar diff)
+        let mut matched_special: Option<(&'static str, Option<String>)> = None;
         for bound in &self.card_bounds {
             if let Some(action) = bound.action_type
                 && absolute_line == bound.start_line
             {
-                if action == "sync_integrations" {
-                    return Some(ClickAction::SyncIntegrations);
-                } else if action == "open_folder"
-                    && let Some(ref p) = bound.action_path
-                {
-                    return Some(ClickAction::OpenFolder(p.clone()));
-                }
+                matched_special = Some((action, bound.action_path.clone()));
+                break;
+            }
+        }
+        if let Some((action, action_path)) = matched_special {
+            if action == "sync_integrations" {
+                return Some(ClickAction::SyncIntegrations);
+            } else if action == "open_folder"
+                && let Some(p) = action_path
+            {
+                return Some(ClickAction::OpenFolder(p));
+            } else if action == "git_file_diff"
+                && let Some(p) = action_path
+            {
+                self.toggle_git_file_diff(&p);
+                return Some(ClickAction::ToggleGitFileDiff(p));
             }
         }
 
@@ -111,21 +224,9 @@ impl AppState {
         // - Si la tarjeta está abierta, sólo hacer clic en su encabezado (start_line) la colapsa.
         //   Esto previene colisiones accidentales entre el borde inferior (end_line) de una
         //   tarjeta abierta (como Contexto) y el encabezado de la tarjeta siguiente (como Proyecto).
-        let card_keys = [
-            "estado",
-            "contexto",
-            "proyecto",
-            "integraciones",
-            "pools",
-            "git",
-            "engram",
-            "tools",
-            "mcp",
-        ];
-
         for bound in &self.card_bounds {
             if bound.action_type.is_none()
-                && let Some(idx) = card_keys.iter().position(|&k| k == bound.id)
+                && let Some(idx) = CARD_KEYS.iter().position(|&k| k == bound.id)
             {
                 let is_collapsed = self.collapsed_cards[idx];
                 let hit = if is_collapsed {
@@ -156,8 +257,10 @@ impl Default for AppState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum ClickAction {
     SyncIntegrations,
     OpenFolder(String),
     ToggledCard(usize),
+    ToggleGitFileDiff(String),
 }

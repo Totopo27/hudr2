@@ -1,81 +1,252 @@
 use crate::models::HerdrPane;
-use std::process::Command;
+use serde_json::{Value, json};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum HerdrWireEvent {
+    SubscriptionStarted,
+    PaneUpdated(HerdrPane),
+    PaneClosed(String),
+    StatusChanged {
+        pane_id: String,
+        agent_status: String,
+    },
+    WorkspaceFocused,
+    Disconnected,
+}
 
 /// Deep module para interactuar con Herdr / Telar.
-/// Prioriza la llamada socket o CLI `herdr pane list` / `herdr pane current`.
+/// Prioriza la llamada socket/pipe IPC directo (NDJSON) y usa el CLI `herdr` como respaldo.
 pub struct HerdrClient;
 
 impl HerdrClient {
-    pub fn get_panes() -> Vec<HerdrPane> {
-        let mut panes = Vec::new();
+    pub fn resolve_ipc_path() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("HERDR_SOCKET_PATH") {
+            let trimmed = p.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Some(home) = dirs::home_dir() {
+                let sock = home.join(".config").join("herdr").join("herdr.sock");
+                if sock.exists() {
+                    return Some(sock);
+                }
+            }
+        }
+        #[cfg(windows)]
+        {
+            for candidate in [r"\\.\pipe\herdr", r"\\.\pipe\herdr.sock"] {
+                let p = PathBuf::from(candidate);
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
 
-        // 1. Intentar vía CLI 'herdr pane list'
-        if let Ok(output) = Command::new("herdr").args(["pane", "list"]).output()
-            && output.status.success()
-            && let Ok(raw) = String::from_utf8(output.stdout)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
+    /// Realiza una petición NDJSON directa al socket/pipe de Herdr (`{"id":"hud","method":...}`).
+    pub fn request_ipc_at(socket_path: &Path, method: &str, params: Value) -> Option<Value> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::net::UnixStream;
+            let mut stream = UnixStream::connect(socket_path).ok()?;
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(1500)));
+            writeln!(
+                stream,
+                "{}",
+                json!({"id": "hud", "method": method, "params": params})
+            )
+            .ok()?;
+            let mut line = String::new();
+            BufReader::new(stream).read_line(&mut line).ok()?;
+            let v: Value = serde_json::from_str(&line).ok()?;
+            if !v["error"].is_null() {
+                return None;
+            }
+            Some(v["result"].clone())
+        }
+        #[cfg(windows)]
+        {
+            let path_str = socket_path.to_string_lossy();
+            let pipe_name = if path_str.starts_with(r"\\.\pipe\") {
+                path_str.into_owned()
+            } else {
+                return None;
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(pipe_name)
+                .ok()?;
+            writeln!(
+                file,
+                "{}",
+                json!({"id": "hud", "method": method, "params": params})
+            )
+            .ok()?;
+            file.flush().ok()?;
+            let mut line = String::new();
+            BufReader::new(file).read_line(&mut line).ok()?;
+            let v: Value = serde_json::from_str(&line).ok()?;
+            if !v["error"].is_null() {
+                return None;
+            }
+            Some(v["result"].clone())
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (socket_path, method, params);
+            None
+        }
+    }
+
+    pub fn request_ipc(method: &str, params: Value) -> Option<Value> {
+        let sock = Self::resolve_ipc_path()?;
+        Self::request_ipc_at(&sock, method, params)
+    }
+
+    pub fn parse_pane_json(item: &Value) -> Option<HerdrPane> {
+        let pane_id = item
+            .get("pane_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        if pane_id.is_empty() {
+            return None;
+        }
+        let tab_id = item
+            .get("tab_id")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let workspace_id = item
+            .get("workspace_id")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let cwd = item
+            .get("cwd")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let terminal_title = item
+            .get("terminal_title")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let terminal_title_stripped = item
+            .get("terminal_title_stripped")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let focused = item
+            .get("focused")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let agent_status = item
+            .get("agent_status")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string());
+        let agent = item
+            .get("agent")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
+        let agent_session_id = item
+            .get("agent_session")
+            .and_then(|s| s.get("value"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Some(HerdrPane {
+            pane_id,
+            tab_id,
+            workspace_id,
+            cwd,
+            terminal_title,
+            terminal_title_stripped,
+            focused,
+            agent_status,
+            agent,
+            agent_session_id,
+        })
+    }
+
+    /// Parsea un mensaje NDJSON del stream `events.subscribe` de Herdr.
+    /// Soporta tanto `pane_agent_status_changed` como `pane.agent_status_changed` (con punto).
+    pub fn parse_wire_event(v: &Value) -> Option<HerdrWireEvent> {
+        if !v["error"].is_null() {
+            return None;
+        }
+        if v["result"]["type"].as_str() == Some("subscription_started") {
+            return Some(HerdrWireEvent::SubscriptionStarted);
+        }
+        let ev_name = v.get("event").and_then(Value::as_str).unwrap_or("");
+        match ev_name {
+            "pane_updated" | "pane.updated" => {
+                let pane = Self::parse_pane_json(&v["data"]["pane"])?;
+                Some(HerdrWireEvent::PaneUpdated(pane))
+            }
+            "pane_closed" | "pane.closed" => {
+                let pid = v["data"]["pane_id"].as_str()?.to_string();
+                Some(HerdrWireEvent::PaneClosed(pid))
+            }
+            "pane_agent_status_changed" | "pane.agent_status_changed" => {
+                let pid = v["data"]["pane_id"].as_str()?.to_string();
+                let st = v["data"]["agent_status"].as_str()?.to_string();
+                Some(HerdrWireEvent::StatusChanged {
+                    pane_id: pid,
+                    agent_status: st,
+                })
+            }
+            "workspace_focused" | "workspace.focused" => Some(HerdrWireEvent::WorkspaceFocused),
+            _ => None,
+        }
+    }
+
+    fn run_herdr_cli(args: &[&str]) -> Option<Value> {
+        let mut cmd = Command::new("herdr");
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let output = cmd.output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8(output.stdout).ok()?;
+        serde_json::from_str::<Value>(&raw).ok()
+    }
+
+    pub fn get_panes() -> Vec<HerdrPane> {
+        // 1. Prioridad: IPC directo (socket / pipe) sin crear subproceso
+        if let Some(res) = Self::request_ipc("pane.list", json!({}))
+            && let Some(arr) = res.get("panes").and_then(|p| p.as_array()).or_else(|| res.as_array())
+        {
+            return arr.iter().filter_map(Self::parse_pane_json).collect();
+        }
+
+        // 2. Fallback: CLI 'herdr pane list'
+        let mut panes = Vec::new();
+        if let Some(val) = Self::run_herdr_cli(&["pane", "list"])
             && let Some(arr) = val
                 .get("result")
                 .and_then(|r| r.get("panes"))
                 .and_then(|p| p.as_array())
         {
             for item in arr {
-                let pane_id = item
-                    .get("pane_id")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let tab_id = item
-                    .get("tab_id")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let workspace_id = item
-                    .get("workspace_id")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let cwd = item
-                    .get("cwd")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let terminal_title = item
-                    .get("terminal_title")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let terminal_title_stripped = item
-                    .get("terminal_title_stripped")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let focused = item
-                    .get("focused")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false);
-                let agent_status = item
-                    .get("agent_status")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s.to_string());
-                let agent = item
-                    .get("agent")
-                    .and_then(|a| a.as_str())
-                    .map(|s| s.to_string());
-                let agent_session_id = item
-                    .get("agent_session")
-                    .and_then(|s| s.get("value"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-
-                if !pane_id.is_empty() {
-                    panes.push(HerdrPane {
-                        pane_id,
-                        tab_id,
-                        workspace_id,
-                        cwd,
-                        terminal_title,
-                        terminal_title_stripped,
-                        focused,
-                        agent_status,
-                        agent,
-                        agent_session_id,
-                    });
+                if let Some(p) = Self::parse_pane_json(item) {
+                    panes.push(p);
                 }
             }
         }
@@ -97,11 +268,12 @@ impl HerdrClient {
             return (Some(my_pid.clone()), my_tab);
         }
 
-        if let Ok(output) = Command::new("herdr").args(["pane", "current"]).output()
-            && output.status.success()
-            && let Ok(raw) = String::from_utf8(output.stdout)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
-        {
+        // Si hay panes cargados y alguno tiene foco, resolver en memoria sin lanzar otro subproceso
+        if let Some(focused) = panes.iter().find(|p| p.focused) {
+            return (Some(focused.pane_id.clone()), focused.tab_id.clone());
+        }
+
+        if let Some(val) = Self::run_herdr_cli(&["pane", "current"]) {
             let cur_pane = val.get("result").and_then(|r| r.get("pane"));
             let p_id = cur_pane
                 .and_then(|p| p.get("pane_id"))
@@ -114,11 +286,6 @@ impl HerdrClient {
             return (p_id, t_id);
         }
 
-        // Si no se pudo obtener explícitamente, buscar el pane con focused == true
-        if let Some(focused) = panes.iter().find(|p| p.focused) {
-            return (Some(focused.pane_id.clone()), focused.tab_id.clone());
-        }
-
         (None, None)
     }
 
@@ -129,11 +296,7 @@ impl HerdrClient {
             return Some(val.trim().to_string());
         }
 
-        if let Ok(output) = Command::new("herdr").args(["pane", "current"]).output()
-            && output.status.success()
-            && let Ok(raw) = String::from_utf8(output.stdout)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw)
-        {
+        if let Some(val) = Self::run_herdr_cli(&["pane", "current"]) {
             return val
                 .get("result")
                 .and_then(|r| r.get("pane"))
@@ -146,18 +309,120 @@ impl HerdrClient {
     }
 
     pub fn close_pane(pane_id: &str) -> bool {
-        Command::new("herdr")
-            .args(["pane", "close", pane_id])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        if Self::request_ipc("pane.close", json!({ "pane_id": pane_id })).is_some() {
+            return true;
+        }
+        Self::run_herdr_cli(&["pane", "close", pane_id]).is_some()
     }
 
     pub fn close_workspace(workspace_id: &str) -> bool {
-        Command::new("herdr")
-            .args(["workspace", "close", workspace_id])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        if Self::request_ipc("workspace.close", json!({ "workspace_id": workspace_id })).is_some() {
+            return true;
+        }
+        Self::run_herdr_cli(&["workspace", "close", workspace_id]).is_some()
+    }
+
+    /// Inicia un hilo suscriptor al stream NDJSON `events.subscribe` de Herdr cuando el socket/pipe existe.
+    pub fn spawn_event_subscriber<F>(bound_pane_id: Option<String>, on_event: F)
+    where
+        F: Fn(HerdrWireEvent) + Send + 'static,
+    {
+        let Some(socket_path) = Self::resolve_ipc_path() else {
+            return;
+        };
+
+        std::thread::spawn(move || {
+            let mut backoff_secs = 1u64;
+            loop {
+                let mut subs = vec![
+                    json!({"type": "pane.updated"}),
+                    json!({"type": "pane.closed"}),
+                    json!({"type": "workspace.focused"}),
+                ];
+                if let Some(ref pid) = bound_pane_id {
+                    subs.push(json!({"type": "pane.agent_status_changed", "pane_id": pid}));
+                } else {
+                    subs.push(json!({"type": "pane.agent_status_changed"}));
+                }
+
+                let subscribe_msg = json!({
+                    "id": "events",
+                    "method": "events.subscribe",
+                    "params": { "subscriptions": subs }
+                });
+
+                #[cfg(unix)]
+                let connected = {
+                    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&socket_path) {
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+                        if writeln!(stream, "{subscribe_msg}").is_ok() {
+                            backoff_secs = 1;
+                            for line in BufReader::new(stream).lines() {
+                                let Ok(l) = line else { break };
+                                let Ok(v) = serde_json::from_str::<Value>(&l) else {
+                                    continue;
+                                };
+                                if let Some(ev) = Self::parse_wire_event(&v) {
+                                    let is_bound_closed = matches!(
+                                        (&ev, &bound_pane_id),
+                                        (HerdrWireEvent::PaneClosed(closed_id), Some(bound)) if closed_id == bound
+                                    );
+                                    on_event(ev);
+                                    if is_bound_closed {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                #[cfg(windows)]
+                let connected = {
+                    let path_str = socket_path.to_string_lossy();
+                    if path_str.starts_with(r"\\.\pipe\")
+                        && let Ok(mut file) = std::fs::OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .open(path_str.as_ref())
+                    {
+                        if writeln!(file, "{subscribe_msg}").is_ok() && file.flush().is_ok() {
+                            backoff_secs = 1;
+                            for line in BufReader::new(file).lines() {
+                                let Ok(l) = line else { break };
+                                let Ok(v) = serde_json::from_str::<Value>(&l) else {
+                                    continue;
+                                };
+                                if let Some(ev) = Self::parse_wire_event(&v) {
+                                    let is_bound_closed = matches!(
+                                        (&ev, &bound_pane_id),
+                                        (HerdrWireEvent::PaneClosed(closed_id), Some(bound)) if closed_id == bound
+                                    );
+                                    on_event(ev);
+                                    if is_bound_closed {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                #[cfg(not(any(unix, windows)))]
+                let connected = false;
+
+                if !connected {
+                    on_event(HerdrWireEvent::Disconnected);
+                }
+                std::thread::sleep(Duration::from_secs(backoff_secs));
+                backoff_secs = (backoff_secs * 2).min(30);
+            }
+        });
     }
 }

@@ -26,6 +26,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Utilidades de Sistema y Tiempo
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 dirs = "6.0"
+notify = "8"
 regex = "1.11"
 
 [dev-dependencies]

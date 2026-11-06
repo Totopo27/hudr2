@@ -28,6 +28,15 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     let my_pid_clone = my_pane_id.clone();
     let my_tid_clone = my_tab_id.clone();
     let opencode_fut = tokio::task::spawn_blocking(move || {
+        if let Some((_, pi_session)) = crate::pi::try_read_pi_session(
+            &dir_clone,
+            &panes_clone,
+            &accounts_copy,
+            my_pid_clone.as_deref(),
+            my_tid_clone.as_deref(),
+        ) {
+            return pi_session;
+        }
         read_opencode_session(
             &dir_clone,
             &panes_clone,
@@ -55,8 +64,10 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     let dir_clone = project_dir.clone();
     let mcps_fut = tokio::task::spawn_blocking(move || read_mcp_servers(&dir_clone));
 
-    let (opencode_res, engram_res, git_res, mcps_res) =
-        tokio::join!(opencode_fut, engram_fut, git_fut, mcps_fut);
+    let eco_fut = tokio::task::spawn_blocking(crate::ecosystem::read_ecosystem_telemetry);
+
+    let (opencode_res, engram_res, git_res, mcps_res, eco_res) =
+        tokio::join!(opencode_fut, engram_fut, git_fut, mcps_fut, eco_fut);
 
     let tree_res = match tree_fut {
         Some(handle) => handle.await.ok(),
@@ -65,6 +76,8 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
 
     {
         let mut state = app_state.write().await;
+        let prev_snapshot = state.snapshot.clone();
+
         if let Ok(oc) = opencode_res {
             state.snapshot.agent_session = oc;
         }
@@ -72,6 +85,13 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.engram = en;
         }
         if let Ok(g) = git_res {
+            if let Some(ref sel_file) = state.selected_diff_file
+                && !g.files.iter().any(|f| &f.path == sel_file)
+            {
+                state.selected_diff_file = None;
+                state.selected_diff_lines.clear();
+                state.needs_redraw = true;
+            }
             state.snapshot.git = g;
         }
         if let Some(tr) = tree_res {
@@ -80,12 +100,18 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         if let Ok(m) = mcps_res {
             state.snapshot.mcps = m;
         }
+        if let Ok(eco) = eco_res {
+            state.snapshot.ecosystem = eco;
+        }
 
         // Descubrir cuentas preservando los valores de cuota ya obtenidos
         QuotaCollector::discover_accounts(&mut state.snapshot.accounts);
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
-        state.needs_redraw = true;
+
+        if state.snapshot != prev_snapshot {
+            state.needs_redraw = true;
+        }
     }
 }
 
@@ -113,7 +139,9 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
 
     crate::git::clear_git_cache();
     crate::opencode::clear_message_stats_cache();
+    crate::pi::clear_pi_tail_cache();
     crate::engram::clear_engram_cache();
+    crate::ecosystem::clear_ecosystem_cache();
 
     refresh_all(app_state).await;
 
@@ -160,7 +188,7 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
 
     // Estrategia de Refresco Inteligente (Snapshot Inicial / Manual vs Polling Periódico):
     // - Si force_all es true (arranque inicial o tecla 'r'): se consultan todas las cuentas para pintar la foto completa.
-    // - Si force_all es false (intervalo periódico de 5m): SOLO se consultan las cuentas activas en uso en alguna sesión
+    // - Si force_all es false (intervalo periódico de 2m): SOLO se consultan las cuentas activas en uso en alguna sesión
     //   o aquellas recién descubiertas que aún tengan los valores placeholder iniciales.
     let target_accounts: Vec<AccountQuota> = if force_all {
         accounts

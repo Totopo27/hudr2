@@ -1585,4 +1585,358 @@ mod tests {
         // 5. Cálculo de pace sin fecha devuelve ~0%
         assert_eq!(calculate_quota_pace(90, false, None), "~0%");
     }
+
+    #[test]
+    fn test_ecosystem_card_rendering_and_click() {
+        use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
+
+        let mut state = AppState::new();
+        state.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "pi".to_string(),
+                    version: Some("v1.5.0".to_string()),
+                    is_installed: true,
+                },
+                ToolVersionInfo {
+                    name: "hudr2".to_string(),
+                    version: Some("v0.1.0".to_string()),
+                    is_installed: true,
+                },
+                ToolVersionInfo {
+                    name: "gentle-ai".to_string(),
+                    version: None,
+                    is_installed: false,
+                },
+            ],
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 44);
+        state.card_bounds = render_out.bounds;
+
+        let eco_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "ecosystem")
+            .expect("ecosystem card bound must exist");
+
+        // El texto de la pantalla debe contener el título y herramientas
+        let all_text = render_out.lines.join("\n");
+        assert!(all_text.contains("Stack"));
+        assert!(all_text.contains("Ecosistema"));
+        assert!(all_text.contains("pi"));
+        assert!(all_text.contains("v1.5.0"));
+        assert!(all_text.contains("gentle-ai"));
+
+        // Clic en la tarjeta de ecosistema alterna el colapso (idx 9)
+        assert!(!state.collapsed_cards[9]);
+        let res = state.handle_mouse_click(eco_bound.start_line, 0);
+        assert!(matches!(res, Some(ClickAction::ToggledCard(9))));
+        assert!(state.collapsed_cards[9]);
+    }
+
+    #[test]
+    fn test_pi_jsonl_incremental_tail_and_context_cache() {
+        use hudr2::pi::{clear_pi_tail_cache, read_pi_session_file};
+        use std::io::Write;
+
+        clear_pi_tail_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let agent_dir = tmp.path().join(".gentle-shell").join("agent");
+        let ses_dir = agent_dir.join("sessions").join("test-proj");
+        std::fs::create_dir_all(&ses_dir).unwrap();
+
+        // 1. Configurar settings.json, cpamc-models-cache.json y models-store.json
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"defaultProvider":"cpamc","defaultModel":"gpt-6.1-sol","defaultThinkingLevel":"high"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("cpamc-models-cache.json"),
+            r#"[{"id":"gpt-6.1-sol","contextWindow":272000}]"#,
+        )
+        .unwrap();
+        std::fs::write(
+            agent_dir.join("models-store.json"),
+            r#"{"cpamc":{"models":[{"id":"gpt-6.1-sol","contextWindow":370000}]}}"#,
+        )
+        .unwrap();
+
+        let jsonl_path = ses_dir.join("2026_s1.jsonl");
+        std::fs::write(&jsonl_path, "").unwrap();
+
+        // Sesión vacía recién creada: debe hacer fallback a settings.json y preferir cpamc-models-cache.json (272k)
+        let s0 = read_pi_session_file(&jsonl_path, &[], "working").unwrap();
+        assert_eq!(s0.provider_name, "gentle-shell");
+        assert_eq!(s0.model, "cpamc/gpt-6.1-sol");
+        assert_eq!(s0.model_short, "gpt-6.1-sol");
+        assert_eq!(s0.thinking_level.as_deref(), Some("high"));
+        assert_eq!(s0.context_limit, 272_000);
+        assert_eq!(s0.agent_status, "working");
+
+        // 2. Append incremental de mensajes de asistente y toolResult de todo
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&jsonl_path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"message","message":{{"role":"assistant","model":"gpt-6.1-sol","provider":"cpamc","usage":{{"input":1200,"output":300,"cacheRead":500,"totalTokens":2000,"cost":{{"total":0.015}}}},"content":[{{"type":"toolCall","name":"read"}},{{"type":"toolCall","name":"edit","arguments":{{"path":"src/main.rs"}}}},{{"type":"toolCall","name":"bash"}},{{"type":"toolCall","name":"mem_save"}}]}}}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"message","message":{{"role":"toolResult","toolName":"todo","details":{{"gentleTodo":{{"tasks":[{{"title":"Optimizar HUD","status":"in_progress"}},{{"title":"Tests","status":"done"}}]}}}}}}}}"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let s1 = read_pi_session_file(&jsonl_path, &[], "idle").unwrap();
+        assert_eq!(s1.tokens_input, 1200);
+        assert_eq!(s1.tokens_output, 300);
+        assert_eq!(s1.active_turn_tokens, 2000);
+        assert!((s1.cost - 0.015).abs() < 1e-6);
+        assert_eq!(s1.tool_total, 4);
+        assert_eq!(s1.tool_reads, 1);
+        assert_eq!(s1.tool_writes, 1);
+        assert_eq!(s1.tool_bash, 1);
+        assert_eq!(s1.tool_engram, 1);
+        assert_eq!(s1.attributed_changes.files_count, 1);
+        assert_eq!(s1.todos.len(), 2);
+        assert_eq!(s1.todos[0].title, "Optimizar HUD");
+        assert_eq!(s1.todos[0].status, "in_progress");
+
+        // 3. Segundo turno append-only: solo lee los nuevos bytes y acumula tokens
+        writeln!(
+            f,
+            r#"{{"type":"message","message":{{"role":"assistant","usage":{{"input":800,"output":200,"totalTokens":3100,"cost":{{"total":0.010}}}}}}}}"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let s2 = read_pi_session_file(&jsonl_path, &[], "idle").unwrap();
+        assert_eq!(s2.tokens_input, 2000);
+        assert_eq!(s2.tokens_output, 500);
+        assert_eq!(s2.active_turn_tokens, 3100);
+        assert!((s2.cost - 0.025).abs() < 1e-6);
+
+        clear_pi_tail_cache();
+    }
+
+    #[test]
+    fn test_git_sensitive_file_protection_and_inline_diff_click() {
+        use hudr2::git::{is_sensitive_file, read_file_diff_preview};
+        use hudr2::models::GitFileChange;
+
+        for secret in [
+            ".env",
+            ".env.local",
+            "config/secrets.json",
+            "keys/id_rsa",
+            "cert.pem",
+            "private.key",
+            "oauth_token.txt",
+            "auth-store.json",
+        ] {
+            assert!(
+                is_sensitive_file(secret),
+                "{secret} debe detectarse como sensible"
+            );
+            let preview = read_file_diff_preview(".", secret);
+            assert_eq!(preview, vec!["[archivo sensible protegido - diff oculto]"]);
+        }
+
+        for safe in ["src/main.rs", "README.md", "Cargo.toml"] {
+            assert!(
+                !is_sensitive_file(safe),
+                "{safe} no debe marcarse como sensible"
+            );
+        }
+
+        // Probar clic en archivo dentro de la tarjeta Cambios (Git)
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false; // Cambios abierto
+        state.snapshot.git.is_clean = false;
+        state.snapshot.git.modified = 1;
+        state.snapshot.git.files = vec![GitFileChange {
+            path: ".env.secret".to_string(),
+            status_code: "M".to_string(),
+            added: 2,
+            deleted: 1,
+        }];
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            state.selected_diff_file.as_deref(),
+            &state.selected_diff_lines,
+            48,
+        );
+        state.card_bounds = render_out.bounds;
+
+        let file_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.action_type == Some("git_file_diff"))
+            .expect("debe existir bound clicable para el archivo en Git");
+
+        let click_res = state.handle_mouse_click(file_bound.start_line, 0);
+        assert_eq!(
+            click_res,
+            Some(ClickAction::ToggleGitFileDiff(".env.secret".to_string()))
+        );
+        assert_eq!(state.selected_diff_file.as_deref(), Some(".env.secret"));
+        assert_eq!(
+            state.selected_diff_lines,
+            vec!["[archivo sensible protegido - diff oculto]"]
+        );
+
+        // Renderizar con el diff activo y comprobar que aparece el aviso protegido
+        let render_out2 = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            state.selected_diff_file.as_deref(),
+            &state.selected_diff_lines,
+            48,
+        );
+        let screen_clean = ui::strip_ansi(&render_out2.lines.join("\n"));
+        assert!(screen_clean.contains("[archivo sensible protegido"));
+    }
+
+    #[test]
+    fn test_collapsed_cards_atomic_persistence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        let mut st = AppState::with_config(Some(cfg_path.clone()), None);
+        assert!(!st.collapsed_cards[0]);
+        st.toggle_card(0); // Colapsar "estado"
+        st.toggle_card(5); // Colapsar "git"
+        assert!(st.collapsed_cards[0]);
+        assert!(st.collapsed_cards[5]);
+        assert!(cfg_path.exists(), "El archivo de configuración debe haberse guardado");
+
+        // Recargar en un nuevo AppState y comprobar que recuerda las tarjetas colapsadas
+        let st2 = AppState::with_config(Some(cfg_path), None);
+        assert!(st2.collapsed_cards[0]);
+        assert!(st2.collapsed_cards[2]); // proyecto venía colapsado por defecto
+        assert!(st2.collapsed_cards[5]);
+        assert!(!st2.collapsed_cards[1]);
+    }
+
+    #[test]
+    fn test_herdr_wire_event_parsing() {
+        use hudr2::herdr::{HerdrClient, HerdrWireEvent};
+        use serde_json::json;
+
+        // Ambos formatos (guion bajo y punto) para agent_status_changed deben funcionar
+        for ev_name in ["pane_agent_status_changed", "pane.agent_status_changed"] {
+            let payload = json!({
+                "event": ev_name,
+                "data": { "pane_id": "w1:p2", "agent_status": "working" }
+            });
+            assert_eq!(
+                HerdrClient::parse_wire_event(&payload),
+                Some(HerdrWireEvent::StatusChanged {
+                    pane_id: "w1:p2".to_string(),
+                    agent_status: "working".to_string()
+                })
+            );
+        }
+
+        let closed = json!({
+            "event": "pane_closed",
+            "data": { "pane_id": "w1:p2" }
+        });
+        assert_eq!(
+            HerdrClient::parse_wire_event(&closed),
+            Some(HerdrWireEvent::PaneClosed("w1:p2".to_string()))
+        );
+
+        let started = json!({
+            "result": { "type": "subscription_started" }
+        });
+        assert_eq!(
+            HerdrClient::parse_wire_event(&started),
+            Some(HerdrWireEvent::SubscriptionStarted)
+        );
+    }
+
+    #[test]
+    fn test_engram_handoff_summary_extraction_and_render() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        hudr2::engram::clear_engram_cache();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("engram.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        conn.execute_batch(
+            "CREATE TABLE observations (
+                id INTEGER PRIMARY KEY,
+                project TEXT,
+                type TEXT,
+                content TEXT,
+                created_at TEXT,
+                deleted_at TEXT
+            );
+            CREATE TABLE sync_enrolled_projects (
+                project TEXT PRIMARY KEY
+            );
+            INSERT INTO observations (id, project, type, content, created_at, deleted_at)
+            VALUES (77, 'handoffproj', 'session_summary', '## Goal\nOptimizar hudr2 con eventos\n- Listo', '2026-11-06 12:00:00', NULL);",
+        )
+        .unwrap();
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("ENGRAM_DB_PATH", db_path.to_str().unwrap());
+        }
+
+        let proj_path = tmp.path().join("handoffproj");
+        std::fs::create_dir_all(&proj_path).unwrap();
+        let tele = hudr2::engram::read_engram_telemetry(proj_path.to_str().unwrap());
+        assert!(tele.online);
+        assert_eq!(tele.obs_count, 1);
+        let handoff = tele.last_handoff.as_ref().expect("debe extraer last_handoff");
+        assert_eq!(handoff.id, 77);
+        assert!(handoff.lines.iter().any(|l| l.contains("Optimizar hudr2")));
+
+        let mut state = AppState::new();
+        state.snapshot.engram = tele;
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let text = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(text.contains("Handoff #77"));
+        assert!(text.contains("Optimizar hudr2"));
+
+        hudr2::engram::clear_engram_cache();
+        unsafe {
+            std::env::remove_var("ENGRAM_DB_PATH");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_refresh_all_skips_redraw_when_snapshot_unchanged() {
+        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+        hudr2::app::refresh_all(&app_state).await;
+
+        {
+            let mut state = app_state.write().await;
+            state.needs_redraw = false;
+        }
+
+        // Segunda llamada consecutiva sin cambios en el estado subyacente:
+        // needs_redraw debe mantenerse en false (cero redibujados redundantes)
+        hudr2::app::refresh_all(&app_state).await;
+        {
+            let state = app_state.read().await;
+            assert!(
+                !state.needs_redraw,
+                "refresh_all no debe forzar needs_redraw = true cuando el snapshot no cambió"
+            );
+        }
+    }
 }

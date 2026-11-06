@@ -271,3 +271,38 @@ pub fn opencode_config_candidates(target_dir: &str) -> Vec<PathBuf> {
 
     candidates
 }
+
+/// Candidatos para archivos de configuración MCP de Pi / Gentle Shell (`mcp.json`)
+pub fn pi_mcp_config_candidates(target_dir: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    if let Ok(agent_dir) = std::env::var("PI_AGENT_DIR") {
+        candidates.push(Path::new(&agent_dir).join("mcp.json"));
+    }
+
+    candidates.push(Path::new(target_dir).join(".gentle-shell").join("mcp.json"));
+    candidates.push(Path::new(target_dir).join(".pi").join("mcp.json"));
+    candidates.push(home.join(".gentle-shell").join("agent").join("mcp.json"));
+    candidates.push(home.join(".pi").join("agent").join("mcp.json"));
+
+    candidates
+}
+
+/// Ruta al archivo de configuración persistente de hudr2 (`hudr2.json`).
+/// Solo escribe cuando el directorio padre existe o cuando se especifica explícitamente.
+pub fn resolve_hudr2_config_path() -> PathBuf {
+    if let Ok(p) = std::env::var("HUDR2_CONFIG_PATH") {
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if let Some(cfg_dir) = dirs::config_dir() {
+        return cfg_dir.join("hudr2").join("hudr2.json");
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    home.join(".config").join("hudr2").join("hudr2.json")
+}

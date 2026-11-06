@@ -2,41 +2,69 @@ use crate::models::{McpServer, ProjectTreeData, TreeNode};
 use std::fs;
 use std::path::Path;
 
+const TREE_SKIP_NAMES: [&str; 9] = [
+    ".git",
+    "node_modules",
+    "dist",
+    ".cache",
+    ".next",
+    "coverage",
+    ".turbo",
+    "build",
+    "target",
+];
+
+const TREE_MAX_ENTRIES: usize = 2000;
+
+fn is_real_dir(entry: &fs::DirEntry) -> bool {
+    entry
+        .file_type()
+        .map(|t| t.is_dir() && !t.is_symlink())
+        .unwrap_or(false)
+}
+
 pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
     let mut data = ProjectTreeData {
         root_path: target_dir.to_string(),
         ..Default::default()
     };
 
+    let mut budget = TREE_MAX_ENTRIES;
     let p = Path::new(target_dir);
     if let Ok(entries) = fs::read_dir(p) {
         let mut list: Vec<_> = entries
             .flatten()
             .filter(|e| {
                 if let Some(name) = e.file_name().to_str() {
-                    !name.starts_with('.')
-                        && name != "node_modules"
-                        && name != "target"
-                        && name != "dist"
+                    !name.starts_with('.') && !TREE_SKIP_NAMES.contains(&name)
                 } else {
                     false
                 }
             })
             .collect();
 
-        // Carpetas primero, luego archivos, ambos ordenados alfabéticamente
+        // Carpetas primero, luego archivos, ambos ordenados alfabéticamente (case-insensitive)
         list.sort_by(|a, b| {
-            let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let a_is_dir = is_real_dir(a);
+            let b_is_dir = is_real_dir(b);
             match (a_is_dir, b_is_dir) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
-                _ => a.file_name().cmp(&b.file_name()),
+                _ => a
+                    .file_name()
+                    .to_string_lossy()
+                    .to_lowercase()
+                    .cmp(&b.file_name().to_string_lossy().to_lowercase()),
             }
         });
 
         for entry in list {
-            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+
+            let is_dir = is_real_dir(&entry);
             let name = entry.file_name().to_string_lossy().to_string();
 
             if is_dir {
@@ -45,18 +73,26 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
                 if let Ok(sub) = fs::read_dir(entry.path()) {
                     let mut sub_entries: Vec<_> = sub.flatten().collect();
                     sub_entries.sort_by(|a, b| {
-                        let a_is_dir = a.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let b_is_dir = b.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let a_is_dir = is_real_dir(a);
+                        let b_is_dir = is_real_dir(b);
                         match (a_is_dir, b_is_dir) {
                             (true, false) => std::cmp::Ordering::Less,
                             (false, true) => std::cmp::Ordering::Greater,
-                            _ => a.file_name().cmp(&b.file_name()),
+                            _ => a
+                                .file_name()
+                                .to_string_lossy()
+                                .to_lowercase()
+                                .cmp(&b.file_name().to_string_lossy().to_lowercase()),
                         }
                     });
                     for s in sub_entries {
+                        if budget == 0 {
+                            break;
+                        }
                         let s_name = s.file_name().to_string_lossy().to_string();
-                        if !s_name.starts_with('.') && s_name != "target" {
-                            let s_is_dir = s.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        if !s_name.starts_with('.') && !TREE_SKIP_NAMES.contains(&s_name.as_str()) {
+                            budget -= 1;
+                            let s_is_dir = is_real_dir(&s);
                             if s_is_dir {
                                 data.total_dirs += 1;
                             } else {
@@ -91,7 +127,8 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
 
 pub fn read_mcp_servers(target_dir: &str) -> Vec<McpServer> {
     let mut mcps = Vec::new();
-    let candidates = crate::paths::opencode_config_candidates(target_dir);
+    let mut candidates = crate::paths::opencode_config_candidates(target_dir);
+    candidates.extend(crate::paths::pi_mcp_config_candidates(target_dir));
 
     let mut register_mcp = |name: &str, val: &serde_json::Value| {
         if name.is_empty() || !val.is_object() {

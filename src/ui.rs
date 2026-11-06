@@ -205,8 +205,19 @@ pub fn format_tokens(num: i64) -> String {
 
 pub fn render_screen(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 9],
+    collapsed: &[bool; 10],
     flash_notice: Option<&str>,
+    width: usize,
+) -> RenderOutput {
+    render_screen_with_diff(snap, collapsed, flash_notice, None, &[], width)
+}
+
+pub fn render_screen_with_diff(
+    snap: &TelemetrySnapshot,
+    collapsed: &[bool; 10],
+    flash_notice: Option<&str>,
+    selected_diff_file: Option<&str>,
+    selected_diff_lines: &[String],
     width: usize,
 ) -> RenderOutput {
     let mut lines = Vec::new();
@@ -688,27 +699,120 @@ pub fn render_screen(
         width,
     ));
     if !collapsed[5] {
+        let ab_badge = match snap.git.ahead_behind {
+            Some((a, b)) if a > 0 || b > 0 => {
+                let mut parts = Vec::new();
+                if a > 0 {
+                    parts.push(format!("\u{25b2}{a}"));
+                }
+                if b > 0 {
+                    parts.push(format!("\u{25bc}{b}"));
+                }
+                format!(" {GOLD}{}{RESET}", parts.join(""))
+            }
+            _ => String::new(),
+        };
         let clean_st = if snap.git.is_clean {
             format!("{MINT}ok limpio{RESET}")
         } else {
             format!("{AMBER}modificado{RESET}")
         };
         lines.push(draw_row(
-            &format!("{CYAN}{}{RESET}", snap.git.branch),
+            &format!("{CYAN}{}{RESET}{ab_badge}", snap.git.branch),
             &clean_st,
             width,
         ));
-        lines.push(draw_row(
-            &format!("{TEXT_DIM}* (sin commits recientes){RESET}"),
-            "",
-            width,
-        ));
-        let git_part = format!("{TEXT_DIM}git:{RESET} {MINT}limpio{RESET}");
+        if let Some(latest_commit) = snap.git.recent_commits.first() {
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}* {latest_commit}{RESET}"),
+                "",
+                width,
+            ));
+        } else {
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}* (sin commits recientes){RESET}"),
+                "",
+                width,
+            ));
+        }
+        let git_part = if snap.git.is_clean {
+            format!("{TEXT_DIM}git:{RESET} {MINT}limpio{RESET}")
+        } else if snap.git.lines_added > 0 || snap.git.lines_deleted > 0 {
+            format!(
+                "{TEXT_DIM}git:{RESET} {MINT}+{}{RESET} {CORAL}-{}{RESET}",
+                snap.git.lines_added, snap.git.lines_deleted
+            )
+        } else {
+            format!(
+                "{TEXT_DIM}git:{RESET} {AMBER}{} pend{RESET}",
+                snap.git.modified + snap.git.staged + snap.git.untracked
+            )
+        };
         let ag_part = format!(
             "{ACCENT_PRIMARY}ag:{RESET} {MINT}{} archivos (+){RESET}",
             snap.agent_session.attributed_changes.files_count
         );
         lines.push(draw_row(&git_part, &ag_part, width));
+
+        if !snap.git.files.is_empty() {
+            lines.push(draw_divider(width));
+            let max_files = 6;
+            for f in snap.git.files.iter().take(max_files) {
+                let file_line_idx = lines.len();
+                let is_selected = selected_diff_file == Some(f.path.as_str());
+                let badge_color = match f.status_code.as_str() {
+                    "A" => MINT,
+                    "D" | "U" => CORAL,
+                    "?" => CYAN,
+                    _ => AMBER,
+                };
+                let arrow = if is_selected { "v" } else { ">" };
+                let left_file = format!(
+                    "{TEXT_DIM}{arrow}{RESET} {badge_color}[{}]{RESET} {TEXT_PRIMARY}{}{RESET}",
+                    f.status_code, f.path
+                );
+                let right_stat = if f.added > 0 || f.deleted > 0 {
+                    format!("{MINT}+{}{RESET} {CORAL}-{}{RESET}", f.added, f.deleted)
+                } else {
+                    String::new()
+                };
+                lines.push(draw_row(&left_file, &right_stat, width));
+                bounds.push(CardBounds {
+                    id: "git_file_diff",
+                    start_line: file_line_idx,
+                    end_line: file_line_idx,
+                    action_type: Some("git_file_diff"),
+                    action_path: Some(f.path.clone()),
+                });
+
+                if is_selected {
+                    for dl in selected_diff_lines.iter().take(12) {
+                        let colored_dl = if dl.starts_with('[') {
+                            format!("  {AMBER}{dl}{RESET}")
+                        } else if dl.starts_with("@@") {
+                            format!("  {CYAN}{dl}{RESET}")
+                        } else if dl.starts_with('+') {
+                            format!("  {MINT}{dl}{RESET}")
+                        } else if dl.starts_with('-') {
+                            format!("  {CORAL}{dl}{RESET}")
+                        } else {
+                            format!("  {TEXT_MUTED}{dl}{RESET}")
+                        };
+                        lines.push(draw_row(&colored_dl, "", width));
+                    }
+                }
+            }
+            if snap.git.files.len() > max_files {
+                lines.push(draw_row(
+                    &format!(
+                        "{TEXT_DIM}\u{2026} y {} archivos m\u{00e1}s{RESET}",
+                        snap.git.files.len() - max_files
+                    ),
+                    "",
+                    width,
+                ));
+            }
+        }
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
@@ -749,11 +853,71 @@ pub fn render_screen(
             (None, false) => "Cloud: solo local o no configurado".to_string(),
         };
         lines.push(draw_row(&cloud_row, "", width));
+        if snap.engram.daemon_online || snap.engram.sync_status.is_some() {
+            let d_badge = if snap.engram.daemon_online {
+                format!("{MINT}daemon ok{RESET}")
+            } else {
+                format!("{TEXT_DIM}daemon off{RESET}")
+            };
+            let s_badge = snap
+                .engram
+                .sync_status
+                .as_deref()
+                .map(|s| format!("{CYAN}{s}{RESET}"))
+                .unwrap_or_default();
+            lines.push(draw_row(
+                &format!("{TEXT_DIM}Servicio:{RESET} {d_badge}"),
+                &s_badge,
+                width,
+            ));
+        }
+        if let Some(ref handoff) = snap.engram.last_handoff {
+            lines.push(draw_divider(width));
+            lines.push(draw_row(
+                &format!("{GOLD}Handoff{RESET} {TEXT_DIM}#{} {RESET}", handoff.id),
+                &format!("{TEXT_MUTED}{}{RESET}", handoff.relative_time),
+                width,
+            ));
+            for hl in handoff.lines.iter().take(3) {
+                lines.push(draw_row(&format!("{TEXT_MUTED}{hl}{RESET}"), "", width));
+            }
+        }
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
         id: "engram",
         start_line: engram_start,
+        end_line: lines.len() - 1,
+        action_type: None,
+        action_path: None,
+    });
+
+    // 8. Stack · Ecosistema Card (idx 9)
+    let eco_start = lines.len();
+    let eco_title = format!("{BOLD}{GOLD}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}Ecosistema{RESET}");
+    lines.push(draw_top(&eco_title, collapsed[9], width));
+    if !collapsed[9] {
+        if snap.ecosystem.tools.is_empty() {
+            lines.push(draw_row(&format!("{TEXT_DIM}escaneando ecosistema...{RESET}"), "", width));
+        } else {
+            for tool in &snap.ecosystem.tools {
+                let left = if tool.is_installed {
+                    let ver_str = tool.version.as_deref().unwrap_or("");
+                    format!(
+                        "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
+                        tool.name, ver_str
+                    )
+                } else {
+                    format!("{TEXT_DIM}\u{25cb} {} -{RESET}", tool.name)
+                };
+                lines.push(draw_row(&left, "", width));
+            }
+        }
+    }
+    lines.push(draw_bottom(width));
+    bounds.push(CardBounds {
+        id: "ecosystem",
+        start_line: eco_start,
         end_line: lines.len() - 1,
         action_type: None,
         action_path: None,
