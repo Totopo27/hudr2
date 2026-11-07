@@ -46,8 +46,7 @@
 - **Account rows:** Evaluates each account via `QuotaManager::evaluate_account_for_model(acc, active_model)`:
   - Glyph: `>` (`ACCENT_PINK`) if `local_prefix`, `●` (`ACCENT_PRIMARY`) if active in another pane, `●` (`MINT`) if idle, `!` (`AMBER`/`CORAL`) if warning/critical, `?` (`AMBER`) if HTTP error.
   - Inline `5h` bar + `rem_5h%` + `Wk:rem_wk%` + `en <reset_5h>` (or `[AGOTÁNDOSE]` / `[AVISO 70%]` / `[error_msg]`).
-- **Action row (`id: "sync_integrations"`):** `>> [sincronizar]`.
-- **Alert block:** Shows `flash_notice` (when active) and `! CRÍTICO: <prefix> (activa) [presioná 'x' -> migrar a <target>]`.
+- **Alert block:** Shows `flash_notice` (when active) and `! CRÍTICO: <prefix> (activa) [presioná 'x' -> migrar a <target>]` (proxy config sync `s: sync` lives exclusively in the shortcut footer to avoid UX confusion with quota refresh).
 
 ## 4. `Cuota de Modelos` (`id: "pools"`, index `4`)
 - **Header:** `Cuota de Modelos · <active_acc_prefix> *` (scoped to `snap.agent_session.local_prefix`, fallback to first account).

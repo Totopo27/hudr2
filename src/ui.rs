@@ -591,20 +591,6 @@ pub fn render_screen_with_diff(
                 lines.push(draw_row(&left, &right_text, width));
             }
         }
-        lines.push(draw_divider(width));
-        let sync_line_idx = lines.len();
-        lines.push(draw_row(
-            &format!("{CYAN}>> [sincronizar]{RESET}"),
-            "",
-            width,
-        ));
-        bounds.push(CardBounds {
-            id: "sync_integrations",
-            start_line: sync_line_idx,
-            end_line: sync_line_idx,
-            action_type: Some("sync_integrations"),
-            action_path: None,
-        });
     }
 
     // Alertas de cuentas críticas activas + Flash notice dentro de Integraciones
@@ -622,7 +608,9 @@ pub fn render_screen_with_diff(
         .collect();
 
     if !active_critical_accs.is_empty() || flash_notice.is_some() {
-        lines.push(draw_divider(width));
+        if !collapsed[3] {
+            lines.push(draw_divider(width));
+        }
         if let Some(notice) = flash_notice {
             lines.push(draw_row(&format!("{BOLD}{MINT}{notice}{RESET}"), "", width));
         }

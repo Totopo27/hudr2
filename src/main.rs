@@ -487,30 +487,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 state.handle_mouse_click(mouse.row as usize, last_rendered_offset)
                             {
                                 match action {
-                                    state::ClickAction::SyncIntegrations => {
-                                        let state_ref = app_state.clone();
-                                        let tx_done = tx.clone();
-                                        tokio::spawn(async move {
-                                            let wake_tx = tx_done.clone();
-                                            let notify_cb = move || {
-                                                let _ = wake_tx.send(MainMsg::Redraw);
-                                            };
-                                            app::sync_integrations_action_with_notify(
-                                                &state_ref,
-                                                Some(&notify_cb),
-                                            )
-                                            .await;
-                                            app::force_refresh_with_notify(
-                                                &state_ref,
-                                                false,
-                                                false,
-                                                Some(&notify_cb),
-                                            )
-                                            .await;
-                                            let _ = tx_done
-                                                .send(MainMsg::DataChanged { git_touched: false });
-                                        });
-                                    }
                                     state::ClickAction::OpenFolder(path_to_open) => {
                                         let folder_name = std::path::Path::new(&path_to_open)
                                             .file_name()

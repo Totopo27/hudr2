@@ -310,7 +310,7 @@ impl AppState {
         self.needs_redraw = true;
         let absolute_line = clicked_row + actual_scroll_offset;
 
-        // 1. Prioridad: Acciones especiales exactas (abrir carpeta, sincronizar, diff o quick peek)
+        // 1. Prioridad: Acciones especiales exactas (abrir carpeta, diff, quick peek o visibilidad)
         let mut matched_special: Option<(&'static str, Option<String>)> = None;
         for bound in &self.card_bounds {
             if let Some(action) = bound.action_type
@@ -322,9 +322,7 @@ impl AppState {
             }
         }
         if let Some((action, action_path)) = matched_special {
-            if action == "sync_integrations" {
-                return Some(ClickAction::SyncIntegrations);
-            } else if action == "open_folder"
+            if action == "open_folder"
                 && let Some(p) = action_path
             {
                 return Some(ClickAction::OpenFolder(p));
@@ -389,7 +387,6 @@ impl Default for AppState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClickAction {
-    SyncIntegrations,
     OpenFolder(String),
     ToggledCard(usize),
     ToggleGitFileDiff(String),

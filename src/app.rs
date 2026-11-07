@@ -544,10 +544,6 @@ pub fn open_folder_in_explorer(target_path: &str) {
     }
 }
 
-pub async fn sync_integrations_action(app_state: &Arc<RwLock<AppState>>) {
-    sync_integrations_action_with_notify(app_state, None).await;
-}
-
 pub async fn sync_integrations_action_with_notify(
     app_state: &Arc<RwLock<AppState>>,
     notify: Option<&(dyn Fn() + Send + Sync)>,

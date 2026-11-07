@@ -3202,9 +3202,21 @@ mod tests {
                     ui::strip_ansi(line)
                 );
             }
+            let plain = ui::strip_ansi(&out.lines.join("\n"));
+            assert!(
+                !plain.contains("[sincronizar]"),
+                "Integraciones no debe renderizar el botón >> [sincronizar]"
+            );
+            assert!(
+                out.bounds.iter().all(|b| b.id != "sync_integrations"),
+                "No debe quedar bound clicable huérfano sync_integrations"
+            );
             if w >= 44 {
-                let plain = ui::strip_ansi(&out.lines.join("\n"));
-                assert!(plain.contains("r: act") && plain.contains("a: auditar"));
+                assert!(
+                    plain.contains("s: sync")
+                        && plain.contains("r: act")
+                        && plain.contains("a: auditar")
+                );
             }
         }
     }
