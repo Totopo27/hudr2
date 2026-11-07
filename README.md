@@ -25,6 +25,8 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 
 ## Muestra visual
 
+### 1. Colección Cromática (5 Temas Definitivos)
+
 <p align="center">
   <img src="hudr2_themes.png" width="100%" alt="HUDR2 · Colección Cromática Definitiva de 5 Temas" />
 </p>
@@ -35,6 +37,17 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 3. **Bauhaus Minimal:** Estética arquitectónica Mies van der Rohe con títulos Naranja (`#F97316`), marcos Teal (`#0F766E`) y tipografía marfil cálido (`#FFFBEB`).
 4. **Synthwave Sunset:** Contraste retro sunset con títulos Coral Pink (`#FB7185`), marcos Ocean Teal (`#0E7490`) y tipografía Ice Blue (`#ECFEFF`).
 5. **Editorial Velvet:** Sofisticación tipográfica suiza con títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
+
+### 2. Escenarios Operativos en Vivo
+
+<p align="center">
+  <img src="hudr2_operativo.png" width="100%" alt="HUDR2 · Escenarios Operativos con Nuevos Temas" />
+</p>
+
+*Comportamiento reactivo en acción (de izquierda a derecha):*
+1. **Gestión de Visibilidad (`Tarjetas`):** Selector interactivo desplegado con atajo `t` o `0`. Permite activar `[✓]` u ocultar `[ ]` cualquier módulo del HUD con un simple clic de ratón. *(Demostrado en Linear Studio)*.
+2. **Modo Ultra-Compacto:** Terminal reducida a ~28 líneas esenciales reteniendo únicamente métricas críticas de sesión para espacios de trabajo reducidos. *(Demostrado en Bauhaus Minimal "Less is More")*.
+3. **Telemetría Crítica y Migración en Caliente:** Detección en tiempo real de cuentas agotadas (`! [AGOTÁNDOSE]`), desgaste progresivo en ámbar y activación automática del atajo `x: migrar (agy)` para transferir el agente sin interrumpir la tarea. *(Demostrado en Electric Cyber)*.
 
 ---
 
