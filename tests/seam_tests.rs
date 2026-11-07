@@ -954,7 +954,6 @@ mod tests {
         state.snapshot.accounts = vec![
             hudr2::models::AccountQuota {
                 prefix: "agy1".to_string(),
-                email: "agy1@example.com".to_string(),
                 auth_file: "auth1.json".to_string(),
                 rem_5h: 90,
                 rem_wk: 80,
@@ -973,7 +972,6 @@ mod tests {
             },
             hudr2::models::AccountQuota {
                 prefix: "agy2".to_string(),
-                email: "agy2@example.com".to_string(),
                 auth_file: "auth2.json".to_string(),
                 rem_5h: 50,
                 rem_wk: 60,
@@ -1031,11 +1029,10 @@ mod tests {
     #[test]
     fn test_gemini_is_sovereign_for_quota_health_and_critical_alerts() {
         use hudr2::models::AccountQuota;
-        use hudr2::quotas::QuotaCollector;
+        use hudr2::quotas::apply_quota_data;
 
         let mut acc = AccountQuota {
             prefix: "agy2_1".to_string(),
-            email: "agy2_1@example.com".to_string(),
             auth_file: "dummy.json".to_string(),
             rem_5h: 100,
             reset_5h: "4h 59m".to_string(),
@@ -1085,7 +1082,7 @@ mod tests {
             ]
         });
 
-        QuotaCollector::apply_quota_data(&mut acc, &payload);
+        apply_quota_data(&mut acc, &payload);
 
         // Verificamos que Gemini manda sobre la salud:
         assert_eq!(acc.rem_5h, 88);
@@ -1125,7 +1122,7 @@ mod tests {
             ]
         });
 
-        QuotaCollector::apply_quota_data(&mut acc, &critical_payload);
+        apply_quota_data(&mut acc, &critical_payload);
         assert_eq!(acc.rem_5h, 10);
         assert!(
             acc.is_critical,
@@ -1136,7 +1133,7 @@ mod tests {
     #[test]
     fn test_ui_integraciones_card_reflects_gemini_sovereignty_without_false_criticals() {
         use hudr2::models::AccountQuota;
-        use hudr2::quotas::QuotaCollector;
+        use hudr2::quotas::apply_quota_data;
         use hudr2::state::AppState;
 
         let mut state = AppState::new();
@@ -1145,7 +1142,6 @@ mod tests {
         // Gemini al 98% restante, Claude al 9% restante (gastado)
         let mut acc = AccountQuota {
             prefix: "agy2_1".to_string(),
-            email: "agy2_1@gmail.com".to_string(),
             auth_file: "auth.json".to_string(),
             rem_5h: 100,
             reset_5h: "4h 4m".to_string(),
@@ -1193,7 +1189,7 @@ mod tests {
             ]
         });
 
-        QuotaCollector::apply_quota_data(&mut acc, &quota_payload);
+        apply_quota_data(&mut acc, &quota_payload);
 
         state.snapshot.accounts.push(acc);
         state.snapshot.agent_session.local_prefix = Some("agy2_1".to_string());
@@ -1294,10 +1290,10 @@ mod tests {
         );
 
         state.needs_redraw = false;
-        state.set_snapshot(hudr2::models::TelemetrySnapshot::default());
+        state.toggle_all_collapse();
         assert!(
             state.needs_redraw,
-            "set_snapshot debe marcar needs_redraw = true"
+            "toggle_all_collapse debe marcar needs_redraw = true"
         );
 
         // Expiración de aviso flash
@@ -1457,10 +1453,7 @@ mod tests {
 
     #[test]
     fn test_quota_manager_and_collector_availability() {
-        use hudr2::quotas::{QuotaCollector, QuotaManager};
-
-        // QuotaCollector es un alias de QuotaManager
-        assert_eq!(QuotaCollector::is_available(), QuotaManager::is_available());
+        use hudr2::quotas::is_available;
 
         let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
@@ -1468,7 +1461,7 @@ mod tests {
             std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
         }
         // En una carpeta vacía, is_available() debe ser false
-        assert!(!QuotaManager::is_available());
+        assert!(!is_available());
 
         // Con credencial JSON válida, is_available() debe ser true
         let auth_file = tmp.path().join("account.json");
@@ -1477,7 +1470,7 @@ mod tests {
             r#"{"access_token": "token123", "email": "test@example.com"}"#,
         )
         .unwrap();
-        assert!(QuotaManager::is_available());
+        assert!(is_available());
 
         unsafe {
             std::env::remove_var("CLIPROXY_AUTHS_DIR");
@@ -1510,9 +1503,9 @@ mod tests {
 
     #[test]
     fn test_agent_session_generalization_renders_cleanly() {
-        use hudr2::models::{AgentSession, OpenCodeSession};
+        use hudr2::models::AgentSession;
 
-        // 1. Verificar equivalencia de tipo (alias retrocompatible)
+        // 1. Verificar equivalencia de tipo y effective_model()
         let session = AgentSession {
             provider_name: "pi".to_string(),
             agent: "pi-coder".to_string(),
@@ -1527,7 +1520,6 @@ mod tests {
             tool_writes: 3,
             tool_bash: 2,
             tool_engram: 0,
-            tool_other: 0,
             tool_total: 13,
             agent_status: "working".to_string(),
             ..Default::default()
@@ -1546,16 +1538,16 @@ mod tests {
         assert!(screen_text.contains("Contexto"));
         assert!(screen_text.contains("Herramientas"));
 
-        // Validar que OpenCodeSession sigue siendo el mismo tipo
-        let oc_session: OpenCodeSession = state.snapshot.agent_session.clone();
-        assert_eq!(oc_session.provider_name, "pi");
-        assert_eq!(oc_session.tool_total, 13);
+        // Validar effective_model
+        assert_eq!(state.snapshot.agent_session.effective_model(), "anthropic/claude-3-5-sonnet");
+        assert_eq!(state.snapshot.agent_session.provider_name, "pi");
+        assert_eq!(state.snapshot.agent_session.tool_total, 13);
     }
 
     #[test]
     fn test_quota_error_handling_and_orphan_purge() {
         use hudr2::models::AccountQuota;
-        use hudr2::quotas::{QuotaManager, calculate_quota_pace};
+        use hudr2::quotas::{apply_quota_error, calculate_quota_pace, discover_accounts};
 
         let mut acc = AccountQuota::default();
 
@@ -1563,7 +1555,7 @@ mod tests {
         let err_401 = serde_json::json!({
             "error": { "code": 401, "status": "UNAUTHENTICATED", "message": "Token expired" }
         });
-        QuotaManager::apply_quota_error(&mut acc, 401, &err_401);
+        apply_quota_error(&mut acc, 401, &err_401);
         assert!(acc.has_error);
         assert_eq!(acc.error_msg, "token expirado");
 
@@ -1576,7 +1568,7 @@ mod tests {
                 "details": [{ "reason": "TOS_VIOLATION" }]
             }
         });
-        QuotaManager::apply_quota_error(&mut acc, 403, &err_tos);
+        apply_quota_error(&mut acc, 403, &err_tos);
         assert!(acc.has_error);
         assert_eq!(acc.error_msg, "tos suspendida");
 
@@ -1584,7 +1576,7 @@ mod tests {
         let err_429 = serde_json::json!({
             "error": { "code": 429, "status": "RESOURCE_EXHAUSTED" }
         });
-        QuotaManager::apply_quota_error(&mut acc, 429, &err_429);
+        apply_quota_error(&mut acc, 429, &err_429);
         assert!(acc.has_error);
         assert_eq!(acc.error_msg, "rate limited");
 
@@ -1600,12 +1592,12 @@ mod tests {
         std::fs::write(&f2, r#"{"access_token":"t2","email":"a2@test.com"}"#).unwrap();
 
         let mut list = Vec::new();
-        QuotaManager::discover_accounts(&mut list);
+        discover_accounts(&mut list);
         assert_eq!(list.len(), 2);
 
         // Eliminar f2 y redescubrir: debe purgar acc2
         std::fs::remove_file(&f2).unwrap();
-        QuotaManager::discover_accounts(&mut list);
+        discover_accounts(&mut list);
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].prefix, "acc1");
 
@@ -1983,11 +1975,10 @@ mod tests {
     #[test]
     fn test_dynamic_model_family_quota_health_claude_gpt_deepseek_gemini() {
         use hudr2::models::AccountQuota;
-        use hudr2::quotas::QuotaCollector;
+        use hudr2::quotas::{apply_quota_data, evaluate_account_for_model};
 
         let mut acc = AccountQuota {
             prefix: "agy".to_string(),
-            email: "agy@example.com".to_string(),
             auth_file: "auth.json".to_string(),
             rem_5h: 100,
             reset_5h: "4h 59m".to_string(),
@@ -2026,30 +2017,30 @@ mod tests {
             ]
         });
 
-        QuotaCollector::apply_quota_data(&mut acc, &payload);
+        apply_quota_data(&mut acc, &payload);
 
         // 1. Con modelo Gemini: saludable (92% 5h, 90% Wk)
-        let eff_gem = QuotaCollector::evaluate_account_for_model(&acc, "gemini-3.8-flash-high");
+        let eff_gem = evaluate_account_for_model(&acc, "gemini-3.8-flash-high");
         assert_eq!(eff_gem.family, "Gemini");
         assert_eq!(eff_gem.rem_5h, 92);
         assert!(!eff_gem.is_critical);
         assert!(!eff_gem.is_warning);
 
         // 2. Con modelo Claude: crítico (8% 5h <= 15%)
-        let eff_cla = QuotaCollector::evaluate_account_for_model(&acc, "claude-sonnet-4-5");
+        let eff_cla = evaluate_account_for_model(&acc, "claude-sonnet-4-5");
         assert_eq!(eff_cla.family, "Claude");
         assert_eq!(eff_cla.rem_5h, 8);
         assert_eq!(eff_cla.rem_wk, 45);
         assert!(eff_cla.is_critical, "Claude al 8% debe marcarse crítico cuando la sesión usa Claude");
 
         // 3. Con modelo GPT (compartiendo bucket con Claude cuando no hay bucket GPT separado): crítico (8%)
-        let eff_gpt = QuotaCollector::evaluate_account_for_model(&acc, "gpt-4o");
+        let eff_gpt = evaluate_account_for_model(&acc, "gpt-4o");
         assert_eq!(eff_gpt.family, "GPT");
         assert_eq!(eff_gpt.rem_5h, 8);
         assert!(eff_gpt.is_critical);
 
         // 4. Con modelo DeepSeek: en warning (25% restante => 75% usado, entre 70% y 85%)
-        let eff_ds = QuotaCollector::evaluate_account_for_model(&acc, "deepseek-r1");
+        let eff_ds = evaluate_account_for_model(&acc, "deepseek-r1");
         assert_eq!(eff_ds.family, "DeepSeek");
         assert_eq!(eff_ds.rem_5h, 25);
         assert!(!eff_ds.is_critical);
@@ -2075,7 +2066,7 @@ mod tests {
 
     #[test]
     fn test_read_git_head_short_zero_subprocess_and_packed_refs() {
-        use hudr2::git::{read_git_head_short, read_git_head_short_for_dir};
+        use hudr2::git::{find_git_root_and_dir, read_git_head_short};
 
         let tmp = tempfile::tempdir().unwrap();
         let git_dir = tmp.path().join(".git");
@@ -2093,8 +2084,9 @@ mod tests {
             read_git_head_short(&git_dir).as_deref(),
             Some("a1b2c3d")
         );
+        let (_, dir_gd) = find_git_root_and_dir(tmp.path().to_str().unwrap()).unwrap();
         assert_eq!(
-            read_git_head_short_for_dir(tmp.path().to_str().unwrap()).as_deref(),
+            read_git_head_short(&dir_gd).as_deref(),
             Some("a1b2c3d")
         );
 
@@ -2135,8 +2127,9 @@ mod tests {
         )
         .unwrap();
 
+        let (_, wt_gd) = find_git_root_and_dir(wt_root.to_str().unwrap()).unwrap();
         assert_eq!(
-            read_git_head_short_for_dir(wt_root.to_str().unwrap()).as_deref(),
+            read_git_head_short(&wt_gd).as_deref(),
             Some("9f8e7d6")
         );
     }
@@ -2261,7 +2254,6 @@ mod tests {
         // 2. Quick Peek con múltiples líneas, scroll y cierre por clic en el modal
         state.quick_peek = Some(hudr2::state::QuickPeekState {
             title: "src/git.rs".to_string(),
-            file_path: "src/git.rs".to_string(),
             lines: (1..=20).map(|i| format!("+línea de prueba {i}")).collect(),
             scroll: 0,
         });

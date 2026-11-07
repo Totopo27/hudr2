@@ -4,7 +4,7 @@ use crate::git::read_git_telemetry;
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::read_opencode_session;
-use crate::quotas::QuotaCollector;
+use crate::quotas;
 use crate::state::AppState;
 use crate::tree::{read_mcp_servers, read_project_tree};
 use std::sync::Arc;
@@ -16,7 +16,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         let cp = state
             .config_path
             .as_deref()
-            .map(QuotaCollector::quota_cache_path_for);
+            .map(quotas::quota_cache_path_for);
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
@@ -24,8 +24,8 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             cp,
         )
     };
-    QuotaCollector::discover_accounts_for(&project_dir, &mut accounts_copy);
-    QuotaCollector::hydrate_accounts_from_cache(&mut accounts_copy, cache_path.as_deref());
+    quotas::discover_accounts_for(&project_dir, &mut accounts_copy);
+    quotas::hydrate_accounts_from_cache(&mut accounts_copy, cache_path.as_deref());
 
     let panes = tokio::task::spawn_blocking(HerdrClient::get_panes)
         .await
@@ -120,13 +120,9 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.ecosystem = eco;
         }
 
-        let active_model = if !state.snapshot.agent_session.model.is_empty() {
-            state.snapshot.agent_session.model.clone()
-        } else {
-            state.snapshot.agent_session.model_short.clone()
-        };
+        let active_model = state.snapshot.agent_session.effective_model().to_string();
         for acc in &mut accounts_copy {
-            QuotaCollector::sync_account_health_for_model(acc, &active_model);
+            quotas::sync_account_health_for_model(acc, &active_model);
         }
         state.snapshot.accounts = accounts_copy;
         state.snapshot.my_pane_id = my_pane_id;
@@ -180,7 +176,7 @@ pub fn select_accounts_for_refresh(
             } else if force_all {
                 true
             } else {
-                QuotaCollector::needs_refresh(acc)
+                quotas::needs_refresh(acc)
             };
 
             include.then(|| (tier, acc.clone()))
@@ -205,7 +201,7 @@ pub fn select_yellow_zone_prewarm_candidates(
         if !active_prefixes.contains(&a.prefix.to_lowercase()) {
             return false;
         }
-        let eff = QuotaCollector::evaluate_account_for_model(a, active_model);
+        let eff = quotas::evaluate_account_for_model(a, active_model);
         eff.is_warning || eff.is_critical
     });
     if !any_active_pressured {
@@ -218,8 +214,8 @@ pub fn select_yellow_zone_prewarm_candidates(
             if active_prefixes.contains(&a.prefix.to_lowercase()) || a.has_error {
                 return false;
             }
-            let eff = QuotaCollector::evaluate_account_for_model(a, active_model);
-            !eff.is_critical && eff.rem_5h > 30 && QuotaCollector::is_fresh_within(a, max_fresh_age_secs)
+            let eff = quotas::evaluate_account_for_model(a, active_model);
+            !eff.is_critical && eff.rem_5h > 30 && quotas::is_fresh_within(a, max_fresh_age_secs)
         })
         .count();
 
@@ -234,7 +230,7 @@ pub fn select_yellow_zone_prewarm_candidates(
         .filter_map(|pfx| {
             accounts.iter().find(|a| {
                 a.prefix.eq_ignore_ascii_case(&pfx)
-                    && !QuotaCollector::is_fresh_within(a, max_fresh_age_secs)
+                    && !quotas::is_fresh_within(a, max_fresh_age_secs)
             })
         })
         .cloned()
@@ -261,7 +257,7 @@ pub async fn force_refresh_with_notify(
 
     if interactive {
         let mut state = app_state.write().await;
-        let notice = if !QuotaCollector::is_available_for(&project_dir) {
+        let notice = if !quotas::is_available_for(&project_dir) {
             "+ Refrescando contexto..."
         } else if force_all {
             "+ Auditando todas las cuotas..."
@@ -283,7 +279,7 @@ pub async fn force_refresh_with_notify(
     wake();
 
     // Si no hay proveedor de cuotas disponible, evitar llamadas de red innecesarias
-    if !QuotaCollector::is_available_for(&project_dir) {
+    if !quotas::is_available_for(&project_dir) {
         if interactive {
             let mut state = app_state.write().await;
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
@@ -320,7 +316,7 @@ pub async fn force_refresh_with_notify(
             state
                 .config_path
                 .as_deref()
-                .map(QuotaCollector::quota_cache_path_for),
+                .map(quotas::quota_cache_path_for),
         )
     };
 
@@ -339,7 +335,7 @@ pub async fn force_refresh_with_notify(
         local_prefix.as_deref(),
         &active_prefixes,
         force_all,
-        QuotaCollector::is_rate_limit_cooling_down(),
+        quotas::is_rate_limit_cooling_down(),
     );
 
     let total = target_accounts.len();
@@ -353,7 +349,7 @@ pub async fn force_refresh_with_notify(
             .is_some_and(|lp| lp.eq_ignore_ascii_case(&acc.prefix))
             || active_prefixes.contains(&acc.prefix.to_lowercase());
 
-        if !is_active && QuotaCollector::is_rate_limit_cooling_down() {
+        if !is_active && quotas::is_rate_limit_cooling_down() {
             halted_by_rate_limit = true;
             break;
         }
@@ -378,16 +374,12 @@ pub async fn force_refresh_with_notify(
         }
 
         checked_prefixes.insert(acc.prefix.to_lowercase());
-        QuotaCollector::fetch_quota_for_account_with_cache(&mut acc, cache_path.as_deref()).await;
+        quotas::fetch_quota_for_account_with_cache(&mut acc, cache_path.as_deref()).await;
         calls_made += 1;
 
         let mut state = app_state.write().await;
-        let active_model = if !state.snapshot.agent_session.model.is_empty() {
-            state.snapshot.agent_session.model.clone()
-        } else {
-            state.snapshot.agent_session.model_short.clone()
-        };
-        QuotaCollector::sync_account_health_for_model(&mut acc, &active_model);
+        let active_model = state.snapshot.agent_session.effective_model().to_string();
+        quotas::sync_account_health_for_model(&mut acc, &active_model);
         if let Some(existing) = state
             .snapshot
             .accounts
@@ -410,14 +402,10 @@ pub async fn force_refresh_with_notify(
         const PREWARM_MAX_CHECKS: usize = 4;
         let mut prewarm_checks = 0usize;
 
-        while prewarm_checks < PREWARM_MAX_CHECKS && !QuotaCollector::is_rate_limit_cooling_down() {
+        while prewarm_checks < PREWARM_MAX_CHECKS && !quotas::is_rate_limit_cooling_down() {
             let next_cand = {
                 let state = app_state.read().await;
-                let active_model = if !state.snapshot.agent_session.model.is_empty() {
-                    state.snapshot.agent_session.model.clone()
-                } else {
-                    state.snapshot.agent_session.model_short.clone()
-                };
+                let active_model = state.snapshot.agent_session.effective_model().to_string();
                 select_yellow_zone_prewarm_candidates(
                     &state.snapshot.accounts,
                     &state.snapshot.agent_session.all_active_prefixes,
@@ -440,16 +428,12 @@ pub async fn force_refresh_with_notify(
             prewarm_checks += 1;
             calls_made += 1;
 
-            QuotaCollector::fetch_quota_for_account_with_cache(&mut cand, cache_path.as_deref())
+            quotas::fetch_quota_for_account_with_cache(&mut cand, cache_path.as_deref())
                 .await;
 
             let mut state = app_state.write().await;
-            let active_model = if !state.snapshot.agent_session.model.is_empty() {
-                state.snapshot.agent_session.model.clone()
-            } else {
-                state.snapshot.agent_session.model_short.clone()
-            };
-            QuotaCollector::sync_account_health_for_model(&mut cand, &active_model);
+            let active_model = state.snapshot.agent_session.effective_model().to_string();
+            quotas::sync_account_health_for_model(&mut cand, &active_model);
             if let Some(existing) = state
                 .snapshot
                 .accounts
@@ -615,11 +599,7 @@ pub async fn release_sessions_action(app_state: &Arc<RwLock<AppState>>) {
 pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
     let (project_dir, mut accounts, active_prefixes, active_model, cache_path) = {
         let state = app_state.read().await;
-        let model = if !state.snapshot.agent_session.model.is_empty() {
-            state.snapshot.agent_session.model.clone()
-        } else {
-            state.snapshot.agent_session.model_short.clone()
-        };
+        let model = state.snapshot.agent_session.effective_model().to_string();
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
@@ -628,7 +608,7 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
             state
                 .config_path
                 .as_deref()
-                .map(QuotaCollector::quota_cache_path_for),
+                .map(quotas::quota_cache_path_for),
         )
     };
 
@@ -646,17 +626,17 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
         }) else {
             break;
         };
-        if QuotaCollector::is_fresh_within(&accounts[idx], 600)
+        if quotas::is_fresh_within(&accounts[idx], 600)
             || !std::path::Path::new(&accounts[idx].auth_file).exists()
         {
             break;
         }
-        QuotaCollector::fetch_quota_for_account_with_cache(
+        quotas::fetch_quota_for_account_with_cache(
             &mut accounts[idx],
             cache_path.as_deref(),
         )
         .await;
-        QuotaCollector::sync_account_health_for_model(&mut accounts[idx], &active_model);
+        quotas::sync_account_health_for_model(&mut accounts[idx], &active_model);
         let refreshed = accounts[idx].clone();
         {
             let mut state = app_state.write().await;

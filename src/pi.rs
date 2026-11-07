@@ -206,8 +206,6 @@ impl PiTail {
                                     self.session.tool_bash += 1;
                                 } else if name.starts_with("mem_") || name.contains("engram") {
                                     self.session.tool_engram += 1;
-                                } else {
-                                    self.session.tool_other += 1;
                                 }
                             }
                         }
@@ -216,7 +214,6 @@ impl PiTail {
                     self.session.attributed_changes = AttributedChanges {
                         files_count: self.modified_files.len(),
                         additions: 0,
-                        deletions: 0,
                     };
                 }
                 _ => {}
@@ -333,11 +330,7 @@ pub fn read_pi_session_file(
     };
 
     // Atribución de prefijos de cuenta (si usa cuentas de Cliproxy/CPAMC)
-    let mut known_prefixes: Vec<String> = accounts_list
-        .iter()
-        .map(|a| a.prefix.to_lowercase())
-        .collect();
-    known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
+    let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, None);
 
     if let Some(pfx) = extract_prefix(&tail.session.agent, &tail.session.model, &known_prefixes) {
         tail.session.local_prefix = Some(pfx.clone());
@@ -462,11 +455,7 @@ pub fn apply_pane_metadata_tokens(
 
     // Atribución de prefijos de cuenta (Cliproxy/CPAMC) si el modelo provino de profile
     if !session.model.is_empty() && session.model != "sin-modelo" {
-        let mut known_prefixes: Vec<String> = accounts_list
-            .iter()
-            .map(|a| a.prefix.to_lowercase())
-            .collect();
-        known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
+        let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, None);
 
         if let Some(pfx) = extract_prefix(&session.agent, &session.model, &known_prefixes) {
             session.local_prefix = Some(pfx.clone());

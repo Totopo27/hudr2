@@ -21,7 +21,6 @@ pub struct HerdrPane {
 pub struct AttributedChanges {
     pub files_count: usize,
     pub additions: usize,
-    pub deletions: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -47,7 +46,6 @@ pub struct AgentSession {
     pub tool_writes: usize,
     pub tool_bash: usize,
     pub tool_engram: usize,
-    pub tool_other: usize,
     pub tool_total: usize,
     pub agent_status: String, // "idle" | "working"
     pub all_active_prefixes: HashSet<String>,
@@ -55,8 +53,16 @@ pub struct AgentSession {
     pub todos: Vec<SessionTodo>,
 }
 
-/// Alias para mantener retrocompatibilidad con el adaptador de OpenCode
-pub type OpenCodeSession = AgentSession;
+impl AgentSession {
+    /// Devuelve el identificador del modelo activo (`model` si no está vacío, sino `model_short`).
+    pub fn effective_model(&self) -> &str {
+        if !self.model.is_empty() {
+            &self.model
+        } else {
+            &self.model_short
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HandoffSummary {
@@ -73,7 +79,6 @@ pub struct EngramTelemetry {
     pub daemon_online: bool,
     pub obs_count: usize,
     pub enrolled: bool,
-    pub cloud_host: Option<String>,
     pub sync_status: Option<String>,
     pub last_handoff: Option<HandoffSummary>,
 }
@@ -114,7 +119,6 @@ pub struct QuotaPool {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AccountQuota {
     pub prefix: String,
-    pub email: String,
     pub auth_file: String,
     pub rem_5h: u8,
     pub reset_5h: String,

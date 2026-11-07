@@ -20,7 +20,7 @@ pub use session::{
     resolve_session_for_pane, resolve_session_table_name, session_select_columns, table_exists,
 };
 
-use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
+use crate::models::{AccountQuota, AgentSession, AttributedChanges, HerdrPane};
 use crate::paths::resolve_opencode_db_path;
 use rusqlite::{Connection, OpenFlags};
 use session::{extract_tool_path, recent_alive_sessions};
@@ -39,7 +39,6 @@ struct MessageStatsCacheEntry {
     tool_writes: usize,
     tool_bash: usize,
     tool_engram: usize,
-    tool_other: usize,
     attributed_changes: AttributedChanges,
 }
 
@@ -58,10 +57,10 @@ pub fn read_opencode_session(
     accounts_list: &[AccountQuota],
     my_pane_id: Option<&str>,
     my_tab_id: Option<&str>,
-) -> OpenCodeSession {
+) -> AgentSession {
     let default_model = "gemini-3.8-flash-high".to_string();
     let default_limit = resolve_model_context_limit(&default_model);
-    let mut session = OpenCodeSession {
+    let mut session = AgentSession {
         provider_name: "opencode".to_string(),
         agent: "sdd-orchestrator".to_string(),
         model: default_model,
@@ -84,7 +83,7 @@ pub fn read_opencode_session(
     let _ = conn.busy_timeout(std::time::Duration::from_millis(1500));
 
     let norm_target = crate::paths::normalize_path(target_dir);
-    let known_prefixes = resolve_known_prefixes(accounts_list);
+    let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, Some(""));
 
     // 1. Recolectar TODAS las cuentas activas desde los panes vivos de Herdr
     for p in herdr_panes {
@@ -213,25 +212,6 @@ pub fn read_opencode_session(
     session
 }
 
-/// Prefijos de cuenta conocidos en minúsculas, ordenados del más largo al más corto
-/// (para que `agy3_1` gane sobre `agy3`). Si no hay cuotas cargadas, los descubre del disco.
-fn resolve_known_prefixes(accounts_list: &[AccountQuota]) -> Vec<String> {
-    let mut known_prefixes: Vec<String> = accounts_list
-        .iter()
-        .map(|a| a.prefix.to_lowercase())
-        .collect();
-    if known_prefixes.is_empty() {
-        let mut discovered = Vec::new();
-        crate::quotas::QuotaCollector::discover_accounts(&mut discovered);
-        known_prefixes = discovered
-            .into_iter()
-            .map(|a| a.prefix.to_lowercase())
-            .collect();
-    }
-    known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
-    known_prefixes
-}
-
 fn parse_tokens_from_value(val: &serde_json::Value) -> Option<i64> {
     let tokens_obj = val.get("tokens").or_else(|| val.get("usage"))?;
     let inp = tokens_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -254,7 +234,7 @@ fn parse_tokens_from_value(val: &serde_json::Value) -> Option<i64> {
 fn record_tool_item(
     tool_name: &str,
     item: &serde_json::Value,
-    session: &mut OpenCodeSession,
+    session: &mut AgentSession,
     modified_files: &mut HashSet<String>,
 ) {
     session.tool_total += 1;
@@ -270,8 +250,6 @@ fn record_tool_item(
         session.tool_bash += 1;
     } else if lower.contains("engram") || lower.contains("mem_") {
         session.tool_engram += 1;
-    } else {
-        session.tool_other += 1;
     }
 }
 
@@ -285,7 +263,7 @@ fn collect_message_stats(
     conn: &Connection,
     session_id: &str,
     time_updated: Option<i64>,
-    session: &mut OpenCodeSession,
+    session: &mut AgentSession,
 ) {
     let session_table = resolve_session_table_name(conn);
     let resolved_time_updated = time_updated.or_else(|| {
@@ -313,7 +291,6 @@ fn collect_message_stats(
         session.tool_writes = cached.tool_writes;
         session.tool_bash = cached.tool_bash;
         session.tool_engram = cached.tool_engram;
-        session.tool_other = cached.tool_other;
         session.attributed_changes = cached.attributed_changes.clone();
         return;
     }
@@ -545,7 +522,6 @@ fn collect_message_stats(
     session.attributed_changes = AttributedChanges {
         files_count: modified_files.len(),
         additions: 0,
-        deletions: 0,
     };
 
     if let Ok(mut guard) = MESSAGE_STATS_CACHE.lock() {
@@ -565,7 +541,6 @@ fn collect_message_stats(
                 tool_writes: session.tool_writes,
                 tool_bash: session.tool_bash,
                 tool_engram: session.tool_engram,
-                tool_other: session.tool_other,
                 attributed_changes: session.attributed_changes.clone(),
             },
         );

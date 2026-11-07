@@ -4,7 +4,7 @@
 use super::model_info::{
     clean_model_name, clean_opencode_terminal_title, resolve_model_context_limit,
 };
-use crate::models::{HerdrPane, OpenCodeSession};
+use crate::models::{AgentSession, HerdrPane};
 use rusqlite::{Connection, Row};
 
 /// Condición SQL de sesión "viva": no archivada, archivada en 0, o actualizada después de archivarse.
@@ -41,7 +41,7 @@ impl DbSessionRecord {
     }
 
     /// Copia agente, modelo (y su límite de contexto), tokens y costo al resumen de sesión.
-    pub(super) fn apply_to(&self, session: &mut OpenCodeSession) {
+    pub(super) fn apply_to(&self, session: &mut AgentSession) {
         if let Some(ref a) = self.agent {
             if !a.trim().is_empty() {
                 session.agent = a.clone();

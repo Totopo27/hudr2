@@ -92,7 +92,6 @@ pub fn save_config(
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QuickPeekState {
     pub title: String,
-    pub file_path: String,
     pub lines: Vec<String>,
     pub scroll: usize,
 }
@@ -236,7 +235,6 @@ impl AppState {
         let lines = crate::git::read_file_quick_peek(&self.snapshot.project_dir, rel_path);
         self.quick_peek = Some(QuickPeekState {
             title: rel_path.to_string(),
-            file_path: rel_path.to_string(),
             lines,
             scroll: 0,
         });
@@ -358,11 +356,6 @@ impl AppState {
         }
 
         None
-    }
-
-    pub fn set_snapshot(&mut self, snapshot: TelemetrySnapshot) {
-        self.snapshot = snapshot;
-        self.needs_redraw = true;
     }
 }
 

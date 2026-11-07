@@ -114,7 +114,6 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
         daemon_online: false,
         obs_count: 0,
         enrolled: false,
-        cloud_host: None,
         sync_status: None,
         last_handoff: None,
     };

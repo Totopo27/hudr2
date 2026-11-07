@@ -416,12 +416,10 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     .find(|a| a.auth_file == path_str || a.prefix == prefix)
                 {
                     existing.prefix = prefix;
-                    existing.email = email;
                     existing.auth_file = path_str;
                 } else {
                     target_list.push(AccountQuota {
                         prefix,
-                        email,
                         auth_file: path_str,
                         rem_5h: 100,
                         reset_5h: UNFETCHED_RESET.to_string(),
@@ -468,9 +466,29 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
     target_list.sort_by(|a, b| a.prefix.cmp(&b.prefix));
 }
 
-/// Consulta el endpoint de cuotas de CLIProxy para la cuenta especificada.
-pub async fn fetch_quota_for_account(acc: &mut AccountQuota) {
-    let _ = fetch_quota_for_account_with_cache(acc, None).await;
+/// Prefijos de cuenta conocidos en minúsculas, ordenados de mayor a menor longitud
+/// (para que `agy3_1` gane sobre `agy3`).
+/// Si `accounts_list` está vacío y `target_dir` es provisto, descubre cuentas del disco.
+pub fn sorted_known_prefixes(
+    accounts_list: &[AccountQuota],
+    target_dir: Option<&str>,
+) -> Vec<String> {
+    let mut known: Vec<String> = accounts_list
+        .iter()
+        .map(|a| a.prefix.to_lowercase())
+        .collect();
+    if known.is_empty()
+        && let Some(dir) = target_dir
+    {
+        let mut discovered = Vec::new();
+        discover_accounts_for(dir, &mut discovered);
+        known = discovered
+            .into_iter()
+            .map(|a| a.prefix.to_lowercase())
+            .collect();
+    }
+    known.sort_by_key(|a| std::cmp::Reverse(a.len()));
+    known
 }
 
 /// Consulta el endpoint de cuotas y actualiza la caché compartida (`quotas_cache.json`) + freno 429.

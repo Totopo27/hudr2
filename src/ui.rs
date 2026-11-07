@@ -252,11 +252,7 @@ pub fn render_screen_with_diff(
         .and_then(|n| n.to_str())
         .unwrap_or("proyecto");
 
-    let active_model = if !snap.agent_session.model.is_empty() {
-        snap.agent_session.model.as_str()
-    } else {
-        snap.agent_session.model_short.as_str()
-    };
+    let active_model = snap.agent_session.effective_model();
 
     let target_healthy = crate::cleanup::get_best_healthy_target_prefix_for_model(
         &snap.accounts,
@@ -556,7 +552,7 @@ pub fn render_screen_with_diff(
         .accounts
         .iter()
         .filter(|a| {
-            crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model).is_critical
+            crate::quotas::evaluate_account_for_model(a, active_model).is_critical
         })
         .count();
     let int_title = if critical_count > 0 {
@@ -577,7 +573,7 @@ pub fn render_screen_with_diff(
         } else {
             for acc in &snap.accounts {
                 let eff =
-                    crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
+                    crate::quotas::evaluate_account_for_model(acc, active_model);
                 let is_local = snap
                     .agent_session
                     .local_prefix
@@ -660,7 +656,7 @@ pub fn render_screen_with_diff(
         .accounts
         .iter()
         .filter(|a| {
-            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
             (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
                 && snap
                     .agent_session
@@ -962,13 +958,12 @@ pub fn render_screen_with_diff(
             ),
             width,
         ));
-        let cloud_row = match (&snap.engram.cloud_host, snap.engram.enrolled) {
-            (Some(host), true) => format!("Cloud: {host} (inscrito)"),
-            (Some(host), false) => format!("Cloud: {host} (no inscrito)"),
-            (None, true) => "Cloud: proyecto inscrito para sync".to_string(),
-            (None, false) => "Cloud: solo local o no configurado".to_string(),
+        let cloud_row = if snap.engram.enrolled {
+            "Cloud: proyecto inscrito para sync"
+        } else {
+            "Cloud: solo local o no configurado"
         };
-        lines.push(draw_row(&cloud_row, "", width));
+        lines.push(draw_row(cloud_row, "", width));
         if snap.engram.daemon_online || snap.engram.sync_status.is_some() {
             let d_badge = if snap.engram.daemon_online {
                 format!("{MINT}daemon ok{RESET}")
@@ -1177,7 +1172,7 @@ pub fn render_screen_with_diff(
         width,
     ));
     let has_active_critical = snap.accounts.iter().any(|a| {
-        let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+        let eff = crate::quotas::evaluate_account_for_model(a, active_model);
         (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
             && snap
                 .agent_session

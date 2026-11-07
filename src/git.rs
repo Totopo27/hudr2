@@ -210,12 +210,6 @@ pub fn read_git_head_short(git_dir: &Path) -> Option<String> {
     }
 }
 
-/// Resuelve el short SHA (7 caracteres) de `HEAD` a partir de un directorio de trabajo sin subprocesos.
-pub fn read_git_head_short_for_dir(target_dir: &str) -> Option<String> {
-    let (_, git_dir) = find_git_root_and_dir(target_dir)?;
-    read_git_head_short(&git_dir)
-}
-
 /// Detecta colisiones de archivos en caliente entre dos o más sesiones activas.
 /// Devuelve la lista ordenada y sin duplicados de archivos que están siendo modificados
 /// simultáneamente por más de una sesión.

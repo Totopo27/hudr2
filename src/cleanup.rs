@@ -169,23 +169,6 @@ fn notify_opencode_session_migration(
     }
 }
 
-fn collect_sorted_known_prefixes(cwd: &str, accounts_list: &[AccountQuota]) -> Vec<String> {
-    let mut known_prefixes: Vec<String> = accounts_list
-        .iter()
-        .map(|a| a.prefix.to_lowercase())
-        .collect();
-    if known_prefixes.is_empty() {
-        let mut discovered = Vec::new();
-        crate::quotas::QuotaCollector::discover_accounts_for(cwd, &mut discovered);
-        known_prefixes = discovered
-            .into_iter()
-            .map(|a| a.prefix.to_lowercase())
-            .collect();
-    }
-    known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
-    known_prefixes
-}
-
 fn rewrite_migrated_agent(
     current_agent: Option<&str>,
     from_prefix: &str,
@@ -348,7 +331,7 @@ pub struct ReleaseResult {
 }
 
 fn compute_account_health_score(acc: &AccountQuota, active_model: &str) -> i32 {
-    let eff = crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
+    let eff = crate::quotas::evaluate_account_for_model(acc, active_model);
     let rem_5h = eff.rem_5h as i32;
     let rem_wk = eff.rem_wk as i32;
     if rem_wk < 10 {
@@ -367,26 +350,19 @@ pub fn rank_migration_candidates_for_model(
     let mut healthy: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
-            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
             !active_prefixes.contains(&a.prefix.to_lowercase()) && !eff.is_critical && !a.has_error
         })
         .collect();
 
     healthy.sort_by_key(|a| {
         std::cmp::Reverse((
-            !crate::quotas::QuotaManager::is_unfetched(a),
+            !crate::quotas::is_unfetched(a),
             compute_account_health_score(a, active_model),
         ))
     });
 
     healthy.into_iter().map(|a| a.prefix.clone()).collect()
-}
-
-pub fn get_best_healthy_target_prefix(
-    accounts_list: &[AccountQuota],
-    active_prefixes: &HashSet<String>,
-) -> String {
-    get_best_healthy_target_prefix_for_model(accounts_list, active_prefixes, "")
 }
 
 pub fn get_best_healthy_target_prefix_for_model(
@@ -397,9 +373,9 @@ pub fn get_best_healthy_target_prefix_for_model(
     // 1. Si hay alguna cuenta activa ya verificada que esté sana (> 30% libre y sin error), preferir esa
     for p in active_prefixes {
         if let Some(acc) = accounts_list.iter().find(|a| {
-            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
             a.prefix.to_lowercase() == *p
-                && !crate::quotas::QuotaManager::is_unfetched(a)
+                && !crate::quotas::is_unfetched(a)
                 && !eff.is_critical
                 && !a.has_error
                 && eff.rem_5h > 30
@@ -412,14 +388,14 @@ pub fn get_best_healthy_target_prefix_for_model(
     let mut healthy: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
-            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
             !eff.is_critical && !a.has_error
         })
         .collect();
 
     healthy.sort_by_key(|a| {
         std::cmp::Reverse((
-            !crate::quotas::QuotaManager::is_unfetched(a),
+            !crate::quotas::is_unfetched(a),
             compute_account_health_score(a, active_model),
         ))
     });
@@ -510,14 +486,6 @@ fn update_latest_message_for_migration(
     0
 }
 
-pub fn migrate_critical_sessions(
-    cwd: &str,
-    accounts_list: &[AccountQuota],
-    active_prefixes: &HashSet<String>,
-) -> (usize, String) {
-    migrate_critical_sessions_for_model(cwd, accounts_list, active_prefixes, "")
-}
-
 pub fn migrate_critical_sessions_for_model(
     cwd: &str,
     accounts_list: &[AccountQuota],
@@ -527,7 +495,7 @@ pub fn migrate_critical_sessions_for_model(
     let critical_list: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
-            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
             (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
                 && active_prefixes.contains(&a.prefix.to_lowercase())
         })
@@ -569,7 +537,7 @@ pub fn migrate_critical_sessions_for_model(
     };
     let _ = conn.busy_timeout(Duration::from_millis(3000));
 
-    let known_prefixes = collect_sorted_known_prefixes(cwd, accounts_list);
+    let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, Some(cwd));
     let mut total_migrated = 0;
     let mut migrated_from = Vec::new();
     let mut pending_notifications: Vec<(String, String, String, String)> = Vec::new();
@@ -724,7 +692,7 @@ pub fn release_inactive_sessions(
         .unwrap_or("proyecto")
         .to_string();
 
-    let known_prefixes = collect_sorted_known_prefixes(cwd, accounts_list);
+    let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, Some(cwd));
 
     let panes = HerdrClient::get_panes();
 
