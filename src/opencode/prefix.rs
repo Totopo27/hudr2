@@ -14,7 +14,14 @@ static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-pub const KNOWN_PROXY_PREFIXES: &[&str] = &["cliproxy/", "opencode/"];
+pub const KNOWN_PROXY_PREFIXES: &[&str] = &[
+    "cliproxy/",
+    "opencode/",
+    "cpamc/",
+    "cliproxy:",
+    "opencode:",
+    "cpamc:",
+];
 
 /// Limpia y normaliza un identificador de modelo eliminando prefijos de vendor o proxy conocidos
 /// como `cliproxy/`, `opencode/`, etc. (comparación ASCII case-insensitive sin asignaciones intermedias).
@@ -90,18 +97,35 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
             let p_low = pfx.to_lowercase();
             let pat_dash = format!("-{p_low}");
             let pat_under = format!("_{p_low}");
+            let pat_paren = format!("({p_low})");
+            let pat_bracket = format!("[{p_low}]");
             if lower_agent == p_low
                 || lower_agent.ends_with(&pat_dash)
                 || lower_agent.ends_with(&pat_under)
+                || lower_agent.contains(&pat_paren)
+                || lower_agent.contains(&pat_bracket)
             {
                 return Some(p_low);
             }
         }
     }
 
-    // 2. Del modelo (ej: "nina/gemini-3.8-flash-high", "cliproxy/nina/...")
+    // 2. Del modelo (ej: "nina/gemini-3.8-flash-high", "cliproxy/nina/...", "cpamc/cuenta4/...", "gemini-3.8-flash-high (cuenta4)")
     if !model.is_empty() {
-        let clean_model = normalize_model_str(&clean_model_name(model)).to_lowercase();
+        let raw_model = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(model) {
+            parsed
+                .get("id")
+                .or_else(|| parsed.get("modelID"))
+                .or_else(|| parsed.get("model_id"))
+                .or_else(|| parsed.get("model"))
+                .or_else(|| parsed.get("name"))
+                .and_then(|i| i.as_str())
+                .unwrap_or(model)
+                .to_string()
+        } else {
+            model.to_string()
+        };
+        let clean_model = normalize_model_str(&raw_model).to_lowercase();
 
         let pool_prefixes = resolve_pool_account_prefixes(&clean_model, sorted_prefixes);
         if let Some(first_pool) = pool_prefixes.into_iter().next() {
@@ -114,6 +138,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
             let candidate = c_match.as_str().to_lowercase();
             if candidate != "cliproxy"
                 && candidate != "opencode"
+                && candidate != "cpamc"
                 && (sorted_prefixes.is_empty()
                     || sorted_prefixes
                         .iter()
@@ -126,10 +151,20 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
         for pfx in sorted_prefixes {
             let p_low = pfx.to_lowercase();
             if clean_model.starts_with(&format!("{p_low}/"))
+                || clean_model.starts_with(&format!("{p_low}:"))
                 || clean_model.contains(&format!("/{p_low}/"))
+                || clean_model.contains(&format!(":{p_low}:"))
                 || clean_model.contains(&format!(":{p_low}/"))
+                || clean_model.contains(&format!("/{p_low}:"))
                 || clean_model.contains(&format!("\"{p_low}/"))
                 || clean_model.ends_with(&format!("/{p_low}"))
+                || clean_model.ends_with(&format!(":{p_low}"))
+                || clean_model.contains(&format!("({p_low})"))
+                || clean_model.contains(&format!("[{p_low}]"))
+                || clean_model.contains(&format!(" {p_low} "))
+                || clean_model.ends_with(&format!(" {p_low}"))
+                || clean_model.ends_with(&format!("({p_low})"))
+                || clean_model.ends_with(&format!("[{p_low}]"))
             {
                 return Some(p_low);
             }
@@ -153,7 +188,45 @@ mod tests {
             normalize_model_str("opencode/cliproxy/ñandu-model"),
             "ñandu-model"
         );
+        assert_eq!(
+            normalize_model_str("cpamc/cuenta4/gemini-3.8-flash-high"),
+            "cuenta4/gemini-3.8-flash-high"
+        );
         assert_eq!(normalize_model_str("ñandu"), "ñandu");
         assert_eq!(normalize_model_str(""), "");
+    }
+
+    #[test]
+    fn extract_prefix_supports_cpamc_and_parentheses_syntax() {
+        let accounts = vec![
+            "cuenta1".to_string(),
+            "cuenta2".to_string(),
+            "cuenta3".to_string(),
+            "cuenta4".to_string(),
+        ];
+
+        // 1. Con prefijo de proxy cpamc/
+        let pfx1 = extract_prefix(
+            "Gentle-Orchestrator",
+            "cpamc/cuenta4/gemini-3.8-flash-high",
+            &accounts,
+        );
+        assert_eq!(pfx1.as_deref(), Some("cuenta4"));
+
+        // 2. Con formato de paréntesis en el modelo: "gemini-3.8-flash-high (cuenta4)"
+        let pfx2 = extract_prefix(
+            "Gentle-Orchestrator",
+            "gemini-3.8-flash-high (cuenta4)",
+            &accounts,
+        );
+        assert_eq!(pfx2.as_deref(), Some("cuenta4"));
+
+        // 3. Con formato de paréntesis en el agente
+        let pfx3 = extract_prefix(
+            "Gentle-Orchestrator (cuenta4)",
+            "gemini-3.8-flash-high",
+            &accounts,
+        );
+        assert_eq!(pfx3.as_deref(), Some("cuenta4"));
     }
 }

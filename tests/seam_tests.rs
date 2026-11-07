@@ -2398,4 +2398,271 @@ mod tests {
         assert!(render_out.lines[0].contains(":: HUDR2 ::"));
         assert!(!render_out.lines[0].contains("GENTLEMAN"));
     }
+
+    #[test]
+    fn test_opencode_modern_schema_session_part_and_cpamc_attribution() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        // 1. Crear esquema moderno OpenCode 1.19+ (session, message, part)
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                project_id TEXT,
+                directory TEXT,
+                title TEXT,
+                model TEXT,
+                cost REAL DEFAULT 0,
+                tokens_input INTEGER DEFAULT 0,
+                tokens_output INTEGER DEFAULT 0,
+                tokens_reasoning INTEGER DEFAULT 0,
+                tokens_cache_read INTEGER DEFAULT 0,
+                tokens_cache_write INTEGER DEFAULT 0,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                type TEXT,
+                data TEXT,
+                time_created INTEGER,
+                time_updated INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                message_id TEXT,
+                type TEXT,
+                data TEXT,
+                time_created INTEGER,
+                time_updated INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        let target_dir = "d:/proyectosai/ai_video_studio_app";
+        let now = 1715000000;
+
+        conn.execute(
+            "INSERT INTO session (id, directory, title, model, cost, tokens_input, tokens_output, time_created, time_updated, time_archived)
+             VALUES ('ses_modern_test', ?, 'Refactor Task', 'gemini-3.8-flash-high (cuenta4)', 0.045, 12500, 1450, ?, ?, NULL)",
+            rusqlite::params![target_dir, now - 100, now],
+        )
+        .unwrap();
+
+        // Agregar una parte de herramienta
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, type, data, time_created, time_updated)
+             VALUES ('part_1', 'ses_modern_test', 'msg_1', 'tool', '{\"name\":\"read_file\",\"state\":{\"input\":{\"path\":\"src/main.rs\"}}}', ?, ?)",
+            rusqlite::params![now - 50, now - 50],
+        )
+        .unwrap();
+
+        // Agregar una parte de edición
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, type, data, time_created, time_updated)
+             VALUES ('part_2', 'ses_modern_test', 'msg_1', 'tool', '{\"name\":\"edit_file\",\"state\":{\"input\":{\"file_path\":\"src/lib.rs\"}}}', ?, ?)",
+            rusqlite::params![now - 40, now - 40],
+        )
+        .unwrap();
+
+        // Agregar una parte de finalización con tokens
+        conn.execute(
+            "INSERT INTO part (id, session_id, message_id, type, data, time_created, time_updated)
+             VALUES ('part_3', 'ses_modern_test', 'msg_1', 'step-finish', '{\"tokens\":{\"input\":12500,\"output\":1450,\"reasoning\":200,\"cache\":{\"read\":1000,\"write\":0}}}', ?, ?)",
+            rusqlite::params![now - 10, now - 10],
+        )
+        .unwrap();
+
+        drop(conn);
+
+        // Configurar variable de entorno para que hudr2 use esta base de datos
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        hudr2::opencode::clear_message_stats_cache();
+
+        let accounts = vec![
+            hudr2::models::AccountQuota {
+                prefix: "cuenta1".to_string(),
+                ..Default::default()
+            },
+            hudr2::models::AccountQuota {
+                prefix: "cuenta4".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let panes = vec![HerdrPane {
+            pane_id: "w19:p1".to_string(),
+            cwd: Some(target_dir.to_string()),
+            agent_status: Some("working".to_string()),
+            ..Default::default()
+        }];
+
+        let session = hudr2::opencode::read_opencode_session(
+            target_dir,
+            &panes,
+            &accounts,
+            None,
+            None,
+        );
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
+        hudr2::opencode::clear_message_stats_cache();
+
+        assert_eq!(session.local_prefix.as_deref(), Some("cuenta4"));
+        assert!(session.all_active_prefixes.contains("cuenta4"));
+        assert_eq!(session.model, "gemini-3.8-flash-high");
+        assert_eq!(session.tokens_input, 12500);
+        assert_eq!(session.tokens_output, 1450);
+        assert_eq!(session.active_turn_tokens, 12500 + 1450 + 200 + 1000);
+        assert_eq!(session.tool_reads, 1);
+        assert_eq!(session.tool_writes, 1);
+        assert_eq!(session.attributed_changes.files_count, 1);
+    }
+
+    #[test]
+    fn test_opencode_dual_schema_precedence_session_over_stale_session_v2() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        conn.execute(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                title TEXT,
+                model TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                title TEXT,
+                model TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            )",
+            [],
+        )
+        .unwrap();
+
+        let target_dir = "d:/social-hub-pro";
+        let stale_time = 10000;
+        let modern_time = 50000;
+
+        conn.execute(
+            "INSERT INTO session_v2 (id, directory, title, model, time_created, time_updated, time_archived)
+             VALUES ('stale_ses', ?, 'Old Task', 'cuenta1/gemini-2.5-pro', ?, ?, NULL)",
+            rusqlite::params![target_dir, stale_time, stale_time],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO session (id, directory, title, model, time_created, time_updated, time_archived)
+             VALUES ('active_ses', ?, 'Modern Task', 'gemini-3.8-flash-high (cuenta4)', ?, ?, NULL)",
+            rusqlite::params![target_dir, modern_time, modern_time],
+        )
+        .unwrap();
+
+        assert_eq!(hudr2::opencode::resolve_session_table_name(&conn), "session");
+
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        hudr2::opencode::clear_message_stats_cache();
+
+        let accounts = vec![
+            hudr2::models::AccountQuota {
+                prefix: "cuenta1".to_string(),
+                ..Default::default()
+            },
+            hudr2::models::AccountQuota {
+                prefix: "cuenta4".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let panes = vec![HerdrPane {
+            pane_id: "w1:p1".to_string(),
+            cwd: Some(target_dir.to_string()),
+            ..Default::default()
+        }];
+
+        let session = hudr2::opencode::read_opencode_session(
+            target_dir,
+            &panes,
+            &accounts,
+            None,
+            None,
+        );
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
+        hudr2::opencode::clear_message_stats_cache();
+
+        assert_eq!(session.local_prefix.as_deref(), Some("cuenta4"));
+        assert!(session.all_active_prefixes.contains("cuenta4"));
+        assert_eq!(session.model, "gemini-3.8-flash-high");
+    }
+
+    #[test]
+    fn test_cpamc_and_parentheses_prefix_attribution_with_accounts() {
+        let known = vec!["cuenta1".to_string(), "cuenta4".to_string(), "cuenta9".to_string()];
+
+        assert_eq!(
+            extract_prefix("", "gemini-3.8-flash-high (cuenta4)", &known).as_deref(),
+            Some("cuenta4")
+        );
+        assert_eq!(
+            extract_prefix("", "claude-3-5-sonnet [cuenta9]", &known).as_deref(),
+            Some("cuenta9")
+        );
+        assert_eq!(
+            extract_prefix("", "cpamc/cuenta4/gemini-3.8-flash-high", &known).as_deref(),
+            Some("cuenta4")
+        );
+        assert_eq!(
+            extract_prefix("", "cpamc:cuenta1:gemini-2.5-pro", &known).as_deref(),
+            Some("cuenta1")
+        );
+        assert_eq!(
+            hudr2::opencode::clean_model_name("{\"id\":\"cuenta4/gemini-3.8-flash-high\",\"providerID\":\"cpamc\"}"),
+            "cuenta4/gemini-3.8-flash-high"
+        );
+        assert_eq!(
+            hudr2::opencode::clean_model_name("gemini-3.8-flash-high (cuenta4)"),
+            "gemini-3.8-flash-high"
+        );
+    }
 }

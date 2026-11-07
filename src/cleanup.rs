@@ -1,8 +1,8 @@
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::{
-    clean_model_name, extract_prefix, is_opencode_terminal_title, normalize_model_str,
-    resolve_pool_account_prefixes, resolve_session_for_pane,
+    clean_model_name, extract_prefix, has_column, is_opencode_terminal_title, normalize_model_str,
+    resolve_pool_account_prefixes, resolve_session_for_pane, resolve_session_table_name,
 };
 use crate::paths::resolve_opencode_db_path;
 use rusqlite::Connection;
@@ -358,12 +358,16 @@ pub fn migrate_critical_sessions_for_model(
     let mut total_migrated = 0;
     let mut migrated_from = Vec::new();
 
-    // Obtener sesiones no archivadas
-    let mut stmt =
-        match conn.prepare("SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL") {
-            Ok(s) => s,
-            Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
-        };
+    // Obtener sesiones no archivadas según el esquema activo (session vs session_v2)
+    let table = resolve_session_table_name(&conn);
+    let has_agent = has_column(&conn, table, "agent");
+    let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
+    let select_sql = format!("SELECT id, {agent_expr}, model FROM {table} WHERE time_archived IS NULL");
+
+    let mut stmt = match conn.prepare(&select_sql) {
+        Ok(s) => s,
+        Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
+    };
 
     let session_rows: Vec<(String, Option<String>, Option<String>)> = stmt
         .query_map([], |row| {
@@ -394,10 +398,13 @@ pub fn migrate_critical_sessions_for_model(
             active_model,
         );
 
-        let updated = conn.execute(
-            "UPDATE session_v2 SET agent = ?, model = ? WHERE id = ?",
-            rusqlite::params![to_agent, to_model_json, ses_id],
-        );
+        let updated = if has_agent {
+            let update_sql = format!("UPDATE {table} SET agent = ?, model = ? WHERE id = ?");
+            conn.execute(&update_sql, rusqlite::params![to_agent, to_model_json, ses_id])
+        } else {
+            let update_sql = format!("UPDATE {table} SET model = ? WHERE id = ?");
+            conn.execute(&update_sql, rusqlite::params![to_model_json, ses_id])
+        };
         if let Ok(changes) = updated
             && changes > 0
         {
@@ -498,6 +505,8 @@ pub fn release_inactive_sessions(
     };
 
     let _ = conn.busy_timeout(std::time::Duration::from_millis(3000));
+    let table = resolve_session_table_name(&conn);
+    let has_agent = has_column(&conn, table, "agent");
 
     // Descubrir qué pane / tab es el que tiene el foco activo del usuario
     let focused_pane = panes
@@ -564,8 +573,9 @@ pub fn release_inactive_sessions(
                 .is_some_and(is_opencode_terminal_title);
 
         if let Some(ref session_rec) = s {
+            let update_archived_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ?");
             let _ = conn.execute(
-                "UPDATE session_v2 SET time_archived = ? WHERE id = ?",
+                &update_archived_sql,
                 rusqlite::params![now, session_rec.id],
             );
             closed_count += 1;
@@ -612,9 +622,12 @@ pub fn release_inactive_sessions(
     }
 
     // Archivar también cualquier sesión huérfana en DB que haya quedado en desuso
-    if let Ok(mut orphan_stmt) = conn.prepare(
-        "SELECT id, agent, model FROM session_v2 WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)",
-    ) {
+    let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
+    let orphan_sql = format!(
+        "SELECT id, {agent_expr}, model FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
+    );
+    let orphan_update_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ? AND time_archived IS NULL");
+    if let Ok(mut orphan_stmt) = conn.prepare(&orphan_sql) {
         let rows = orphan_stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
@@ -636,7 +649,7 @@ pub fn release_inactive_sessions(
                 }
 
                 if let Ok(affected) = conn.execute(
-                    "UPDATE session_v2 SET time_archived = ? WHERE id = ? AND time_archived IS NULL",
+                    &orphan_update_sql,
                     rusqlite::params![now, orphan_id],
                 ) && affected > 0 {
                     closed_count += 1;

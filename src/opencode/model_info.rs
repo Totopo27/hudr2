@@ -17,13 +17,23 @@ pub fn is_opencode_terminal_title(title: &str) -> bool {
         || RE_OC_TITLE.is_match(trimmed)
 }
 
+static RE_ACCOUNT_ANNOTATION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[][a-zA-Z0-9_\-]+[\)\]]\s*$").unwrap());
+
 pub fn clean_model_name(model_raw: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(model_raw)
-        && let Some(id_val) = parsed.get("id").and_then(|i| i.as_str())
+    let mut s = model_raw.trim().to_string();
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&s)
+        && let Some(id_val) = parsed
+            .get("id")
+            .or_else(|| parsed.get("modelID"))
+            .or_else(|| parsed.get("model_id"))
+            .or_else(|| parsed.get("model"))
+            .or_else(|| parsed.get("name"))
+            .and_then(|i| i.as_str())
     {
-        return id_val.to_string();
+        s = id_val.to_string();
     }
-    model_raw.to_string()
+    RE_ACCOUNT_ANNOTATION.replace(&s, "").trim().to_string()
 }
 
 pub fn resolve_model_context_limit(model_id: &str) -> i64 {

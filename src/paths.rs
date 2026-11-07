@@ -126,6 +126,13 @@ pub fn resolve_opencode_db_path() -> PathBuf {
         }
     }
 
+    if let Ok(dir) = std::env::var("OPENCODE_CONFIG_DIR") {
+        let p_buf = PathBuf::from(dir.trim()).join("opencode.db");
+        if p_buf.exists() {
+            return p_buf;
+        }
+    }
+
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut candidates = Vec::new();
 
@@ -142,7 +149,14 @@ pub fn resolve_opencode_db_path() -> PathBuf {
             .join("opencode.db"),
     );
 
-    // 3. macOS Library Application Support
+    // 3. Directorios de configuración estándar y alternativos (~/.config/opencode, ~/.opencode)
+    if let Some(config_dir) = dirs::config_dir() {
+        candidates.push(config_dir.join("opencode").join("opencode.db"));
+    }
+    candidates.push(home.join(".config").join("opencode").join("opencode.db"));
+    candidates.push(home.join(".opencode").join("opencode.db"));
+
+    // 4. macOS Library Application Support
     #[cfg(target_os = "macos")]
     {
         candidates.push(
@@ -153,10 +167,17 @@ pub fn resolve_opencode_db_path() -> PathBuf {
         );
     }
 
-    // 4. Fallbacks locales de Windows para desarrollo o setups multi-disco
+    // 5. Fallbacks locales de Windows para desarrollo o setups multi-disco
     #[cfg(target_os = "windows")]
     {
-        push_windows_drive_candidates(&mut candidates, &[".local/share/opencode/opencode.db"]);
+        push_windows_drive_candidates(
+            &mut candidates,
+            &[
+                ".local/share/opencode/opencode.db",
+                ".config/opencode/opencode.db",
+                ".opencode/opencode.db",
+            ],
+        );
     }
 
     let mut existing: Vec<PathBuf> = candidates.into_iter().filter(|c| c.exists()).collect();

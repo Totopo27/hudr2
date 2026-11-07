@@ -7,11 +7,8 @@ use super::model_info::{
 use crate::models::{HerdrPane, OpenCodeSession};
 use rusqlite::{Connection, Row};
 
-/// Columnas de `session_v2` en el orden que espera [`DbSessionRecord::from_row`].
-const SESSION_COLUMNS: &str = "id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost";
-
-/// Condición SQL de sesión "viva": no archivada, o actualizada después de archivarse.
-const ALIVE_CONDITION: &str = "(time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived))";
+/// Condición SQL de sesión "viva": no archivada, archivada en 0, o actualizada después de archivarse.
+const ALIVE_CONDITION: &str = "(time_archived IS NULL OR time_archived = 0 OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived))";
 
 #[derive(Debug, Clone)]
 pub struct DbSessionRecord {
@@ -46,7 +43,16 @@ impl DbSessionRecord {
     /// Copia agente, modelo (y su límite de contexto), tokens y costo al resumen de sesión.
     pub(super) fn apply_to(&self, session: &mut OpenCodeSession) {
         if let Some(ref a) = self.agent {
-            session.agent = a.clone();
+            if !a.trim().is_empty() {
+                session.agent = a.clone();
+            }
+        } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(self.model.as_deref().unwrap_or(""))
+            && let Some(agent_val) = parsed
+                .get("agent")
+                .or_else(|| parsed.get("role"))
+                .and_then(|a| a.as_str())
+        {
+            session.agent = agent_val.to_string();
         }
         if let Some(ref m) = self.model {
             let clean = clean_model_name(m);
@@ -66,21 +72,101 @@ impl DbSessionRecord {
     }
 }
 
-/// Ejecuta `SELECT <columnas> FROM session_v2 <where_clause>` y devuelve la primera fila.
+pub fn table_exists(conn: &Connection, table_name: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        [table_name],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+pub fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
+    let sql = format!("PRAGMA table_info({table})");
+    if let Ok(mut stmt) = conn.prepare(&sql)
+        && let Ok(rows) = stmt.query_map([], |r| r.get::<_, String>(1))
+    {
+        return rows.flatten().any(|name| name.eq_ignore_ascii_case(col));
+    }
+    false
+}
+
+/// Resuelve dinámicamente el nombre de la tabla de sesiones activa:
+/// OpenCode 1.19+ migró a `session` (y turnos a `part`/`message`), mientras que versiones
+/// anteriores usan `session_v2`. Si ambas coexisten, compara la marca de tiempo más reciente.
+pub fn resolve_session_table_name(conn: &Connection) -> &'static str {
+    let has_session = table_exists(conn, "session");
+    let has_session_v2 = table_exists(conn, "session_v2");
+    match (has_session, has_session_v2) {
+        (true, false) => "session",
+        (false, true) => "session_v2",
+        (true, true) => {
+            let ts_session: i64 = conn
+                .query_row(
+                    "SELECT MAX(COALESCE(time_updated, time_created, 0)) FROM session",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            let ts_v2: i64 = conn
+                .query_row(
+                    "SELECT MAX(COALESCE(time_updated, time_created, 0)) FROM session_v2",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if ts_session >= ts_v2 {
+                "session"
+            } else {
+                "session_v2"
+            }
+        }
+        _ => "session_v2",
+    }
+}
+
+pub fn session_select_columns(conn: &Connection, table: &str) -> String {
+    let has_agent = has_column(conn, table, "agent");
+    let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
+    let has_model = has_column(conn, table, "model");
+    let model_expr = if has_model { "model" } else { "NULL AS model" };
+    let has_title = has_column(conn, table, "title");
+    let title_expr = if has_title { "title" } else { "NULL AS title" };
+    let has_dir = has_column(conn, table, "directory");
+    let dir_expr = if has_dir { "directory" } else { "NULL AS directory" };
+    let has_tu = has_column(conn, table, "time_updated");
+    let tu_expr = if has_tu { "time_updated" } else { "NULL AS time_updated" };
+    let has_ta = has_column(conn, table, "time_archived");
+    let ta_expr = if has_ta { "time_archived" } else { "NULL AS time_archived" };
+    let has_ti = has_column(conn, table, "tokens_input");
+    let ti_expr = if has_ti { "tokens_input" } else { "NULL AS tokens_input" };
+    let has_to = has_column(conn, table, "tokens_output");
+    let to_expr = if has_to { "tokens_output" } else { "NULL AS tokens_output" };
+    let has_cost = has_column(conn, table, "cost");
+    let cost_expr = if has_cost { "cost" } else { "NULL AS cost" };
+
+    format!("id, {agent_expr}, {model_expr}, {dir_expr}, {title_expr}, {tu_expr}, {ta_expr}, {ti_expr}, {to_expr}, {cost_expr}")
+}
+
+/// Ejecuta `SELECT <columnas> FROM <table> <where_clause>` y devuelve la primera fila.
 fn query_one<P: rusqlite::Params>(
     conn: &Connection,
     where_clause: &str,
     params: P,
 ) -> Option<DbSessionRecord> {
-    let sql = format!("SELECT {SESSION_COLUMNS} FROM session_v2 {where_clause}");
+    let table = resolve_session_table_name(conn);
+    let cols = session_select_columns(conn, table);
+    let sql = format!("SELECT {cols} FROM {table} {where_clause}");
     let mut stmt = conn.prepare(&sql).ok()?;
     stmt.query_row(params, DbSessionRecord::from_row).ok()
 }
 
 /// Sesiones vivas más recientes (hasta 30), usadas como respaldo cuando ningún pane resuelve.
 pub(super) fn recent_alive_sessions(conn: &Connection) -> Vec<DbSessionRecord> {
+    let table = resolve_session_table_name(conn);
+    let cols = session_select_columns(conn, table);
     let sql = format!(
-        "SELECT {SESSION_COLUMNS} FROM session_v2 WHERE {ALIVE_CONDITION} ORDER BY time_updated DESC LIMIT 30"
+        "SELECT {cols} FROM {table} WHERE {ALIVE_CONDITION} ORDER BY time_updated DESC LIMIT 30"
     );
     let Ok(mut stmt) = conn.prepare(&sql) else {
         return Vec::new();

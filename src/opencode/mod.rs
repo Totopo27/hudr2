@@ -15,7 +15,10 @@ pub use model_info::{
     resolve_model_context_limit,
 };
 pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
-pub use session::{DbSessionRecord, resolve_session_for_pane};
+pub use session::{
+    DbSessionRecord, has_column, resolve_session_for_pane, resolve_session_table_name,
+    session_select_columns, table_exists,
+};
 
 use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
 use crate::paths::resolve_opencode_db_path;
@@ -149,6 +152,8 @@ pub fn read_opencode_session(
 
     let mut target_session_id: Option<String> = None;
     let mut target_time_updated: Option<i64> = None;
+    let mut target_raw_model: Option<String> = None;
+    let mut target_raw_agent: Option<String> = None;
 
     if let Some(pp) = primary_pane {
         if let Some(status) = &pp.agent_status
@@ -159,6 +164,8 @@ pub fn read_opencode_session(
         if let Some(target_s) = resolve_session_for_pane(&conn, pp) {
             target_session_id = Some(target_s.id.clone());
             target_time_updated = target_s.time_updated;
+            target_raw_model = target_s.model.clone();
+            target_raw_agent = target_s.agent.clone();
             target_s.apply_to(&mut session);
         }
     }
@@ -178,16 +185,20 @@ pub fn read_opencode_session(
         if let Some(s) = by_dir.or(sessions.first()) {
             target_session_id = Some(s.id.clone());
             target_time_updated = s.time_updated;
+            target_raw_model = s.model.clone();
+            target_raw_agent = s.agent.clone();
             s.apply_to(&mut session);
         }
     }
 
     // Prefijo de la cuenta local activa
-    if let Some(local_pfx) = extract_prefix(&session.agent, &session.model, &known_prefixes) {
+    let agent_to_check = target_raw_agent.as_deref().unwrap_or(&session.agent);
+    let model_to_check = target_raw_model.as_deref().unwrap_or(&session.model);
+    if let Some(local_pfx) = extract_prefix(agent_to_check, model_to_check, &known_prefixes) {
         session.local_prefix = Some(local_pfx.clone());
         session.all_active_prefixes.insert(local_pfx);
     }
-    for pp in resolve_pool_account_prefixes(&session.model, &known_prefixes) {
+    for pp in resolve_pool_account_prefixes(model_to_check, &known_prefixes) {
         session.all_active_prefixes.insert(pp);
     }
 
@@ -218,8 +229,53 @@ fn resolve_known_prefixes(accounts_list: &[AccountQuota]) -> Vec<String> {
     known_prefixes
 }
 
-/// Recorre los mensajes del asistente de la sesión para calcular los tokens del turno
+fn parse_tokens_from_value(val: &serde_json::Value) -> Option<i64> {
+    let tokens_obj = val.get("tokens").or_else(|| val.get("usage"))?;
+    let inp = tokens_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+    let outp = tokens_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0);
+    let reasoning = tokens_obj.get("reasoning").and_then(|v| v.as_i64()).unwrap_or(0);
+    let cache_read = tokens_obj
+        .get("cache")
+        .and_then(|c| c.get("read"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let cache_write = tokens_obj
+        .get("cache")
+        .and_then(|c| c.get("write"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total = inp + outp + reasoning + cache_read + cache_write;
+    if total > 0 { Some(total) } else { None }
+}
+
+fn record_tool_item(
+    tool_name: &str,
+    item: &serde_json::Value,
+    session: &mut OpenCodeSession,
+    modified_files: &mut HashSet<String>,
+) {
+    session.tool_total += 1;
+    let lower = tool_name.to_lowercase();
+    if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
+        session.tool_reads += 1;
+    } else if lower.contains("write") || lower.contains("edit") || lower.contains("apply") {
+        session.tool_writes += 1;
+        if let Some(path_str) = extract_tool_path(item) {
+            modified_files.insert(path_str);
+        }
+    } else if lower.contains("bash") || lower.contains("shell") || lower.contains("exec") || lower.contains("cmd") {
+        session.tool_bash += 1;
+    } else if lower.contains("engram") || lower.contains("mem_") {
+        session.tool_engram += 1;
+    } else {
+        session.tool_other += 1;
+    }
+}
+
+/// Recorre los mensajes del asistente y partes de la sesión para calcular los tokens del turno
 /// activo, el uso de herramientas por categoría y los archivos modificados.
+/// Compatible con esquemas legacy (`session_v2` + `session_message` / `session_part`)
+/// y esquemas modernos de OpenCode 1.19+ (`session` + `message` / `part`).
 /// Si time_updated no ha cambiado, reutiliza el resultado cacheado para evitar queries
 /// pesadas y deserialización de JSON repetitiva.
 fn collect_message_stats(
@@ -228,13 +284,10 @@ fn collect_message_stats(
     time_updated: Option<i64>,
     session: &mut OpenCodeSession,
 ) {
+    let session_table = resolve_session_table_name(conn);
     let resolved_time_updated = time_updated.or_else(|| {
-        conn.query_row(
-            "SELECT time_updated FROM session_v2 WHERE id = ?",
-            [session_id],
-            |row| row.get(0),
-        )
-        .ok()
+        let sql = format!("SELECT time_updated FROM {session_table} WHERE id = ?");
+        conn.query_row(&sql, [session_id], |row| row.get(0)).ok()
     });
 
     if let Some(t_up) = resolved_time_updated
@@ -256,68 +309,142 @@ fn collect_message_stats(
     let mut modified_files = HashSet::new();
     let mut found_active_tokens = false;
 
-    if let Ok(mut msg_stmt) = conn.prepare(
-        "SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY time_created DESC"
-    )
-        && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| {
-            row.get::<_, String>(0)
-        }) {
+    // 1. Consultar tabla de mensajes (legacy `session_message` o moderna `message`)
+    let msg_table = if table_exists(conn, "session_message") {
+        Some("session_message")
+    } else if table_exists(conn, "message") {
+        Some("message")
+    } else {
+        None
+    };
+
+    if let Some(tbl) = msg_table {
+        let type_filter = if has_column(conn, tbl, "type") {
+            "AND type = 'assistant'"
+        } else if has_column(conn, tbl, "role") {
+            "AND role = 'assistant'"
+        } else {
+            ""
+        };
+        let sql = format!("SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY time_created DESC");
+
+        if let Ok(mut msg_stmt) = conn.prepare(&sql)
+            && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| row.get::<_, String>(0))
+        {
             for data_raw in msg_rows.flatten() {
                 let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_raw) else {
                     continue;
                 };
 
-                // Active turn tokens: input + output + reasoning + cache.read + cache.write
+                // Tokens de turno activo
                 if !found_active_tokens
-                    && let Some(tokens_obj) = val.get("tokens") {
-                        let inp = tokens_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let outp = tokens_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let reasoning = tokens_obj.get("reasoning").and_then(|v| v.as_i64()).unwrap_or(0);
-                        let cache_read = tokens_obj
-                            .get("cache")
-                            .and_then(|c| c.get("read"))
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
-                        let cache_write = tokens_obj
-                            .get("cache")
-                            .and_then(|c| c.get("write"))
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
+                    && let Some(toks) = parse_tokens_from_value(&val)
+                {
+                    session.active_turn_tokens = toks;
+                    found_active_tokens = true;
+                }
 
-                        session.active_turn_tokens = inp + outp + reasoning + cache_read + cache_write;
-                        found_active_tokens = true;
-                    }
-
-                // Tool usage in content array
+                // Uso de herramientas en contenido estructurado
                 if let Some(content_arr) = val.get("content").and_then(|c| c.as_array()) {
                     for item in content_arr {
-                        if item.get("type").and_then(|t| t.as_str()) == Some("tool") {
-                            session.tool_total += 1;
+                        let t = item.get("type").and_then(|t| t.as_str());
+                        if t == Some("tool")
+                            || t == Some("tool-call")
+                            || t == Some("tool_call")
+                            || item.get("name").is_some()
+                            || item.get("tool").is_some()
+                        {
                             let tool_name = item
                                 .get("name")
                                 .and_then(|n| n.as_str())
                                 .or_else(|| item.get("tool").and_then(|t| t.as_str()))
                                 .unwrap_or("");
-                            let lower = tool_name.to_lowercase();
-                            if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
-                                session.tool_reads += 1;
-                            } else if lower.contains("write") || lower.contains("edit") {
-                                session.tool_writes += 1;
-                                if let Some(path_str) = extract_tool_path(item) {
-                                    modified_files.insert(path_str);
-                                }
-                            } else if lower.contains("bash") || lower.contains("shell") {
-                                session.tool_bash += 1;
-                            } else if lower.contains("engram") || lower.contains("mem_") {
-                                session.tool_engram += 1;
-                            } else {
-                                session.tool_other += 1;
-                            }
+                            record_tool_item(tool_name, item, session, &mut modified_files);
                         }
+                    }
+                }
+
+                // Uso de herramientas en arrays alternativos (tool_calls / tools)
+                if let Some(tools_arr) = val.get("tool_calls").or_else(|| val.get("tools")).and_then(|t| t.as_array()) {
+                    for item in tools_arr {
+                        let tool_name = item
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                            .or_else(|| item.get("name").and_then(|n| n.as_str()))
+                            .unwrap_or("");
+                        record_tool_item(tool_name, item, session, &mut modified_files);
                     }
                 }
             }
         }
+    }
+
+    // 2. Consultar tabla de partes (legacy `session_part` o moderna `part`)
+    let part_table = if table_exists(conn, "session_part") {
+        Some("session_part")
+    } else if table_exists(conn, "part") {
+        Some("part")
+    } else {
+        None
+    };
+
+    if let Some(ptbl) = part_table
+        && has_column(conn, ptbl, "data")
+    {
+        let type_expr = if has_column(conn, ptbl, "type") {
+            "type"
+        } else {
+            "'unknown' AS type"
+        };
+        let psql = format!("SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ?");
+
+        if let Ok(mut part_stmt) = conn.prepare(&psql)
+            && let Ok(part_rows) = part_stmt.query_map([session_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+        {
+            for (part_type, data_raw) in part_rows.flatten() {
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_raw) else {
+                    continue;
+                };
+
+                if !found_active_tokens
+                    && (part_type == "step-finish"
+                        || part_type == "finish"
+                        || part_type == "tokens"
+                        || val.get("tokens").is_some()
+                        || val.get("usage").is_some())
+                    && let Some(toks) = parse_tokens_from_value(&val)
+                {
+                    session.active_turn_tokens = toks;
+                    found_active_tokens = true;
+                }
+
+                if part_type == "tool"
+                    || part_type == "tool-call"
+                    || part_type == "tool_call"
+                    || val.get("tool").is_some()
+                    || val.get("name").is_some()
+                {
+                    let tool_name = val
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .or_else(|| val.get("tool").and_then(|t| t.as_str()))
+                        .unwrap_or("");
+                    record_tool_item(tool_name, &val, session, &mut modified_files);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback de tokens de turno: si las tablas de mensajes/partes no proveyeron el desglose,
+    // utilizar el acumulado persistido directamente en el registro de sesión de OpenCode
+    if (!found_active_tokens || session.active_turn_tokens == 0)
+        && (session.tokens_input > 0 || session.tokens_output > 0)
+    {
+        session.active_turn_tokens = session.tokens_input + session.tokens_output;
+    }
 
     session.attributed_changes = AttributedChanges {
         files_count: modified_files.len(),
