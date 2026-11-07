@@ -1,6 +1,6 @@
 # HUDR2
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-0288D1.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-0288D1.svg)](LICENSE)
 [![Rust: 2024 Edition](https://img.shields.io/badge/Rust-2024_Edition-E65100.svg?logo=rust&logoColor=white)](Cargo.toml)
 [![Platform: Windows | Linux](https://img.shields.io/badge/Platform-Windows_%7C_Linux-6A1B9A.svg)]()
 [![Target: OpenCode | Gentle Shell](https://img.shields.io/badge/Target-OpenCode_%7C_Gentle_Shell-2E7D32.svg)]()
