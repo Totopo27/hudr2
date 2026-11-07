@@ -91,53 +91,32 @@ pub(super) fn recent_alive_sessions(conn: &Connection) -> Vec<DbSessionRecord> {
     rows.flatten().collect()
 }
 
+fn direct_or_nested_path(val: &serde_json::Value) -> Option<String> {
+    val.get("input")
+        .and_then(|i| i.get("path").or_else(|| i.get("file_path")))
+        .or_else(|| val.get("path"))
+        .or_else(|| val.get("file_path"))
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+}
+
+fn extract_path_from_field(field: &serde_json::Value) -> Option<String> {
+    if field.is_object() {
+        direct_or_nested_path(field)
+    } else if let Some(raw) = field.as_str()
+        && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw)
+    {
+        direct_or_nested_path(&parsed)
+    } else {
+        None
+    }
+}
+
 pub(super) fn extract_tool_path(tool_obj: &serde_json::Value) -> Option<String> {
-    if let Some(state_val) = tool_obj.get("state") {
-        if let Some(obj) = state_val.as_object() {
-            if let Some(p) = obj
-                .get("input")
-                .and_then(|i| i.get("path").or_else(|| i.get("file_path")))
-                .and_then(|p| p.as_str())
-            {
-                return Some(p.to_string());
-            }
-            if let Some(p) = obj.get("path").and_then(|p| p.as_str()) {
-                return Some(p.to_string());
-            }
-        } else if let Some(s_str) = state_val.as_str()
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s_str)
-        {
-            if let Some(p) = parsed
-                .get("input")
-                .and_then(|i| i.get("path").or_else(|| i.get("file_path")))
-                .and_then(|p| p.as_str())
-            {
-                return Some(p.to_string());
-            }
-            if let Some(p) = parsed.get("path").and_then(|p| p.as_str()) {
-                return Some(p.to_string());
-            }
-        }
-    }
-    if let Some(input_val) = tool_obj.get("input") {
-        if let Some(p) = input_val
-            .get("path")
-            .or_else(|| input_val.get("file_path"))
-            .and_then(|p| p.as_str())
-        {
-            return Some(p.to_string());
-        }
-        if let Some(s_str) = input_val.as_str()
-            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s_str)
-            && let Some(p) = parsed
-                .get("path")
-                .or_else(|| parsed.get("file_path"))
-                .and_then(|p| p.as_str())
-        {
-            return Some(p.to_string());
-        }
-    }
-    None
+    tool_obj
+        .get("state")
+        .and_then(extract_path_from_field)
+        .or_else(|| tool_obj.get("input").and_then(extract_path_from_field))
 }
 
 pub fn resolve_session_for_pane(conn: &Connection, pane: &HerdrPane) -> Option<DbSessionRecord> {
@@ -180,4 +159,27 @@ pub fn resolve_session_for_pane(conn: &Connection, pane: &HerdrPane) -> Option<D
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_tool_path_supports_object_and_serialized_json_shapes() {
+        assert_eq!(
+            extract_tool_path(&json!({"state": {"input": {"file_path": "src/a.rs"}}})).as_deref(),
+            Some("src/a.rs")
+        );
+        assert_eq!(
+            extract_tool_path(&json!({"state": r#"{"path":"src/b.rs"}"#})).as_deref(),
+            Some("src/b.rs")
+        );
+        assert_eq!(
+            extract_tool_path(&json!({"input": r#"{"file_path":"src/c.rs"}"#})).as_deref(),
+            Some("src/c.rs")
+        );
+        assert_eq!(extract_tool_path(&json!({"type": "tool"})), None);
+    }
 }

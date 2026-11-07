@@ -1,6 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(target_os = "windows")]
+const WINDOWS_FALLBACK_DRIVES: [char; 4] = ['C', 'D', 'E', 'F'];
+
+#[cfg(target_os = "windows")]
+fn push_windows_drive_candidates(candidates: &mut Vec<PathBuf>, suffixes: &[&str]) {
+    for drive in WINDOWS_FALLBACK_DRIVES {
+        for suffix in suffixes {
+            candidates.push(PathBuf::from(format!("{drive}:/{suffix}")));
+        }
+    }
+}
+
 /// Normaliza un path para comparaciones case-insensitive y cross-platform
 pub fn normalize_path(p: &str) -> String {
     p.replace('\\', "/")
@@ -63,10 +75,7 @@ pub fn resolve_auths_dir() -> PathBuf {
         if let Ok(system_drive) = std::env::var("SystemDrive") {
             candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/auths")));
         }
-        for drive in ['C', 'D', 'E', 'F'] {
-            candidates.push(PathBuf::from(format!("{drive}:/cliproxyapi/auths")));
-            candidates.push(PathBuf::from(format!("{drive}:/.cliproxy/auths")));
-        }
+        push_windows_drive_candidates(&mut candidates, &["cliproxyapi/auths", ".cliproxy/auths"]);
     }
 
     for c in candidates {
@@ -96,9 +105,7 @@ pub fn resolve_engram_db_path() -> PathBuf {
 
     #[cfg(target_os = "windows")]
     {
-        for drive in ['C', 'D', 'E', 'F'] {
-            candidates.push(PathBuf::from(format!("{drive}:/.engram/engram.db")));
-        }
+        push_windows_drive_candidates(&mut candidates, &[".engram/engram.db"]);
     }
 
     for c in candidates {
@@ -149,11 +156,7 @@ pub fn resolve_opencode_db_path() -> PathBuf {
     // 4. Fallbacks locales de Windows para desarrollo o setups multi-disco
     #[cfg(target_os = "windows")]
     {
-        for drive in ['C', 'D', 'E', 'F'] {
-            candidates.push(PathBuf::from(format!(
-                "{drive}:/.local/share/opencode/opencode.db"
-            )));
-        }
+        push_windows_drive_candidates(&mut candidates, &[".local/share/opencode/opencode.db"]);
     }
 
     let mut existing: Vec<PathBuf> = candidates.into_iter().filter(|c| c.exists()).collect();
@@ -264,9 +267,7 @@ pub fn opencode_config_candidates(target_dir: &str) -> Vec<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        for drive in ['C', 'D', 'E', 'F'] {
-            candidates.push(PathBuf::from(format!("{drive}:/.opencode/opencode.json")));
-        }
+        push_windows_drive_candidates(&mut candidates, &[".opencode/opencode.json"]);
     }
 
     candidates

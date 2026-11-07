@@ -17,24 +17,21 @@ static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 pub const KNOWN_PROXY_PREFIXES: &[&str] = &["cliproxy/", "opencode/"];
 
 /// Limpia y normaliza un identificador de modelo eliminando prefijos de vendor o proxy conocidos
-/// como `cliproxy/`, `opencode/`, etc.
+/// como `cliproxy/`, `opencode/`, etc. (comparación ASCII case-insensitive sin asignaciones intermedias).
 pub fn normalize_model_str(model_str: &str) -> String {
-    let mut clean = model_str.to_string();
-    for pfx in KNOWN_PROXY_PREFIXES {
-        loop {
-            let lower = clean.to_lowercase();
-            if let Some(idx) = lower.find(pfx) {
-                // Mapear el índice de bytes en minúsculas al índice de caracteres original
-                let char_idx = lower[..idx].chars().count();
-                let byte_start = clean.char_indices().nth(char_idx).map(|(i, _)| i).unwrap_or(idx);
-                let byte_end = clean.char_indices().nth(char_idx + pfx.chars().count()).map(|(i, _)| i).unwrap_or(byte_start + pfx.len());
-                clean.drain(byte_start..byte_end);
-            } else {
-                break;
+    let mut rest = model_str;
+    'strip: loop {
+        for pfx in KNOWN_PROXY_PREFIXES {
+            if let Some(head) = rest.get(..pfx.len())
+                && head.eq_ignore_ascii_case(pfx)
+            {
+                rest = &rest[pfx.len()..];
+                continue 'strip;
             }
         }
+        break;
     }
-    clean
+    rest.to_string()
 }
 
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
@@ -140,4 +137,23 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_model_str_handles_mixed_case_nested_and_unicode() {
+        assert_eq!(
+            normalize_model_str("CLIPROXY/OpenCode/agy1/gemini-3.8-flash-high"),
+            "agy1/gemini-3.8-flash-high"
+        );
+        assert_eq!(
+            normalize_model_str("opencode/cliproxy/ñandu-model"),
+            "ñandu-model"
+        );
+        assert_eq!(normalize_model_str("ñandu"), "ñandu");
+        assert_eq!(normalize_model_str(""), "");
+    }
 }

@@ -1,15 +1,14 @@
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
-use crate::opencode::{extract_prefix, resolve_pool_account_prefixes, resolve_session_for_pane};
+use crate::opencode::{
+    extract_prefix, is_opencode_terminal_title, resolve_pool_account_prefixes,
+    resolve_session_for_pane,
+};
 use crate::paths::resolve_opencode_db_path;
-use regex::Regex;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
 use std::process::Command;
-use std::sync::LazyLock;
-
-static RE_OC: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^(?:OC|opencode)\s*\|").unwrap());
 
 /// Construye un `Command` para invocar el CLI de OpenCode de forma multiplataforma.
 /// En Windows se lanza vía `cmd /c` porque `opencode` suele instalarse como shim
@@ -319,8 +318,7 @@ pub fn release_inactive_sessions(
                 && (p.agent.as_deref() == Some("opencode")
                     || p.terminal_title
                         .as_deref()
-                        .map(|t| t.starts_with("OC"))
-                        .unwrap_or(false)
+                        .is_some_and(is_opencode_terminal_title)
                     || p.agent_session_id.is_some())
         });
         keep_session_id =
@@ -367,14 +365,7 @@ pub fn release_inactive_sessions(
             || p.agent_session_id.is_some()
             || p.terminal_title
                 .as_deref()
-                .map(|t| {
-                    let lower = t.to_lowercase();
-                    lower.starts_with("oc |")
-                        || lower.starts_with("opencode |")
-                        || lower == "opencode"
-                        || RE_OC.is_match(t)
-                })
-                .unwrap_or(false);
+                .is_some_and(is_opencode_terminal_title);
 
         if let Some(ref session_rec) = s {
             let _ = conn.execute(

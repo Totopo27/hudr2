@@ -11,7 +11,8 @@ mod prefix;
 mod session;
 
 pub use model_info::{
-    clean_model_name, clean_opencode_terminal_title, resolve_model_context_limit,
+    clean_model_name, clean_opencode_terminal_title, is_opencode_terminal_title,
+    resolve_model_context_limit,
 };
 pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
 pub use session::{DbSessionRecord, resolve_session_for_pane};
@@ -87,13 +88,7 @@ pub fn read_opencode_session(
             || p.agent_status.as_deref() == Some("working")
             || p.terminal_title
                 .as_deref()
-                .map(|t| {
-                    let lower = t.to_lowercase();
-                    lower.starts_with("oc |")
-                        || lower.starts_with("opencode |")
-                        || lower == "opencode"
-                })
-                .unwrap_or(false)
+                .is_some_and(is_opencode_terminal_title)
             || (p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target));
 
         if !is_agent_pane {

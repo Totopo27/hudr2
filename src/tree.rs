@@ -23,6 +23,18 @@ fn is_real_dir(entry: &fs::DirEntry) -> bool {
         .unwrap_or(false)
 }
 
+fn sort_dir_entries(entries: &mut [fs::DirEntry]) {
+    entries.sort_by(|a, b| match (is_real_dir(a), is_real_dir(b)) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a
+            .file_name()
+            .to_string_lossy()
+            .to_lowercase()
+            .cmp(&b.file_name().to_string_lossy().to_lowercase()),
+    });
+}
+
 pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
     let mut data = ProjectTreeData {
         root_path: target_dir.to_string(),
@@ -44,19 +56,7 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
             .collect();
 
         // Carpetas primero, luego archivos, ambos ordenados alfabéticamente (case-insensitive)
-        list.sort_by(|a, b| {
-            let a_is_dir = is_real_dir(a);
-            let b_is_dir = is_real_dir(b);
-            match (a_is_dir, b_is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a
-                    .file_name()
-                    .to_string_lossy()
-                    .to_lowercase()
-                    .cmp(&b.file_name().to_string_lossy().to_lowercase()),
-            }
-        });
+        sort_dir_entries(&mut list);
 
         for entry in list {
             if budget == 0 {
@@ -72,19 +72,7 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
                 let mut children = Vec::new();
                 if let Ok(sub) = fs::read_dir(entry.path()) {
                     let mut sub_entries: Vec<_> = sub.flatten().collect();
-                    sub_entries.sort_by(|a, b| {
-                        let a_is_dir = is_real_dir(a);
-                        let b_is_dir = is_real_dir(b);
-                        match (a_is_dir, b_is_dir) {
-                            (true, false) => std::cmp::Ordering::Less,
-                            (false, true) => std::cmp::Ordering::Greater,
-                            _ => a
-                                .file_name()
-                                .to_string_lossy()
-                                .to_lowercase()
-                                .cmp(&b.file_name().to_string_lossy().to_lowercase()),
-                        }
-                    });
+                    sort_dir_entries(&mut sub_entries);
                     for s in sub_entries {
                         if budget == 0 {
                             break;
