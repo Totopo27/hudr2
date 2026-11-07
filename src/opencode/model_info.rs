@@ -1,24 +1,55 @@
 //! Normalización de nombres de modelo, títulos de terminal y límites de contexto.
 
-use regex::Regex;
-use std::sync::LazyLock;
-
-static RE_OC_TITLE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(?:OC|opencode)\s*\|\s*").unwrap());
+fn strip_oc_prefix(title: &str) -> Option<&str> {
+    let t = title.trim_start();
+    let lower = t.to_ascii_lowercase();
+    if lower.starts_with("opencode") {
+        let rest = t[8..].trim_start();
+        if let Some(after_pipe) = rest.strip_prefix('|') {
+            return Some(after_pipe.trim_start());
+        }
+    } else if lower.starts_with("oc") {
+        let rest = t[2..].trim_start();
+        if let Some(after_pipe) = rest.strip_prefix('|') {
+            return Some(after_pipe.trim_start());
+        }
+    }
+    None
+}
 
 pub fn clean_opencode_terminal_title(title: &str) -> String {
-    RE_OC_TITLE.replace(title, "").trim().to_string()
+    strip_oc_prefix(title).unwrap_or(title).trim().to_string()
 }
 
 pub fn is_opencode_terminal_title(title: &str) -> bool {
     let trimmed = title.trim();
     trimmed.eq_ignore_ascii_case("opencode")
         || trimmed.eq_ignore_ascii_case("oc")
-        || RE_OC_TITLE.is_match(trimmed)
+        || strip_oc_prefix(trimmed).is_some()
 }
 
-static RE_ACCOUNT_ANNOTATION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\s*[\(\[][a-zA-Z0-9_\-]+[\)\]]\s*$").unwrap());
+fn strip_account_annotation(s: &str) -> &str {
+    let trimmed = s.trim_end();
+    let Some(last_ch) = trimmed.chars().last() else {
+        return trimmed;
+    };
+    let open_ch = match last_ch {
+        ')' => '(',
+        ']' => '[',
+        _ => return trimmed,
+    };
+    if let Some(open_idx) = trimmed.rfind(open_ch) {
+        let inside = &trimmed[open_idx + 1..trimmed.len() - 1];
+        if !inside.is_empty()
+            && inside
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return trimmed[..open_idx].trim_end();
+        }
+    }
+    trimmed
+}
 
 pub fn clean_model_name(model_raw: &str) -> String {
     let mut s = model_raw.trim().to_string();
@@ -43,7 +74,7 @@ pub fn clean_model_name(model_raw: &str) -> String {
             s = id_val.to_string();
         }
     }
-    RE_ACCOUNT_ANNOTATION.replace(&s, "").trim().to_string()
+    strip_account_annotation(&s).trim().to_string()
 }
 
 pub fn resolve_model_context_limit(model_id: &str) -> i64 {
@@ -72,5 +103,18 @@ mod tests {
         assert!(is_opencode_terminal_title("OC"));
         assert!(!is_opencode_terminal_title("pi - hudr2"));
         assert!(!is_opencode_terminal_title("PowerShell"));
+    }
+
+    #[test]
+    fn clean_model_name_strips_annotations() {
+        assert_eq!(
+            clean_model_name("gemini-3.8-flash-high (cuenta4)"),
+            "gemini-3.8-flash-high"
+        );
+        assert_eq!(
+            clean_model_name("claude-3-5-sonnet [pool-01]"),
+            "claude-3-5-sonnet"
+        );
+        assert_eq!(clean_model_name("gemini-1.5-pro"), "gemini-1.5-pro");
     }
 }

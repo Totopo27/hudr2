@@ -43,7 +43,7 @@
 
 ## 3. `Integraciones` (`id: "integraciones"`, index `3`)
 - **Header:** `Integraciones · <N> cuentas` or `! <N> crític` (`CORAL`) when any account is critical for the **active session's model family**.
-- **Account rows:** Evaluates each account via `QuotaManager::evaluate_account_for_model(acc, active_model)`:
+- **Account rows:** Evaluates each account via `crate::quotas::evaluate_account_for_model(acc, active_model)`:
   - Glyph: `>` (`ACCENT_PINK`) if `local_prefix`, `●` (`ACCENT_PRIMARY`) if active in another pane, `●` (`MINT`) if idle, `!` (`AMBER`/`CORAL`) if warning/critical, `?` (`AMBER`) if HTTP error.
   - Inline `5h` bar + `rem_5h%` + `Wk:rem_wk%` + `en <reset_5h>` (or `[AGOTÁNDOSE]` / `[AVISO 70%]` / `[error_msg]`).
 - **Alert block:** Shows `flash_notice` (when active) and `! CRÍTICO: <prefix> (activa) [presioná 'x' -> migrar a <target>]` (proxy config sync `s: sync` lives exclusively in the shortcut footer to avoid UX confusion with quota refresh).
@@ -85,5 +85,5 @@
   - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Stack · Ecosistema`, `Herramientas & MCP`).
   - `[✓] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`).
   - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
-  - Fixed row: `[✓] ⚙ Tarjetas` (`fija`), ensuring the user can never hide the settings card or lock themselves out.
+  - Fixed row: `[✓] Tarjetas` (`fija`), ensuring the user can never hide the settings card or lock themselves out.
   - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...]}`).

@@ -2,17 +2,6 @@
 //! y resolución de pools (`pool-N`).
 
 use super::model_info::clean_model_name;
-use regex::Regex;
-use std::sync::LazyLock;
-
-static RE_POOL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:^|[/\\'])pool-0?([0-9]+)").unwrap());
-static RE_AGENT_PREFIX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)(?:sdd|gentle)-[a-z0-9]+-([a-z0-9_-]+)").unwrap());
-static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)(?:^|[/"'\\\\])([a-z0-9_-]+)/(?:gemini|claude|antigravity|[a-z0-9.-]+)"#)
-        .unwrap()
-});
 
 pub const KNOWN_PROXY_PREFIXES: &[&str] = &[
     "cliproxy/",
@@ -41,6 +30,27 @@ pub fn normalize_model_str(model_str: &str) -> String {
     rest.to_string()
 }
 
+fn extract_pool_number(clean: &str) -> Option<u32> {
+    let mut rest = clean;
+    while let Some(idx) = rest.find("pool-") {
+        let is_boundary = idx == 0 || matches!(rest.as_bytes()[idx - 1], b'/' | b'\\' | b'\'');
+        let after = &rest[idx + 5..];
+        if is_boundary {
+            let digits_end = after
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(after.len());
+            let digits = &after[..digits_end];
+            if !digits.is_empty()
+                && let Ok(num) = digits.parse::<u32>()
+            {
+                return Some(num);
+            }
+        }
+        rest = after;
+    }
+    None
+}
+
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
     if model_str.is_empty() {
         return Vec::new();
@@ -48,10 +58,7 @@ pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String])
     let model_id = clean_model_name(model_str);
     let clean = normalize_model_str(&model_id).to_lowercase();
 
-    if let Some(caps) = RE_POOL.captures(&clean)
-        && let Some(num_match) = caps.get(1)
-        && let Ok(pool_num) = num_match.as_str().parse::<u32>()
-    {
+    if let Some(pool_num) = extract_pool_number(&clean) {
         let base_prefix = if pool_num == 1 {
             "agy".to_string()
         } else {
@@ -76,20 +83,60 @@ pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String])
     Vec::new()
 }
 
+fn extract_agent_candidate(agent: &str) -> Option<String> {
+    let lower = agent.to_ascii_lowercase();
+    let rest = lower
+        .strip_prefix("sdd-")
+        .or_else(|| lower.strip_prefix("gentle-"))?;
+    let (role, candidate) = rest.split_once('-')?;
+    if !role.is_empty()
+        && role.chars().all(|c| c.is_ascii_alphanumeric())
+        && !candidate.is_empty()
+        && candidate
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_model_prefix_candidate(clean_model: &str) -> Option<String> {
+    for (idx, ch) in clean_model.char_indices() {
+        if ch == '/' {
+            let before = &clean_model[..idx];
+            let after = &clean_model[idx + 1..];
+            let seg = before
+                .rsplit(['/', '\\', '\'', '"'])
+                .next()
+                .unwrap_or("");
+            if !seg.is_empty()
+                && seg
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !after.is_empty()
+            {
+                let cand = seg.to_string();
+                if cand != "cliproxy" && cand != "opencode" && cand != "cpamc" {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    None
+}
+
 pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> Option<String> {
     // 1. Del agente (ej: sdd-orchestrator-xen1, sdd-apply-gianni, sdd-orchestrator-nina)
     if !agent.is_empty() {
-        if let Some(caps) = RE_AGENT_PREFIX.captures(agent)
-            && let Some(c_match) = caps.get(1)
-        {
-            let candidate = c_match.as_str().to_lowercase();
-            if sorted_prefixes.is_empty()
+        if let Some(candidate) = extract_agent_candidate(agent)
+            && (sorted_prefixes.is_empty()
                 || sorted_prefixes
                     .iter()
-                    .any(|p| p.to_lowercase() == candidate)
-            {
-                return Some(candidate);
-            }
+                    .any(|p| p.to_lowercase() == candidate))
+        {
+            return Some(candidate);
         }
 
         let lower_agent = agent.to_lowercase();
@@ -141,20 +188,13 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
             return Some(first_pool);
         }
 
-        if let Some(caps) = RE_MODEL_PREFIX.captures(&clean_model)
-            && let Some(c_match) = caps.get(1)
+        if let Some(candidate) = extract_model_prefix_candidate(&clean_model)
+            && (sorted_prefixes.is_empty()
+                || sorted_prefixes
+                    .iter()
+                    .any(|p| p.to_lowercase() == candidate))
         {
-            let candidate = c_match.as_str().to_lowercase();
-            if candidate != "cliproxy"
-                && candidate != "opencode"
-                && candidate != "cpamc"
-                && (sorted_prefixes.is_empty()
-                    || sorted_prefixes
-                        .iter()
-                        .any(|p| p.to_lowercase() == candidate))
-            {
-                return Some(candidate);
-            }
+            return Some(candidate);
         }
 
         for pfx in sorted_prefixes {
@@ -237,5 +277,14 @@ mod tests {
             &accounts,
         );
         assert_eq!(pfx3.as_deref(), Some("cuenta4"));
+    }
+
+    #[test]
+    fn resolve_pool_account_prefixes_without_regex() {
+        let known = vec!["agy1".to_string(), "agy2".to_string(), "agy2_1".to_string()];
+        let p1 = resolve_pool_account_prefixes("pool-01/gemini-1.5", &known);
+        assert_eq!(p1, vec!["agy"]);
+        let p2 = resolve_pool_account_prefixes("models/pool-2/claude", &known);
+        assert_eq!(p2, vec!["agy2", "agy2_1"]);
     }
 }
