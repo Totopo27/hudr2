@@ -65,12 +65,6 @@ pub fn load_config(path: &Path) -> ConfigData {
     ConfigData { collapsed, hidden }
 }
 
-/// Carga el estado de tarjetas colapsadas desde un archivo JSON (`{"collapsed": ["proyecto", ...]}`).
-/// Si el archivo no existe o es inválido, devuelve los valores por defecto.
-pub fn load_collapsed_config(path: &Path) -> [bool; 11] {
-    load_config(path).collapsed
-}
-
 /// Guarda de forma atómica (`<file>.tmp` + `rename`) las tarjetas colapsadas y ocultas.
 pub fn save_config(
     path: &Path,
@@ -105,11 +99,6 @@ pub fn save_config(
             let _ = std::fs::remove_file(&tmp);
             e.to_string()
         })
-}
-
-/// Guarda de forma atómica las tarjetas colapsadas (mantiene retrocompatibilidad).
-pub fn save_collapsed_config(path: &Path, collapsed: &[bool; 11]) -> Result<(), String> {
-    save_config(path, collapsed, &HashSet::new())
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

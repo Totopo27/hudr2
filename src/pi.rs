@@ -355,17 +355,6 @@ pub fn read_pi_session_file(
     Some(result)
 }
 
-/// Detecta si un evento `notify::Event` corresponde a la creación de un nuevo archivo `.jsonl`
-/// hermano en la misma carpeta de sesiones (cuando el usuario ejecuta `/new` o `/resume` en Pi).
-pub fn is_new_sibling_session_file(event: &notify::Event, current_session: &Path) -> bool {
-    matches!(event.kind, notify::EventKind::Create(_))
-        && event.paths.iter().any(|p| {
-            p != current_session
-                && p.parent() == current_session.parent()
-                && p.extension().is_some_and(|ext| ext == "jsonl")
-        })
-}
-
 /// Sincroniza en caliente los `metadata_tokens` emitidos por `telar-agent-state.ts` (vía IPC de Herdr/TelarDev)
 /// sobre la sesión activa, permitiendo telemetría en memoria con 0 lecturas de disco cuando el agente los publica.
 pub fn apply_pane_metadata_tokens(

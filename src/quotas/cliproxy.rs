@@ -4,8 +4,9 @@
 //! la normalización de prefijos (`antigravity-*`, `google-*`, `oauth-*`),
 //! y la consulta HTTP a `QUOTA_URL`.
 
-use crate::config::{QUOTA_URL, USER_AGENT, resolve_auths_dir};
+use crate::config::{QUOTA_URL, USER_AGENT};
 use crate::models::{AccountQuota, QuotaPool};
+use crate::paths::resolve_auths_dir;
 use std::fs;
 use std::path::Path;
 

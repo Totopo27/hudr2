@@ -1,5 +1,5 @@
-use crate::config::resolve_engram_db_path;
 use crate::models::{EngramTelemetry, HandoffSummary};
+use crate::paths::resolve_engram_db_path;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::HashMap;

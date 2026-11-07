@@ -3,7 +3,7 @@
 //!
 //! Submódulos:
 //! - [`model_info`]: normalización de nombres de modelo y límites de contexto.
-//! - [`prefix`]: atribución de sesiones a cuentas (prefijos, pools, subagentes SDD).
+//! - [`prefix`]: atribución de sesiones a cuentas (prefijos y pools).
 //! - [`session`]: consultas a `session_v2` y resolución de sesión por pane.
 
 mod model_info;
@@ -13,23 +13,18 @@ mod session;
 pub use model_info::{
     clean_model_name, clean_opencode_terminal_title, resolve_model_context_limit,
 };
-pub use prefix::{
-    extract_prefix, get_sdd_subagent_account_prefixes, normalize_model_str,
-    resolve_pool_account_prefixes,
-};
+pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
 pub use session::{DbSessionRecord, resolve_session_for_pane};
 
-use crate::config::resolve_opencode_db_path;
 use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
+use crate::paths::resolve_opencode_db_path;
 use rusqlite::{Connection, OpenFlags};
 use session::{extract_tool_path, recent_alive_sessions};
 use std::collections::{HashMap, HashSet};
 use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 struct MessageStatsCacheEntry {
-    session_id: String,
     time_updated: Option<i64>,
     active_turn_tokens: i64,
     tool_total: usize,
@@ -339,7 +334,6 @@ fn collect_message_stats(
         guard.insert(
             session_id.to_string(),
             MessageStatsCacheEntry {
-                session_id: session_id.to_string(),
                 time_updated: resolved_time_updated,
                 active_turn_tokens: session.active_turn_tokens,
                 tool_total: session.tool_total,

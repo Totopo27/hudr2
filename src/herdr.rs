@@ -321,25 +321,6 @@ impl HerdrClient {
         (None, None)
     }
 
-    pub fn get_current_pane_id() -> Option<String> {
-        if let Ok(val) = std::env::var("HERDR_PANE_ID")
-            && !val.trim().is_empty()
-        {
-            return Some(val.trim().to_string());
-        }
-
-        if let Some(val) = Self::run_herdr_cli(&["pane", "current"]) {
-            return val
-                .get("result")
-                .and_then(|r| r.get("pane"))
-                .and_then(|p| p.get("pane_id"))
-                .and_then(|id| id.as_str())
-                .map(|s| s.to_string());
-        }
-
-        None
-    }
-
     pub fn close_pane(pane_id: &str) -> bool {
         if Self::request_ipc("pane.close", json!({ "pane_id": pane_id })).is_some() {
             return true;

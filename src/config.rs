@@ -28,6 +28,3 @@ pub static HTTP_CLIENT: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLo
         .build()
         .expect("Failed to create HTTP client")
 });
-
-// Re-exportar funciones de resolución de rutas desde el módulo paths
-pub use crate::paths::{resolve_auths_dir, resolve_engram_db_path, resolve_opencode_db_path};

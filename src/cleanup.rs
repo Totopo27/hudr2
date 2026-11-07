@@ -1,7 +1,7 @@
-use crate::config::resolve_opencode_db_path;
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::{extract_prefix, resolve_pool_account_prefixes, resolve_session_for_pane};
+use crate::paths::resolve_opencode_db_path;
 use regex::Regex;
 use rusqlite::Connection;
 use std::collections::HashSet;
