@@ -243,9 +243,9 @@ pub fn render_screen_with_diff(
     );
 
     // 1. Header Linear (Línea 0 fija siempre)
-    let banner_raw = ":: HUDR2 \u{00b7} GENTLEMAN ::";
+    let banner_raw = ":: HUDR2 ::";
     let banner_pad = width.saturating_sub(string_width(banner_raw)) / 2;
-    lines.push(format!("{}{ACCENT_PRIMARY}:: HUDR2{RESET} {BORDER}\u{00b7} {GOLD}GENTLEMAN {ACCENT_PRIMARY}::{RESET}", " ".repeat(banner_pad)));
+    lines.push(format!("{}{ACCENT_PRIMARY}:: HUDR2 ::{RESET}", " ".repeat(banner_pad)));
 
     // 2. Estado Card (0)
     if !hidden_cards.contains("estado") {
@@ -1094,7 +1094,7 @@ pub fn render_screen_with_diff(
         }
 
         // Fila fija para la card de Tarjetas misma (no puede ocultarse)
-        let fija_left = format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}\u{2699} Tarjetas{RESET}");
+        let fija_left = format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}Tarjetas{RESET}");
         let fija_right = format!("{TEXT_DIM}fija{RESET}");
         lines.push(draw_row(&fija_left, &fija_right, width));
     }

@@ -55,7 +55,8 @@ mod tests {
         state.card_bounds = render_out.bounds;
 
         // La línea 0 es el banner
-        assert!(render_out.lines[0].contains("HUDR2"));
+        assert!(render_out.lines[0].contains(":: HUDR2 ::"));
+        assert!(!render_out.lines[0].contains("GENTLEMAN"));
 
         // Ubicar coordenadas antes de la llamada mutable
         let proj_start_line = state
@@ -189,7 +190,8 @@ mod tests {
 
         // La línea 0 (header) NUNCA debe contener el flash notice
         assert!(!render_out.lines[0].contains("Cuotas actualizadas"));
-        assert!(render_out.lines[0].contains("HUDR2"));
+        assert!(render_out.lines[0].contains(":: HUDR2 ::"));
+        assert!(!render_out.lines[0].contains("GENTLEMAN"));
 
         // La línea 1 debe ser el inicio de Estado
         assert!(render_out.lines[1].contains("Estado"));
@@ -2285,7 +2287,7 @@ mod tests {
         assert!(clean.contains("[✓] Estado"));
         assert!(clean.contains("[✓] Contexto"));
         assert!(clean.contains("[✓] Proyecto"));
-        assert!(clean.contains("[✓] ⚙ Tarjetas"));
+        assert!(clean.contains("[✓] Tarjetas"));
         assert!(clean.contains("fija"));
 
         // Ocultar card "proyecto"
@@ -2386,5 +2388,14 @@ mod tests {
         assert!(st2.is_card_hidden("engram"));
         assert!(!st2.is_card_hidden("estado"));
         assert!(!st2.collapsed_cards[10]); // recuerda el estado colapsado/expandido
+    }
+
+    #[test]
+    fn test_header_banner_renders_only_hudr2_without_gentleman() {
+        let state = AppState::new();
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 44);
+
+        assert!(render_out.lines[0].contains(":: HUDR2 ::"));
+        assert!(!render_out.lines[0].contains("GENTLEMAN"));
     }
 }
