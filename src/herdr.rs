@@ -229,6 +229,62 @@ impl HerdrClient {
         }
     }
 
+    /// Extrae el `pane_id` devuelto por `herdr pane split` (`.result.pane.pane_id`, `.pane.pane_id` o `pane_id`).
+    pub fn extract_split_pane_id(val: &Value) -> Option<String> {
+        val.pointer("/result/pane/pane_id")
+            .or_else(|| val.pointer("/pane/pane_id"))
+            .or_else(|| val.get("pane_id"))
+            .and_then(|v| v.as_str())
+            .or_else(|| val.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    }
+
+    /// Crea un split derecho del 20% en Herdr/Telar y lanza `hudr2` dentro del nuevo panel sin secuestrar el actual.
+    pub fn attach_sidebar_split(
+        exe_path: &Path,
+        cwd: &str,
+        config_path: Option<&Path>,
+    ) -> bool {
+        if std::env::var_os("HERDR_PANE_ID").is_none() && Self::resolve_ipc_path().is_none() {
+            return false;
+        }
+
+        let split_res = Self::run_herdr_cli(&[
+            "pane",
+            "split",
+            "--current",
+            "--direction",
+            "right",
+            "--ratio",
+            "0.80",
+            "--cwd",
+            cwd,
+            "--no-focus",
+        ]);
+        let Some(ref val) = split_res else {
+            return false;
+        };
+        let Some(new_pane_id) = Self::extract_split_pane_id(val) else {
+            return false;
+        };
+
+        let exe_str = exe_path.to_string_lossy();
+        let mut cmd_line = format!("\"{exe_str}\" --cwd \"{cwd}\"");
+        if let Ok(parent_pane) = std::env::var("HERDR_PANE_ID") {
+            let trimmed = parent_pane.trim();
+            if !trimmed.is_empty() {
+                cmd_line.push_str(&format!(" --pane \"{trimmed}\""));
+            }
+        }
+        if let Some(cfg) = config_path {
+            cmd_line.push_str(&format!(" --config \"{}\"", cfg.to_string_lossy()));
+        }
+
+        Self::run_herdr_cli(&["pane", "run", &new_pane_id, &cmd_line]).is_some()
+    }
+
     fn run_herdr_cli(args: &[&str]) -> Option<Value> {
         for bin in ["herdr", "telardev", "telar"] {
             let mut cmd = Command::new(bin);

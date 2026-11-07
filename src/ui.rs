@@ -116,6 +116,28 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
+fn truncate_plain(s: &str, max_width: usize) -> String {
+    if string_width(s) <= max_width {
+        return s.to_string();
+    }
+    if max_width <= 1 {
+        return "\u{2026}".to_string();
+    }
+    let limit = max_width - 1;
+    let mut out = String::new();
+    let mut used = 0usize;
+    for ch in s.chars() {
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cw > limit {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
 pub fn draw_top(title: &str, collapsed: bool, width: usize) -> String {
     let icon = if collapsed { "+" } else { "-" };
     let icon_badge = format!("{TEXT_DIM}[{RESET}{TEXT_MUTED}{icon}{RESET}{TEXT_DIM}]{RESET}");
@@ -259,11 +281,7 @@ pub fn render_screen_with_diff(
         let estado_title = format!("{BOLD}{GOLD}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
         lines.push(draw_top(&estado_title, collapsed[0], width));
         if !collapsed[0] {
-            let short_proj = if folder.len() > 18 {
-                format!("{}…", &folder[..16])
-            } else {
-                folder.to_string()
-            };
+            let short_proj = truncate_plain(folder, 18);
             lines.push(draw_row(
                 &format!("{GOLD}Proyecto{RESET}"),
                 &format!("{TEXT_PRIMARY}~/.../{short_proj}{RESET}"),
@@ -282,11 +300,50 @@ pub fn render_screen_with_diff(
                 &format!("{CYAN}# {}{RESET} {dirty}", snap.git.branch),
                 width,
             ));
-            lines.push(draw_row(
-                &format!("{GOLD}Modelo{RESET}"),
-                &format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
-                width,
-            ));
+            let model_disp = match snap
+                .agent_session
+                .thinking_level
+                .as_deref()
+                .filter(|t| !t.is_empty())
+            {
+                Some(lvl) => format!(
+                    "{ACCENT_PRIMARY}{}{RESET} {TEXT_MUTED}[{lvl}]{RESET}",
+                    snap.agent_session.model_short
+                ),
+                None => format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
+            };
+            lines.push(draw_row(&format!("{GOLD}Modelo{RESET}"), &model_disp, width));
+
+            if !snap.agent_session.todos.is_empty() {
+                let mut done = 0usize;
+                let mut in_prog = 0usize;
+                let mut pending = 0usize;
+                let mut active_title: Option<&str> = None;
+                for td in &snap.agent_session.todos {
+                    match td.status.as_str() {
+                        "done" | "completed" => done += 1,
+                        "in_progress" => {
+                            in_prog += 1;
+                            if active_title.is_none() && !td.title.is_empty() {
+                                active_title = Some(&td.title);
+                            }
+                        }
+                        _ => {
+                            pending += 1;
+                        }
+                    }
+                }
+                let counts = format!(
+                    "{MINT}\u{2713}{done}{RESET} {AMBER}\u{25c9}{in_prog}{RESET} {TEXT_DIM}\u{25cb}{pending}{RESET}"
+                );
+                let right_todo = if let Some(t) = active_title {
+                    let short_t = truncate_plain(t, 14);
+                    format!("{counts} {TEXT_MUTED}{short_t}{RESET}")
+                } else {
+                    counts
+                };
+                lines.push(draw_row(&format!("{GOLD}Tareas{RESET}"), &right_todo, width));
+            }
 
             let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
                 format!("{ACCENT_PINK}*{RESET} {MINT}{lp}{RESET} {ACCENT_PINK}*{RESET}")
@@ -405,7 +462,12 @@ pub fn render_screen_with_diff(
         lines.push(draw_top(&proj_title, collapsed[2], width));
         if !collapsed[2] {
             let open_line_idx = lines.len();
-            let normalized_path = snap.tree.root_path.replace('\\', "/");
+            let raw_proj_path = if snap.tree.root_path.is_empty() {
+                &snap.project_dir
+            } else {
+                &snap.tree.root_path
+            };
+            let normalized_path = raw_proj_path.replace('\\', "/");
             let btn_label = format!("{GOLD}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
             let btn_w = string_width(&btn_label);
             let target_inner = width.saturating_sub(4);
@@ -431,7 +493,7 @@ pub fn render_screen_with_diff(
                 start_line: open_line_idx,
                 end_line: open_line_idx,
                 action_type: Some("open_folder"),
-                action_path: Some(snap.tree.root_path.clone()),
+                action_path: Some(raw_proj_path.clone()),
             });
 
             let max_items = 6;
@@ -947,41 +1009,8 @@ pub fn render_screen_with_diff(
         });
     }
 
-    // 8. Stack · Ecosistema Card (idx 9)
-    if !hidden_cards.contains("ecosystem") {
-        let eco_start = lines.len();
-    let eco_title = format!("{BOLD}{GOLD}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}Ecosistema{RESET}");
-    lines.push(draw_top(&eco_title, collapsed[9], width));
-    if !collapsed[9] {
-        if snap.ecosystem.tools.is_empty() {
-            lines.push(draw_row(&format!("{TEXT_DIM}escaneando ecosistema...{RESET}"), "", width));
-        } else {
-            for tool in &snap.ecosystem.tools {
-                let left = if tool.is_installed {
-                    let ver_str = tool.version.as_deref().unwrap_or("");
-                    format!(
-                        "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
-                        tool.name, ver_str
-                    )
-                } else {
-                    format!("{TEXT_DIM}\u{25cb} {} -{RESET}", tool.name)
-                };
-                lines.push(draw_row(&left, "", width));
-            }
-        }
-    }
-        lines.push(draw_bottom(width));
-        bounds.push(CardBounds {
-            id: "ecosystem",
-            start_line: eco_start,
-            end_line: lines.len() - 1,
-            action_type: None,
-            action_path: None,
-        });
-    }
-
-    // 9. Herramientas Card (7) y 10. MCP Card (8)
-    if !hidden_cards.contains("mcp") {
+    // 8. Herramientas Card (idx 7)
+    if !hidden_cards.contains("tools") {
         let tools_start = lines.len();
         let tool_title = format!(
             "{BOLD}{GOLD}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
@@ -993,6 +1022,10 @@ pub fn render_screen_with_diff(
             let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
             let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
             lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
+            if snap.agent_session.tool_bash > 0 {
+                let p_bash = format!("{GOLD}$ {} cmds{RESET}", snap.agent_session.tool_bash);
+                lines.push(draw_row(&p_bash, "", width));
+            }
         }
         lines.push(draw_bottom(width));
         bounds.push(CardBounds {
@@ -1002,8 +1035,10 @@ pub fn render_screen_with_diff(
             action_type: None,
             action_path: None,
         });
+    }
 
-        // 10. MCP Card (8)
+    // 9. MCP Card (idx 8)
+    if !hidden_cards.contains("mcp") {
         let mcp_start = lines.len();
         lines.push(draw_top(
             &format!(
@@ -1040,12 +1075,50 @@ pub fn render_screen_with_diff(
         });
     }
 
+    // 10. Stack · Ecosistema Card (idx 9, tecla 'e')
+    if !hidden_cards.contains("ecosystem") {
+        let eco_start = lines.len();
+        let eco_title =
+            format!("{BOLD}{GOLD}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}Ecosistema{RESET}");
+        lines.push(draw_top(&eco_title, collapsed[9], width));
+        if !collapsed[9] {
+            if snap.ecosystem.tools.is_empty() {
+                lines.push(draw_row(
+                    &format!("{TEXT_DIM}escaneando ecosistema...{RESET}"),
+                    "",
+                    width,
+                ));
+            } else {
+                for tool in &snap.ecosystem.tools {
+                    let left = if tool.is_installed {
+                        let ver_str = tool.version.as_deref().unwrap_or("");
+                        format!(
+                            "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
+                            tool.name, ver_str
+                        )
+                    } else {
+                        format!("{TEXT_DIM}\u{25cb} {} -{RESET}", tool.name)
+                    };
+                    lines.push(draw_row(&left, "", width));
+                }
+            }
+        }
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "ecosystem",
+            start_line: eco_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
+
     // 11. Tarjetas Card (10) — Selector interactivo de visibilidad
     let tarjetas_start = lines.len();
     let tarjetas_title = format!("{BOLD}{GOLD}Tarjetas{RESET}");
     lines.push(draw_top(&tarjetas_title, collapsed[10], width));
     if !collapsed[10] {
-        let cards_info: [(&str, &str); 9] = [
+        let cards_info: [(&str, &str); 10] = [
             ("estado", "Estado"),
             ("contexto", "Contexto"),
             ("proyecto", "Proyecto"),
@@ -1053,8 +1126,9 @@ pub fn render_screen_with_diff(
             ("pools", "Cuota de Modelos"),
             ("git", "Cambios (Git)"),
             ("engram", "Engram"),
+            ("tools", "Herramientas"),
+            ("mcp", "MCP"),
             ("ecosystem", "Stack \u{00b7} Ecosistema"),
-            ("mcp", "Herramientas & MCP"),
         ];
 
         for (id, label) in cards_info {

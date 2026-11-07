@@ -16,13 +16,4 @@ if (-not (Test-Path $bin)) {
     exit 1
 }
 
-# Intentar acoplar a un split lateral si herdr esta corriendo
-if (Get-Command herdr -ErrorAction SilentlyContinue) {
-    try {
-        & herdr pane split --current --direction right --ratio 0.80 --no-focus 2>$null
-    } catch {
-        # herdr no activo o split fallo
-    }
-}
-
-& $bin @ArgsList
+& $bin --attach @ArgsList

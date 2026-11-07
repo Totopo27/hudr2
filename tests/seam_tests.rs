@@ -3220,4 +3220,105 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn test_utf8_folder_truncation_active_telemetry_proyecto_fallback_and_tools_visibility() {
+        use hudr2::herdr::HerdrClient;
+        use hudr2::models::SessionTodo;
+
+        // 1. F-02: extracción de pane_id en formatos JSON de Herdr/Telar
+        let split_json = serde_json::json!({
+            "result": { "pane": { "pane_id": "w1:p9" } }
+        });
+        assert_eq!(
+            HerdrClient::extract_split_pane_id(&split_json).as_deref(),
+            Some("w1:p9")
+        );
+
+        // 2. F-01 + A1 + F-03: carpeta multibyte >18 bytes en límite UTF-8, thinking_level, todos, tool_bash y fallback project_dir
+        let mut state = AppState::new();
+        state.snapshot.project_dir = "D:/proyectos/documentaci\u{00f3}n_t\u{00e9}cnica_avanzada".to_string();
+        state.snapshot.agent_session.model_short = "gemini-3.8-flash-h".to_string();
+        state.snapshot.agent_session.thinking_level = Some("high".to_string());
+        state.snapshot.agent_session.tool_bash = 7;
+        state.snapshot.agent_session.todos = vec![
+            SessionTodo {
+                title: "Auditar UTF-8".to_string(),
+                status: "done".to_string(),
+            },
+            SessionTodo {
+                title: "Conectar UI de telemetr\u{00ed}a".to_string(),
+                status: "in_progress".to_string(),
+            },
+            SessionTodo {
+                title: "Subir commit".to_string(),
+                status: "pending".to_string(),
+            },
+        ];
+        // Expandir Proyecto (idx 2) mientras tree.root_path sigue vacío
+        state.collapsed_cards[2] = false;
+
+        let out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let plain = ui::strip_ansi(&out.lines.join("\n"));
+        assert!(
+            plain.contains("[high]"),
+            "Estado debe renderizar thinking_level: {plain}"
+        );
+        assert!(
+            plain.contains("Tareas") && plain.contains("✓1") && plain.contains("◉1") && plain.contains("○1"),
+            "Estado debe renderizar resumen de todos: {plain}"
+        );
+        assert!(
+            plain.contains("$ 7 cmds"),
+            "Herramientas debe renderizar tool_bash cuando > 0: {plain}"
+        );
+
+        let open_bound = out
+            .bounds
+            .iter()
+            .find(|b| b.id == "open_folder")
+            .expect("Proyecto expandido debe exponer open_folder");
+        assert_eq!(
+            open_bound.action_path.as_deref(),
+            Some(state.snapshot.project_dir.as_str()),
+            "open_folder debe usar project_dir cuando tree.root_path está vacío"
+        );
+
+        // 3. F-05: visibilidad independiente de "tools" vs "mcp" y orden Herramientas -> MCP -> Stack
+        let tools_pos = plain.find("Herramientas").unwrap();
+        let mcp_pos = plain.find("MCP ·").unwrap();
+        let stack_pos = plain.find("Stack · Ecosistema").unwrap();
+        assert!(
+            tools_pos < mcp_pos && mcp_pos < stack_pos,
+            "El orden visual debe coincidir con las teclas 8 (Herramientas) -> 9 (MCP) -> e (Stack)"
+        );
+
+        state.toggle_card_visibility("tools");
+        let out_tools_hidden = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let plain_hidden = ui::strip_ansi(&out_tools_hidden.lines.join("\n"));
+        assert!(
+            !plain_hidden.contains("Herramientas ·"),
+            "Ocultar 'tools' debe ocultar Herramientas"
+        );
+        assert!(
+            plain_hidden.contains("MCP ·"),
+            "Ocultar 'tools' NO debe ocultar MCP"
+        );
+    }
 }

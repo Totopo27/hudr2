@@ -23,12 +23,13 @@ const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
 const HELP_TEXT: &str = "\
-hudr2 [--once] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
+hudr2 [--once] [--attach] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
 
 Sidebar de telemetría reactiva para Herdr/Telar, OpenCode y Pi / Gentle Shell.
 
 Opciones:
   --once             Imprime una captura completa en texto plano y termina de inmediato
+  --attach           Abre un split lateral derecho (20%) en Herdr/Telar y lanza hudr2 allí
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
@@ -36,6 +37,7 @@ Opciones:
 
 struct CliArgs {
     once: bool,
+    attach: bool,
     pane_id: Option<String>,
     cwd: Option<String>,
     config_path: Option<PathBuf>,
@@ -45,6 +47,7 @@ struct CliArgs {
 fn parse_cli_args() -> CliArgs {
     let mut args = std::env::args().skip(1);
     let mut once = false;
+    let mut attach = false;
     let mut pane_id = None;
     let mut cwd = None;
     let mut config_path = None;
@@ -53,6 +56,7 @@ fn parse_cli_args() -> CliArgs {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--once" => once = true,
+            "--attach" => attach = true,
             "-h" | "--help" => show_help = true,
             "--pane" => {
                 if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
@@ -75,6 +79,7 @@ fn parse_cli_args() -> CliArgs {
 
     CliArgs {
         once,
+        attach,
         pane_id,
         cwd,
         config_path,
@@ -112,6 +117,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if cli.show_help {
         println!("{HELP_TEXT}");
         return Ok(());
+    }
+
+    if cli.attach && !cli.once
+        && let Ok(exe_path) = std::env::current_exe()
+    {
+        let attach_cwd = cli.cwd.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|_| ".".to_string())
+        });
+        if HerdrClient::attach_sidebar_split(&exe_path, &attach_cwd, cli.config_path.as_deref()) {
+            return Ok(());
+        }
     }
 
     let resolved_config = cli
@@ -500,8 +518,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             app::open_folder_in_explorer(&path_to_open);
                                         });
                                     }
-                                    state::ClickAction::ToggledCard(_)
-                                    | state::ClickAction::ToggleGitFileDiff(_)
+                                    state::ClickAction::ToggledCard(idx) => {
+                                        if idx == 2
+                                            && !state.collapsed_cards[2]
+                                            && state.snapshot.tree.root_path.is_empty()
+                                        {
+                                            refresh_needed = true;
+                                        }
+                                    }
+                                    state::ClickAction::ToggleGitFileDiff(_)
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
                                     | state::ClickAction::ToggleCardVisibility(_) => {}
@@ -530,10 +555,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             state.needs_redraw = true;
                             match norm_code {
                                 KeyCode::Char('q') => should_quit = true,
-                                KeyCode::Char('c') => state.toggle_all_collapse(),
+                                KeyCode::Char('c') => {
+                                    state.toggle_all_collapse();
+                                    if !state.collapsed_cards[2]
+                                        && state.snapshot.tree.root_path.is_empty()
+                                    {
+                                        refresh_needed = true;
+                                    }
+                                }
                                 KeyCode::Char('1') => state.toggle_card(0), // Estado
                                 KeyCode::Char('2') => state.toggle_card(1), // Contexto
-                                KeyCode::Char('3') => state.toggle_card(2), // Proyecto
+                                KeyCode::Char('3') => {
+                                    state.toggle_card(2); // Proyecto
+                                    if !state.collapsed_cards[2]
+                                        && state.snapshot.tree.root_path.is_empty()
+                                    {
+                                        refresh_needed = true;
+                                    }
+                                }
                                 KeyCode::Char('4') => state.toggle_card(3), // Integraciones
                                 KeyCode::Char('5') => state.toggle_card(4), // Cuotas de Modelos
                                 KeyCode::Char('6') => state.toggle_card(5), // Cambios
