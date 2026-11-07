@@ -26,11 +26,15 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 ## Muestra visual
 
 <p align="center">
-  <img src="hudr2_sidebar_tarjetas.png" width="48%" alt="HUDR2 con todas las tarjetas activas" />
-  <img src="hudr2_sidebar_ocultas.png" width="48%" alt="HUDR2 en modo compacto con tarjetas ocultas" />
+  <img src="hudr2_sidebar_tarjetas.png" width="32%" alt="HUDR2 con todas las tarjetas activas" />
+  <img src="hudr2_integraciones_alerta.png" width="32%" alt="HUDR2 con alerta crítica y desgaste de cuotas" />
+  <img src="hudr2_sidebar_ocultas.png" width="32%" alt="HUDR2 en modo compacto con tarjetas ocultas" />
 </p>
 
-*Izquierda: Sidebar completo con selector de tarjetas interactivo desplegado. Derecha: Modo compacto con Proyecto, Integraciones, Stack y Herramientas ocultas para terminales de poca altura.*
+*De izquierda a derecha:*
+1. **Sidebar completo:** Todas las tarjetas activas y selector de visibilidad interactivo desplegado (`t` o `0`).
+2. **Telemetría viva y migración crítica:** Identificación de cuenta local activa (`>`), sesiones concurrentes (`●` púrpura), advertencia de desgaste progresivo (ámbar) y alerta de migración en caliente (`x`) al agotarse una cuenta (`!`).
+3. **Modo compacto:** Ocultación de tarjetas secundarias para terminales pequeñas, reteniendo solo métricas esenciales en apenas 30 líneas.
 
 ---
 
