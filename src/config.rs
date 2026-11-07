@@ -1,17 +1,17 @@
-// Paleta Linear ANSI Truecolor 24-bit
-pub const BORDER: &str = "\x1b[38;2;120;75;160m"; // #784ba0 (violeta estructural)
-pub const BORDER_MUTED: &str = "\x1b[38;2;70;45;95m"; // #462d5f (separador sutil)
+// Paleta Linear ANSI Truecolor 24-bit (compatibilidad y fallback)
+pub const BORDER: &str = "\x1b[38;2;88;63;120m"; // #583F78 (violeta visible calibrado)
+pub const BORDER_MUTED: &str = "\x1b[38;2;52;34;71m"; // #342247 (separador sutil)
 pub const ACCENT_PRIMARY: &str = "\x1b[38;2;123;138;255m"; // #7B8AFF (periwinkle Linear)
 pub const ACCENT_PINK: &str = "\x1b[38;2;240;149;200m"; // #F095C8 (indicador activo > / *)
-pub const GOLD: &str = "\x1b[38;2;224;194;122m"; // #E0C27A (etiquetas, números)
-pub const AMBER: &str = "\x1b[38;2;242;184;109m"; // #F2B86D (aviso 70%)
-pub const MINT: &str = "\x1b[38;2;76;183;130m"; // #4CB782 (success green)
-pub const CORAL: &str = "\x1b[38;2;235;87;87m"; // #EB5757 (error / crítico 85%+)
-pub const TEXT_PRIMARY: &str = "\x1b[38;2;247;248;248m"; // #F7F8F8 (off-white texto)
+pub const GOLD: &str = "\x1b[38;2;148;163;184m"; // #94A3B8 (slate plata limpio, sustituye al viejo dorado)
+pub const AMBER: &str = "\x1b[38;2;245;158;11m"; // #F59E0B (aviso 70%)
+pub const MINT: &str = "\x1b[38;2;16;185;129m"; // #10B981 (success green)
+pub const CORAL: &str = "\x1b[38;2;244;63;94m"; // #F43F5E (error / crítico 85%+)
+pub const TEXT_PRIMARY: &str = "\x1b[38;2;248;250;252m"; // #F8FAFC (blanco platino)
 pub const TEXT_MUTED: &str = "\x1b[38;2;138;143;152m"; // #8A8F98 (muted)
-pub const TEXT_DIM: &str = "\x1b[38;2;90;94;102m"; // #5A5E66 (detalles tenues)
-pub const CYAN: &str = "\x1b[38;2;139;233;253m"; // #8BE9FD (cyan)
-pub const MAGENTA: &str = "\x1b[38;2;189;147;249m"; // #BD93F9 (purple)
+pub const TEXT_DIM: &str = "\x1b[38;2;75;70;88m"; // #4B4658 (detalles tenues)
+pub const CYAN: &str = "\x1b[38;2;165;180;252m"; // #A5B4FC (lavanda suave)
+pub const MAGENTA: &str = "\x1b[38;2;192;132;252m"; // #C084FC (purple)
 pub const RESET: &str = "\x1b[0m";
 pub const BOLD: &str = "\x1b[1m";
 

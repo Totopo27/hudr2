@@ -3674,4 +3674,74 @@ mod tests {
         let panes = HerdrClient::get_panes();
         assert!(panes.is_empty() || !panes.is_empty());
     }
+
+    #[test]
+    fn test_adaptive_theming_and_herdr_config_sync() {
+        use hudr2::theme::{
+            BAUHAUS_MINIMAL, ELECTRIC_CYBER, EDITORIAL_VELVET, LINEAR_STUDIO, SYNTHWAVE_SUNSET,
+            active_theme, find_theme, map_herdr_theme, parse_herdr_theme_name, set_active_theme,
+        };
+
+        // 1. Simulación de config.toml de Herdr con diferentes temas
+        let toml_cyber = "[theme]\nname = \"cyberdream\"\n";
+        assert_eq!(parse_herdr_theme_name(toml_cyber).as_deref(), Some("cyberdream"));
+        assert_eq!(map_herdr_theme("cyberdream").id, "cyber");
+
+        let toml_gruvbox = "[theme]\nname = 'gruvbox'\n";
+        assert_eq!(parse_herdr_theme_name(toml_gruvbox).as_deref(), Some("gruvbox"));
+        assert_eq!(map_herdr_theme("gruvbox").id, "bauhaus");
+
+        let toml_nord = "[theme]\nname = \"nord\"\n";
+        assert_eq!(parse_herdr_theme_name(toml_nord).as_deref(), Some("nord"));
+        assert_eq!(map_herdr_theme("nord").id, "synthwave");
+        assert_eq!(SYNTHWAVE_SUNSET.id, "synthwave");
+
+        let toml_oxocarbon = "[theme]\nname = \"oxocarbon\"\n";
+        assert_eq!(parse_herdr_theme_name(toml_oxocarbon).as_deref(), Some("oxocarbon"));
+        assert_eq!(map_herdr_theme("oxocarbon").id, "editorial");
+        assert_eq!(EDITORIAL_VELVET.id, "editorial");
+
+        // 2. Comprobar que find_theme resuelve alias correctamente
+        assert_eq!(find_theme("linear").unwrap().id, "linear");
+        assert_eq!(find_theme("cyber").unwrap().id, "cyber");
+        assert_eq!(find_theme("bauhaus").unwrap().id, "bauhaus");
+        assert_eq!(find_theme("synthwave").unwrap().id, "synthwave");
+        assert_eq!(find_theme("editorial").unwrap().id, "editorial");
+
+        // 3. Renderizado con tema específico
+        let state = hudr2::state::AppState::new();
+        let out_linear = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            &LINEAR_STUDIO,
+        );
+        let linear_raw = out_linear.lines.join("\n");
+        assert!(linear_raw.contains(LINEAR_STUDIO.border));
+        assert!(linear_raw.contains(LINEAR_STUDIO.title_color));
+
+        let out_cyber = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            &ELECTRIC_CYBER,
+        );
+        let cyber_raw = out_cyber.lines.join("\n");
+        assert!(cyber_raw.contains(ELECTRIC_CYBER.border));
+        assert!(cyber_raw.contains(ELECTRIC_CYBER.title_color));
+
+        // 4. Conmutación dinámica del tema activo
+        set_active_theme(&BAUHAUS_MINIMAL);
+        assert_eq!(active_theme().id, "bauhaus");
+        set_active_theme(&LINEAR_STUDIO);
+        assert_eq!(active_theme().id, "linear");
+    }
 }

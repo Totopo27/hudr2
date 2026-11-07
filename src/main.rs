@@ -33,6 +33,7 @@ Opciones:
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
+  --theme <name>     Tema visual (auto [adaptativo de Herdr], linear, cyber, bauhaus, synthwave, editorial)
   -h, --help         Muestra esta ayuda";
 
 struct CliArgs {
@@ -41,6 +42,7 @@ struct CliArgs {
     pane_id: Option<String>,
     cwd: Option<String>,
     config_path: Option<PathBuf>,
+    theme: Option<String>,
     show_help: bool,
 }
 
@@ -51,6 +53,7 @@ fn parse_cli_args() -> CliArgs {
     let mut pane_id = None;
     let mut cwd = None;
     let mut config_path = None;
+    let mut theme = None;
     let mut show_help = false;
 
     while let Some(arg) = args.next() {
@@ -73,6 +76,11 @@ fn parse_cli_args() -> CliArgs {
                     config_path = Some(PathBuf::from(v));
                 }
             }
+            "--theme" => {
+                if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
+                    theme = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -83,6 +91,7 @@ fn parse_cli_args() -> CliArgs {
         pane_id,
         cwd,
         config_path,
+        theme,
         show_help,
     }
 }
@@ -131,6 +140,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
+
+    // Inicializar tema visual: adaptativo desde Herdr o forzado por CLI
+    let is_auto_theme = cli.theme.as_deref().unwrap_or("auto") == "auto";
+    let active_theme = match cli.theme.as_deref() {
+        Some("auto") | None => hudr2::theme::resolve_adaptive_theme(),
+        Some(name) => hudr2::theme::find_theme(name).unwrap_or_else(|| {
+            hudr2::theme::resolve_adaptive_theme()
+        }),
+    };
+    hudr2::theme::set_active_theme(active_theme);
 
     let resolved_config = cli
         .config_path
@@ -492,6 +511,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 MainMsg::Redraw => {}
                 MainMsg::QuotaTick => {
                     quota_tick = true;
+                    if is_auto_theme {
+                        let resolved = hudr2::theme::resolve_adaptive_theme();
+                        if resolved.id != hudr2::theme::active_theme().id {
+                            hudr2::theme::set_active_theme(resolved);
+                            app_state.write().await.needs_redraw = true;
+                        }
+                    }
                 }
                 MainMsg::Terminal(ev) => match ev {
                     Event::Resize(_, _) => {

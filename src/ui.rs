@@ -1,6 +1,6 @@
 use crate::config::{
-    ACCENT_PINK, ACCENT_PRIMARY, AMBER, BOLD, BORDER, BORDER_MUTED, CORAL, CYAN, GOLD, MAGENTA,
-    MINT, RESET, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_PINK, ACCENT_PRIMARY, AMBER, BOLD, CORAL, CYAN, GOLD, MAGENTA, MINT, RESET, TEXT_DIM,
+    TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::models::TelemetrySnapshot;
 use unicode_width::UnicodeWidthStr;
@@ -139,8 +139,20 @@ fn truncate_plain(s: &str, max_width: usize) -> String {
 }
 
 pub fn draw_top(title: &str, collapsed: bool, width: usize) -> String {
+    draw_top_theme(title, collapsed, width, crate::theme::active_theme())
+}
+
+pub fn draw_top_theme(
+    title: &str,
+    collapsed: bool,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> String {
     let icon = if collapsed { "+" } else { "-" };
-    let icon_badge = format!("{TEXT_DIM}[{RESET}{TEXT_MUTED}{icon}{RESET}{TEXT_DIM}]{RESET}");
+    let icon_badge = format!(
+        "{}[{RESET}{}{icon}{RESET}{}]{RESET}",
+        theme.text_dim, theme.text_muted, theme.text_dim
+    );
     let clean_title = if string_width(title) > width.saturating_sub(12) {
         truncate_to_width(title, width.saturating_sub(12))
     } else {
@@ -149,26 +161,49 @@ pub fn draw_top(title: &str, collapsed: bool, width: usize) -> String {
     let t_len = string_width(&clean_title);
     let dash_count = width.saturating_sub(10 + t_len);
     format!(
-        "{BORDER}\u{256d}\u{2500} {clean_title} {}\u{2500}{icon_badge} {BORDER}\u{256e}{RESET}",
-        "\u{2500}".repeat(dash_count)
+        "{}\u{256d}\u{2500} {clean_title} {}\u{2500}{icon_badge} {}\u{256e}{RESET}",
+        theme.border,
+        "\u{2500}".repeat(dash_count),
+        theme.border
     )
 }
 
 pub fn draw_bottom(width: usize) -> String {
+    draw_bottom_theme(width, crate::theme::active_theme())
+}
+
+pub fn draw_bottom_theme(width: usize, theme: &crate::theme::Theme) -> String {
     format!(
-        "{BORDER}\u{2570}{}\u{256f}{RESET}",
-        "\u{2500}".repeat(width.saturating_sub(2))
+        "{}\u{2570}{}{}\u{256f}{RESET}",
+        theme.border,
+        "\u{2500}".repeat(width.saturating_sub(2)),
+        theme.border
     )
 }
 
 pub fn draw_divider(width: usize) -> String {
+    draw_divider_theme(width, crate::theme::active_theme())
+}
+
+pub fn draw_divider_theme(width: usize, theme: &crate::theme::Theme) -> String {
     format!(
-        "{BORDER_MUTED}\u{251c}{}\u{2524}{RESET}",
-        "\u{2500}".repeat(width.saturating_sub(2))
+        "{}\u{251c}{}{}\u{2524}{RESET}",
+        theme.border_muted,
+        "\u{2500}".repeat(width.saturating_sub(2)),
+        theme.border_muted
     )
 }
 
 pub fn draw_row(left: &str, right: &str, width: usize) -> String {
+    draw_row_theme(left, right, width, crate::theme::active_theme())
+}
+
+pub fn draw_row_theme(
+    left: &str,
+    right: &str,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> String {
     let target_inner = width.saturating_sub(4);
     let mut clean_left = left.to_string();
     let mut clean_right = right.to_string();
@@ -191,7 +226,10 @@ pub fn draw_row(left: &str, right: &str, width: usize) -> String {
 
     let space_count = target_inner.saturating_sub(l_width + r_width);
     let pad = " ".repeat(space_count);
-    format!("{BORDER}\u{2502}{RESET} {clean_left}{pad}{clean_right} {BORDER}\u{2502}{RESET}")
+    format!(
+        "{}\u{2502}{RESET} {clean_left}{pad}{clean_right} {}\u{2502}{RESET}",
+        theme.border, theme.border
+    )
 }
 
 pub fn render_gauge_inline(percent: u8, available_cells: usize, color: &str) -> String {
@@ -244,8 +282,40 @@ pub fn render_screen_with_diff(
     hidden_cards: &std::collections::HashSet<String>,
     width: usize,
 ) -> RenderOutput {
+    render_screen_with_diff_and_theme(
+        snap,
+        collapsed,
+        flash_notice,
+        selected_diff_file,
+        selected_diff_lines,
+        hidden_cards,
+        width,
+        crate::theme::active_theme(),
+    )
+}
+
+pub fn render_screen_with_diff_and_theme(
+    snap: &TelemetrySnapshot,
+    collapsed: &[bool; 11],
+    flash_notice: Option<&str>,
+    selected_diff_file: Option<&str>,
+    selected_diff_lines: &[String],
+    hidden_cards: &std::collections::HashSet<String>,
+    width: usize,
+    theme: &crate::theme::Theme,
+) -> RenderOutput {
     let mut lines = Vec::new();
     let mut bounds = Vec::new();
+
+    let title_color = theme.title_color;
+    let label_color = theme.label_color;
+    let accent_primary = theme.accent_primary;
+    let accent_secondary = theme.accent_secondary;
+
+    let draw_top = |title: &str, col: bool, w: usize| draw_top_theme(title, col, w, theme);
+    let draw_bottom = |w: usize| draw_bottom_theme(w, theme);
+    let draw_divider = |w: usize| draw_divider_theme(w, theme);
+    let draw_row = |l: &str, r: &str, w: usize| draw_row_theme(l, r, w, theme);
 
     let folder = std::path::Path::new(&snap.project_dir)
         .file_name()
@@ -263,7 +333,7 @@ pub fn render_screen_with_diff(
     // 1. Header Linear (Línea 0 fija siempre)
     let banner_raw = ":: HUDR2 ::";
     let banner_pad = width.saturating_sub(string_width(banner_raw)) / 2;
-    lines.push(format!("{}{ACCENT_PRIMARY}:: HUDR2 ::{RESET}", " ".repeat(banner_pad)));
+    lines.push(format!("{}{accent_primary}:: HUDR2 ::{RESET}", " ".repeat(banner_pad)));
 
     // 2. Estado Card (0)
     if !hidden_cards.contains("estado") {
@@ -274,12 +344,12 @@ pub fn render_screen_with_diff(
         } else {
             format!("{TEXT_DIM}-- idle{RESET}")
         };
-        let estado_title = format!("{BOLD}{GOLD}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
+        let estado_title = format!("{BOLD}{title_color}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
         lines.push(draw_top(&estado_title, collapsed[0], width));
         if !collapsed[0] {
             let short_proj = truncate_plain(folder, 18);
             lines.push(draw_row(
-                &format!("{GOLD}Proyecto{RESET}"),
+                &format!("{label_color}Proyecto{RESET}"),
                 &format!("{TEXT_PRIMARY}~/.../{short_proj}{RESET}"),
                 width,
             ));
@@ -292,7 +362,7 @@ pub fn render_screen_with_diff(
                 )
             };
             lines.push(draw_row(
-                &format!("{GOLD}Rama{RESET}"),
+                &format!("{label_color}Rama{RESET}"),
                 &format!("{CYAN}# {}{RESET} {dirty}", snap.git.branch),
                 width,
             ));
@@ -303,12 +373,12 @@ pub fn render_screen_with_diff(
                 .filter(|t| !t.is_empty())
             {
                 Some(lvl) => format!(
-                    "{ACCENT_PRIMARY}{}{RESET} {TEXT_MUTED}[{lvl}]{RESET}",
+                    "{accent_primary}{}{RESET} {TEXT_MUTED}[{lvl}]{RESET}",
                     snap.agent_session.model_short
                 ),
-                None => format!("{ACCENT_PRIMARY}{}{RESET}", snap.agent_session.model_short),
+                None => format!("{accent_primary}{}{RESET}", snap.agent_session.model_short),
             };
-            lines.push(draw_row(&format!("{GOLD}Modelo{RESET}"), &model_disp, width));
+            lines.push(draw_row(&format!("{label_color}Modelo{RESET}"), &model_disp, width));
 
             if !snap.agent_session.todos.is_empty() {
                 let mut done = 0usize;
@@ -338,28 +408,28 @@ pub fn render_screen_with_diff(
                 } else {
                     counts
                 };
-                lines.push(draw_row(&format!("{GOLD}Tareas{RESET}"), &right_todo, width));
+                lines.push(draw_row(&format!("{label_color}Tareas{RESET}"), &right_todo, width));
             }
 
             let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
-                format!("{ACCENT_PINK}*{RESET} {MINT}{lp}{RESET} {ACCENT_PINK}*{RESET}")
+                format!("{accent_secondary}*{RESET} {MINT}{lp}{RESET} {accent_secondary}*{RESET}")
             } else if snap.agent_session.all_active_prefixes.is_empty() {
                 format!("{TEXT_MUTED}default{RESET}")
             } else {
                 snap.agent_session
                     .all_active_prefixes
                     .iter()
-                    .map(|p| format!("{ACCENT_PINK}*{RESET} {MINT}{p}{RESET} {ACCENT_PINK}*{RESET}"))
+                    .map(|p| format!("{accent_secondary}*{RESET} {MINT}{p}{RESET} {accent_secondary}*{RESET}"))
                     .collect::<Vec<_>>()
                     .join(" ")
             };
             let sub_vitals = format!(
-                "{ACCENT_PRIMARY}mem:{RESET} {TEXT_PRIMARY}{folder}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_MUTED}{} MCPs{RESET} {TEXT_DIM}\u{00b7}{RESET} {active_prof_labels}",
+                "{accent_primary}mem:{RESET} {TEXT_PRIMARY}{folder}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_MUTED}{} MCPs{RESET} {TEXT_DIM}\u{00b7}{RESET} {active_prof_labels}",
                 snap.mcps.len()
             );
             lines.push(draw_row(
                 &sub_vitals,
-                &format!("{ACCENT_PINK}>{RESET}"),
+                &format!("{accent_secondary}>{RESET}"),
                 width,
             ));
         }
@@ -377,7 +447,7 @@ pub fn render_screen_with_diff(
     if !hidden_cards.contains("contexto") {
         let ctx_start = lines.len();
         lines.push(draw_top(
-            &format!("{BOLD}{GOLD}Contexto{RESET}"),
+            &format!("{BOLD}{title_color}Contexto{RESET}"),
             collapsed[1],
             width,
         ));
@@ -420,7 +490,7 @@ pub fn render_screen_with_diff(
                 format_tokens(out_t)
             );
             let right_cost = format!(
-                "{GOLD}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
+                "{label_color}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
                 snap.agent_session.cost
             );
             lines.push(draw_row(&left_io, &right_cost, width));
@@ -453,7 +523,7 @@ pub fn render_screen_with_diff(
             snap.tree.total_dirs, snap.tree.total_files
         );
         let proj_title = format!(
-            "{ACCENT_PRIMARY}~{RESET} {BOLD}{GOLD}Proyecto{RESET} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{folder}{RESET} {stats_badge}"
+            "{accent_primary}~{RESET} {BOLD}{title_color}Proyecto{RESET} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{folder}{RESET} {stats_badge}"
         );
         lines.push(draw_top(&proj_title, collapsed[2], width));
         if !collapsed[2] {
@@ -464,7 +534,7 @@ pub fn render_screen_with_diff(
                 &snap.tree.root_path
             };
             let normalized_path = raw_proj_path.replace('\\', "/");
-            let btn_label = format!("{GOLD}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
+            let btn_label = format!("{label_color}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
             let btn_w = string_width(&btn_label);
             let target_inner = width.saturating_sub(4);
             let avail_right = target_inner.saturating_sub(btn_w + 1);
@@ -557,10 +627,10 @@ pub fn render_screen_with_diff(
         .count();
     let int_title = if critical_count > 0 {
         format!(
-            "{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
+            "{title_color}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
         )
     } else {
-        format!("{GOLD}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
+        format!("{title_color}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
     };
     lines.push(draw_top(&int_title, collapsed[3], width));
     if !collapsed[3] {
@@ -605,13 +675,13 @@ pub fn render_screen_with_diff(
                     )
                 } else if is_local {
                     (
-                        format!("{ACCENT_PINK}>{RESET}"),
+                        format!("{accent_secondary}>{RESET}"),
                         MINT,
                         format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
                     )
                 } else if is_any_active {
                     (
-                        format!("{ACCENT_PRIMARY}\u{25cf}{RESET}"),
+                        format!("{accent_primary}\u{25cf}{RESET}"),
                         MINT,
                         format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
                     )
@@ -717,7 +787,7 @@ pub fn render_screen_with_diff(
         .or_else(|| snap.accounts.first());
 
     let pool_title = format!(
-        "{GOLD}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} *{RESET}"
+        "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} {accent_secondary}*{RESET}"
     );
 
     lines.push(draw_top(&pool_title, collapsed[4], width));
@@ -777,7 +847,7 @@ pub fn render_screen_with_diff(
         )
     };
     lines.push(draw_top(
-        &format!("{BOLD}{GOLD}Cambios{RESET} {ag_changes}"),
+        &format!("{BOLD}{title_color}Cambios{RESET} {ag_changes}"),
         collapsed[5],
         width,
     ));
@@ -985,7 +1055,7 @@ pub fn render_screen_with_diff(
         if let Some(ref handoff) = snap.engram.last_handoff {
             lines.push(draw_divider(width));
             lines.push(draw_row(
-                &format!("{GOLD}Handoff{RESET} {TEXT_DIM}#{} {RESET}", handoff.id),
+                &format!("{label_color}Handoff{RESET} {TEXT_DIM}#{} {RESET}", handoff.id),
                 &format!("{TEXT_MUTED}{}{RESET}", handoff.relative_time),
                 width,
             ));
@@ -1008,7 +1078,7 @@ pub fn render_screen_with_diff(
     if !hidden_cards.contains("tools") {
         let tools_start = lines.len();
         let tool_title = format!(
-            "{BOLD}{GOLD}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
+            "{BOLD}{title_color}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
             snap.agent_session.tool_total
         );
         lines.push(draw_top(&tool_title, collapsed[7], width));
@@ -1018,7 +1088,7 @@ pub fn render_screen_with_diff(
             let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
             lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
             if snap.agent_session.tool_bash > 0 {
-                let p_bash = format!("{GOLD}$ {} cmds{RESET}", snap.agent_session.tool_bash);
+                let p_bash = format!("{label_color}$ {} cmds{RESET}", snap.agent_session.tool_bash);
                 lines.push(draw_row(&p_bash, "", width));
             }
         }
@@ -1037,7 +1107,7 @@ pub fn render_screen_with_diff(
         let mcp_start = lines.len();
         lines.push(draw_top(
             &format!(
-                "{BOLD}{GOLD}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
+                "{BOLD}{title_color}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
                 snap.mcps.len()
             ),
             collapsed[8],
@@ -1074,7 +1144,7 @@ pub fn render_screen_with_diff(
     if !hidden_cards.contains("ecosystem") {
         let eco_start = lines.len();
         let eco_title =
-            format!("{BOLD}{GOLD}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}Ecosistema{RESET}");
+            format!("{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET}");
         lines.push(draw_top(&eco_title, collapsed[9], width));
         if !collapsed[9] {
             if snap.ecosystem.tools.is_empty() {
@@ -1110,7 +1180,7 @@ pub fn render_screen_with_diff(
 
     // 11. Tarjetas Card (10) — Selector interactivo de visibilidad
     let tarjetas_start = lines.len();
-    let tarjetas_title = format!("{BOLD}{GOLD}Tarjetas{RESET}");
+    let tarjetas_title = format!("{BOLD}{title_color}Tarjetas{RESET}");
     lines.push(draw_top(&tarjetas_title, collapsed[10], width));
     if !collapsed[10] {
         let cards_info: [(&str, &str); 10] = [
