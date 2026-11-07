@@ -154,7 +154,12 @@ pub fn detect_proxy_provider_key(
 
 /// Detecta el nombre del provider de proxy local configurado en `opencode.json` (`"cpamc"`, `"cliproxy"`, etc.).
 pub fn detect_configured_proxy_provider() -> String {
-    for cfg_path in crate::paths::opencode_config_candidates(".") {
+    detect_configured_proxy_provider_for(".")
+}
+
+/// Detecta el nombre del provider de proxy local configurado para el directorio indicado (`target_dir`).
+pub fn detect_configured_proxy_provider_for(target_dir: &str) -> String {
+    for cfg_path in crate::paths::opencode_config_candidates(target_dir) {
         if cfg_path.exists()
             && let Ok(content) = fs::read_to_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
@@ -212,7 +217,11 @@ fn extract_orchestrator_profile(agent_name: &str) -> Option<&str> {
 }
 
 pub async fn sync_integrations_native() -> Result<SyncResult, String> {
-    let candidates = crate::paths::opencode_config_candidates(".");
+    sync_integrations_native_for(".").await
+}
+
+pub async fn sync_integrations_native_for(target_dir: &str) -> Result<SyncResult, String> {
+    let candidates = crate::paths::opencode_config_candidates(target_dir);
     let target_path = candidates
         .into_iter()
         .find(|c| c.exists())
@@ -398,11 +407,11 @@ pub async fn sync_integrations_for_path(
         }
     }
 
-    // 6. Guardar cambios en el archivo
+    // 6. Guardar cambios de forma atómica (.{pid}.tmp + rename)
     let formatted = serde_json::to_string_pretty(&raw_config)
         .map_err(|e| format!("Error formateando JSON: {e}"))?;
 
-    fs::write(target_path, formatted)
+    crate::paths::atomic_write_bytes(target_path, formatted.as_bytes())
         .map_err(|e| format!("Error guardando {}: {e}", target_path.display()))?;
 
     Ok(SyncResult {

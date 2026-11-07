@@ -24,7 +24,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             cp,
         )
     };
-    QuotaCollector::discover_accounts(&mut accounts_copy);
+    QuotaCollector::discover_accounts_for(&project_dir, &mut accounts_copy);
     QuotaCollector::hydrate_accounts_from_cache(&mut accounts_copy, cache_path.as_deref());
 
     let panes = HerdrClient::get_panes();
@@ -118,7 +118,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         }
 
         // Descubrir cuentas e hidratar desde caché en disco (0ms) cuando hay config_path activo
-        QuotaCollector::discover_accounts(&mut state.snapshot.accounts);
+        QuotaCollector::discover_accounts_for(&project_dir, &mut state.snapshot.accounts);
         if let Some(ref cp) = cache_path {
             QuotaCollector::hydrate_accounts_from_cache(&mut state.snapshot.accounts, Some(cp));
         }
@@ -258,9 +258,11 @@ pub async fn force_refresh_with_notify(
         }
     };
 
+    let project_dir = app_state.read().await.snapshot.project_dir.clone();
+
     if interactive {
         let mut state = app_state.write().await;
-        let notice = if !QuotaCollector::is_available() {
+        let notice = if !QuotaCollector::is_available_for(&project_dir) {
             "+ Refrescando contexto..."
         } else if force_all {
             "+ Auditando todas las cuotas..."
@@ -282,7 +284,7 @@ pub async fn force_refresh_with_notify(
     wake();
 
     // Si no hay proveedor de cuotas disponible, evitar llamadas de red innecesarias
-    if !QuotaCollector::is_available() {
+    if !QuotaCollector::is_available_for(&project_dir) {
         if interactive {
             let mut state = app_state.write().await;
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
@@ -554,14 +556,15 @@ pub async fn sync_integrations_action_with_notify(
         }
     };
 
-    {
+    let project_dir = {
         let mut state = app_state.write().await;
         state.set_flash_notice(Some(">> Sincronizando integraciones...".to_string()), 6000);
-    }
+        state.snapshot.project_dir.clone()
+    };
     wake();
 
     // 1. Sincronización nativa en Rust (~20ms) y aviso inmediato sin bloqueo por cuotas
-    let sync_res = crate::sync::sync_integrations_native().await;
+    let sync_res = crate::sync::sync_integrations_native_for(&project_dir).await;
     let notice = match sync_res {
         Ok(res) => format!("+ {}", res.message),
         Err(err) => format!("[!] Sync: {err}"),

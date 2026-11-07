@@ -16,9 +16,19 @@ impl QuotaManager {
         cliproxy::is_available()
     }
 
+    /// Comprueba si hay credenciales válidas considerando `target_dir` (`--cwd`).
+    pub fn is_available_for(target_dir: &str) -> bool {
+        cliproxy::is_available_for(target_dir)
+    }
+
     /// Descubre cuentas disponibles delegando al backend configurado.
     pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
         cliproxy::discover_accounts(target_list);
+    }
+
+    /// Descubre cuentas disponibles considerando `target_dir` (`--cwd`).
+    pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuota>) {
+        cliproxy::discover_accounts_for(target_dir, target_list);
     }
 
     /// Hidrata cuentas desde la caché compartida (`quotas_cache.json`) recalculando tiempos relativos.
@@ -93,8 +103,9 @@ pub type QuotaCollector = QuotaManager;
 
 pub use cliproxy::{
     EffectiveAccountHealth, UNFETCHED_RESET, calculate_quota_pace, clear_quota_runtime_cache,
-    evaluate_account_for_model, format_relative_reset, hydrate_accounts_from_cache,
-    is_fresh_within, is_rate_limit_cooling_down, is_unfetched, needs_refresh,
-    quota_cache_path_for, record_cached_quota_at, resolve_model_family,
-    sync_account_health_for_model, trigger_rate_limit_cooldown,
+    discover_accounts_for, evaluate_account_for_model, format_relative_reset,
+    hydrate_accounts_from_cache, is_available_for, is_fresh_within, is_rate_limit_cooling_down,
+    is_unfetched, needs_refresh, quota_cache_path_for, record_cached_quota_at,
+    record_cached_quota_error_at, resolve_model_family, sync_account_health_for_model,
+    trigger_rate_limit_cooldown,
 };

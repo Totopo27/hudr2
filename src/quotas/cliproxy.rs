@@ -6,7 +6,7 @@
 
 use crate::config::{QUOTA_URL, USER_AGENT};
 use crate::models::{AccountQuota, QuotaPool};
-use crate::paths::resolve_auths_dir;
+use crate::paths::resolve_auths_dir_for;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -119,13 +119,6 @@ fn sync_disk_cache_if_needed(state: &mut QuotaCacheState, cache_path: &Path) {
 }
 
 fn persist_disk_cache(state: &mut QuotaCacheState, cache_path: &Path) {
-    if let Some(parent) = cache_path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-        && fs::create_dir_all(parent).is_err()
-    {
-        return;
-    }
     let payload = serde_json::json!({
         "version": 1,
         "accounts": &state.entries,
@@ -133,15 +126,16 @@ fn persist_disk_cache(state: &mut QuotaCacheState, cache_path: &Path) {
     let Ok(body) = serde_json::to_vec(&payload) else {
         return;
     };
-    let tmp = cache_path.with_extension("json.tmp");
-    if fs::write(&tmp, body)
-        .and_then(|_| fs::rename(&tmp, cache_path))
-        .is_ok()
-    {
+    if crate::paths::atomic_write_bytes(cache_path, &body).is_ok() {
         state.loaded_path = Some(cache_path.to_path_buf());
         state.loaded_mtime = cache_path.metadata().and_then(|m| m.modified()).ok();
-    } else {
-        let _ = fs::remove_file(&tmp);
+    }
+}
+
+fn error_retry_ttl_secs(status: u16) -> i64 {
+    match status {
+        401 | 403 => 300,
+        _ => 120,
     }
 }
 
@@ -196,14 +190,25 @@ pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Op
             continue;
         }
 
+        let now_epoch = chrono::Utc::now().timestamp();
         if let Some(ref data) = rec.data {
             apply_quota_data(acc, data);
-        } else if let Some(status) = rec.error_status {
-            apply_quota_error(
-                acc,
-                status,
-                rec.error_body.as_ref().unwrap_or(&serde_json::Value::Null),
-            );
+        }
+        if let Some(status) = rec.error_status {
+            let ttl = error_retry_ttl_secs(status);
+            if rec.data.is_none() || matches!(status, 401 | 403) || (now_epoch - rec.fetched_at) < ttl
+            {
+                if status == 0 {
+                    acc.has_error = true;
+                    acc.error_msg = "sin red".to_string();
+                } else {
+                    apply_quota_error(
+                        acc,
+                        status,
+                        rec.error_body.as_ref().unwrap_or(&serde_json::Value::Null),
+                    );
+                }
+            }
         }
     }
 
@@ -238,8 +243,46 @@ pub fn record_cached_quota_at(
     }
 }
 
+/// Registra un estado de error HTTP o de red (`status == 0`) en la caché con TTL de reintento,
+/// preservando los últimos datos conocidos en memoria para no borrar el aviso ante `DataChanged`.
+pub fn record_cached_quota_error_at(
+    acc: &mut AccountQuota,
+    status: u16,
+    err_val: &serde_json::Value,
+    fetched_at: i64,
+    cache_path: Option<&Path>,
+) {
+    if status == 0 {
+        acc.has_error = true;
+        acc.error_msg = "sin red".to_string();
+    } else {
+        apply_quota_error(acc, status, err_val);
+    }
+
+    if let Ok(mut guard) = QUOTA_CACHE_STATE.lock() {
+        if let Some(cp) = cache_path {
+            sync_disk_cache_if_needed(&mut guard, cp);
+        }
+        let key = acc.prefix.to_lowercase();
+        let prev_data = guard.entries.get(&key).and_then(|r| r.data.clone());
+        let rec = CachedQuotaRecord {
+            fetched_at,
+            auth_mtime: file_mtime_secs(&acc.auth_file),
+            data: prev_data,
+            error_status: Some(status),
+            error_body: (!err_val.is_null()).then(|| err_val.clone()),
+        };
+        guard.entries.insert(key, rec);
+        if let Some(cp) = cache_path
+            && matches!(status, 401 | 403)
+        {
+            persist_disk_cache(&mut guard, cp);
+        }
+    }
+}
+
 /// Determina si una cuenta inactiva necesita consulta remota por ser nueva (`unfetched`),
-/// haber cambiado su archivo de credenciales, o haber superado la hora `resetTime` de alguna bolsa.
+/// haber cambiado su archivo de credenciales, haber cumplido el TTL de error o haber superado `resetTime`.
 pub fn needs_refresh(acc: &AccountQuota) -> bool {
     if is_unfetched(acc) {
         return true;
@@ -255,10 +298,11 @@ pub fn needs_refresh(acc: &AccountQuota) -> bool {
         return true;
     }
     let now_epoch = chrono::Utc::now().timestamp();
+    if let Some(status) = rec.error_status {
+        return (now_epoch - rec.fetched_at) >= error_retry_ttl_secs(status);
+    }
     if let Some(ref data) = rec.data {
         has_expired_bucket_window(data, rec.fetched_at, now_epoch)
-    } else if rec.error_status == Some(429) {
-        now_epoch - rec.fetched_at >= 120
     } else {
         false
     }
@@ -275,7 +319,9 @@ pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
     let Some(rec) = guard.entries.get(&acc.prefix.to_lowercase()) else {
         return false;
     };
-    rec.data.is_some() && (chrono::Utc::now().timestamp() - rec.fetched_at) <= max_age_secs
+    rec.error_status.is_none()
+        && rec.data.is_some()
+        && (chrono::Utc::now().timestamp() - rec.fetched_at) <= max_age_secs
 }
 
 /// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
@@ -299,7 +345,12 @@ fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)
 
 /// Comprueba si el directorio de autenticación existe y contiene credenciales JSON válidas.
 pub fn is_available() -> bool {
-    let auths_dir = resolve_auths_dir();
+    is_available_for(".")
+}
+
+/// Comprueba si el directorio de autenticación para `target_dir` contiene credenciales JSON válidas.
+pub fn is_available_for(target_dir: &str) -> bool {
+    let auths_dir = resolve_auths_dir_for(target_dir);
     if !auths_dir.exists() {
         return false;
     }
@@ -315,7 +366,12 @@ pub fn is_available() -> bool {
 
 /// Descubre y registra cuentas desde los archivos de credenciales de CLIProxy.
 pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
-    let auths_dir = resolve_auths_dir();
+    discover_accounts_for(".", target_list);
+}
+
+/// Descubre y registra cuentas considerando el directorio de proyecto activo (`target_dir`).
+pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuota>) {
+    let auths_dir = resolve_auths_dir_for(target_dir);
     if !auths_dir.exists() {
         target_list.clear();
         return;
@@ -467,33 +523,17 @@ pub async fn fetch_quota_for_account_with_cache(
             .json::<serde_json::Value>()
             .await
             .unwrap_or(serde_json::Value::Null);
-        apply_quota_error(acc, status, &err_val);
+        let now = chrono::Utc::now().timestamp();
+        record_cached_quota_error_at(acc, status, &err_val, now, cache_path);
 
         if status == 429 || acc.error_msg == "rate limited" {
             trigger_rate_limit_cooldown(RATE_LIMIT_COOLDOWN_SECS);
-        } else if matches!(status, 401 | 403)
-            && let Ok(mut guard) = QUOTA_CACHE_STATE.lock()
-        {
-            if let Some(cp) = cache_path {
-                sync_disk_cache_if_needed(&mut guard, cp);
-            }
-            guard.entries.insert(
-                acc.prefix.to_lowercase(),
-                CachedQuotaRecord {
-                    fetched_at: chrono::Utc::now().timestamp(),
-                    auth_mtime: file_mtime_secs(&acc.auth_file),
-                    data: None,
-                    error_status: Some(status),
-                    error_body: Some(err_val),
-                },
-            );
-            if let Some(cp) = cache_path {
-                persist_disk_cache(&mut guard, cp);
-            }
         }
         return status;
     }
 
+    let now = chrono::Utc::now().timestamp();
+    record_cached_quota_error_at(acc, 0, &serde_json::Value::Null, now, cache_path);
     0
 }
 
@@ -917,7 +957,7 @@ pub fn format_relative_reset(iso_time: &str) -> String {
             format!("{}d", days)
         }
     } else {
-        "4h 30m".to_string()
+        "?".to_string()
     }
 }
 

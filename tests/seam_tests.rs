@@ -3321,4 +3321,291 @@ mod tests {
             "Ocultar 'tools' NO debe ocultar MCP"
         );
     }
+
+    #[test]
+    fn test_quota_error_cache_preservation_429_403_ttls_and_invalid_reset() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::{
+            UNFETCHED_RESET, clear_quota_runtime_cache, format_relative_reset,
+            hydrate_accounts_from_cache, is_fresh_within, needs_refresh, quota_cache_path_for,
+            record_cached_quota_at, record_cached_quota_error_at,
+        };
+        use serde_json::json;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_quota_runtime_cache();
+
+        assert_eq!(
+            format_relative_reset("not-a-valid-rfc3339"),
+            "?",
+            "Un resetTime corrupto jamás debe fabricar '4h 30m'"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = quota_cache_path_for(&tmp.path().join("hudr2.json"));
+        let auth1 = tmp.path().join("cuenta01.json");
+        let auth2 = tmp.path().join("cuenta02.json");
+        std::fs::write(&auth1, r#"{"access_token":"tok1"}"#).unwrap();
+        std::fs::write(&auth2, r#"{"access_token":"tok2"}"#).unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+        let future_iso = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+
+        // 1. cuenta01 tiene datos previos (94%), luego recibe HTTP 429: DataChanged no debe pisar el error
+        let mut acc1 = AccountQuota {
+            prefix: "cuenta01".to_string(),
+            auth_file: auth1.to_string_lossy().to_string(),
+            reset_5h: UNFETCHED_RESET.to_string(),
+            reset_wk: UNFETCHED_RESET.to_string(),
+            ..Default::default()
+        };
+        record_cached_quota_at(
+            &mut acc1,
+            &json!({
+                "groups": [{
+                    "displayName": "Gemini",
+                    "buckets": [
+                        {"window": "5h", "remainingFraction": 0.94, "resetTime": future_iso},
+                        {"window": "weekly", "remainingFraction": 0.98, "resetTime": future_iso}
+                    ]
+                }]
+            }),
+            now - 600,
+            Some(&cache_path),
+        );
+        record_cached_quota_error_at(
+            &mut acc1,
+            429,
+            &json!({"error": {"status": "RESOURCE_EXHAUSTED"}}),
+            now - 10,
+            Some(&cache_path),
+        );
+
+        let mut hydrated = vec![AccountQuota {
+            prefix: "cuenta01".to_string(),
+            auth_file: auth1.to_string_lossy().to_string(),
+            reset_5h: UNFETCHED_RESET.to_string(),
+            reset_wk: UNFETCHED_RESET.to_string(),
+            ..Default::default()
+        }];
+        hydrate_accounts_from_cache(&mut hydrated, Some(&cache_path));
+        assert!(
+            hydrated[0].has_error && hydrated[0].error_msg == "rate limited",
+            "hydrate_accounts_from_cache no debe borrar un error 429 vigente con datos viejos"
+        );
+        assert!(
+            !needs_refresh(&hydrated[0]),
+            "429 reciente (<120s) no debe reintentarse en cada pulso"
+        );
+        assert!(!is_fresh_within(&hydrated[0], 600));
+
+        // Al superar los 120s de TTL transitorio, 'r' debe volver a consultar cuenta01
+        record_cached_quota_error_at(&mut acc1, 429, &json!({}), now - 125, Some(&cache_path));
+        assert!(
+            needs_refresh(&acc1),
+            "429 con >=120s de antigüedad debe habilitar reintento selectivo"
+        );
+
+        // 2. cuenta02 recibe HTTP 403 (verificación requerida): sin cambiar mtime en disco, reintenta tras 300s
+        let mut acc2 = AccountQuota {
+            prefix: "cuenta02".to_string(),
+            auth_file: auth2.to_string_lossy().to_string(),
+            reset_5h: UNFETCHED_RESET.to_string(),
+            reset_wk: UNFETCHED_RESET.to_string(),
+            ..Default::default()
+        };
+        let err_403 = json!({
+            "error": {
+                "message": "Verify your account to continue",
+                "details": [{"reason": "VALIDATION_REQUIRED"}]
+            }
+        });
+        record_cached_quota_error_at(&mut acc2, 403, &err_403, now - 30, Some(&cache_path));
+        assert_eq!(acc2.error_msg, "verif. requerida");
+        assert!(
+            !needs_refresh(&acc2),
+            "403 reciente (<300s) sin cambio de mtime espera enfriamiento"
+        );
+
+        record_cached_quota_error_at(&mut acc2, 403, &err_403, now - 305, Some(&cache_path));
+        assert!(
+            needs_refresh(&acc2),
+            "403 con >=300s debe permitir reintento en modo 'r' aunque el token no cambie de mtime"
+        );
+
+        // 3. Fallo de transporte/red (status 0) marca 'sin red'
+        record_cached_quota_error_at(&mut acc2, 0, &json!(null), now - 5, None);
+        assert!(acc2.has_error);
+        assert_eq!(acc2.error_msg, "sin red");
+
+        clear_quota_runtime_cache();
+    }
+
+    #[test]
+    fn test_engram_wal_mtime_invalidation_resurrected_orphan_release_and_atomic_write() {
+        use hudr2::models::AccountQuota;
+        use rusqlite::Connection;
+        use std::collections::HashSet;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+
+        // 1. Escritura atómica (.{pid}.tmp + rename) sin residuos temporales
+        let nested_cfg = tmp.path().join("cfg_sub").join("opencode.json");
+        hudr2::paths::atomic_write_bytes(&nested_cfg, br#"{"ok":true}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&nested_cfg).unwrap(), r#"{"ok":true}"#);
+        let leftovers: Vec<_> = std::fs::read_dir(nested_cfg.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "No deben quedar archivos .tmp tras atomic_write_bytes");
+
+        // 2. Engram en modo WAL + preservación de mayúsculas/minúsculas del proyecto
+        let engram_db = tmp.path().join("engram.db");
+        {
+            let conn = Connection::open(&engram_db).unwrap();
+            let _: String = conn
+                .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+                .unwrap();
+            conn.execute_batch(
+                "CREATE TABLE observations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project TEXT,
+                    type TEXT,
+                    content TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    deleted_at TEXT
+                );
+                CREATE TABLE sync_enrolled_projects (project TEXT PRIMARY KEY);
+                INSERT INTO observations (project, type, content) VALUES ('MiProyectoMixto', 'discovery', 'obs 1');",
+            )
+            .unwrap();
+        }
+
+        let proj_dir = tmp.path().join("MiProyectoMixto");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let proj_dir_str = proj_dir.to_string_lossy().to_string();
+
+        unsafe {
+            std::env::set_var("ENGRAM_DB_PATH", &engram_db);
+        }
+        hudr2::engram::clear_engram_cache();
+
+        let t1 = hudr2::engram::read_engram_telemetry(&proj_dir_str);
+        assert!(t1.online);
+        assert_eq!(t1.obs_count, 1);
+
+        // Escribir en conexión WAL abierta sin hacer checkpoint sobre engram.db
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        let wal_conn = Connection::open(&engram_db).unwrap();
+        let _ = wal_conn.pragma_update(None, "wal_autocheckpoint", 0);
+        wal_conn
+            .execute(
+                "INSERT INTO observations (project, type, content) VALUES ('MiProyectoMixto', 'decision', 'obs 2')",
+                [],
+            )
+            .unwrap();
+
+        let t2 = hudr2::engram::read_engram_telemetry(&proj_dir_str);
+        assert_eq!(
+            t2.obs_count, 2,
+            "ENGRAM_CACHE debe invalidarse al cambiar engram.db-wal sin requerir clear_engram_cache"
+        );
+        drop(wal_conn);
+
+        // 3. Cleanup: archivado de huérfanas resucitadas (time_updated > time_archived) y migración sin falsos positivos (.max(1))
+        let oc_db = tmp.path().join("opencode.db");
+        {
+            let conn = Connection::open(&oc_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT,
+                    title TEXT,
+                    time_updated INTEGER,
+                    time_archived INTEGER
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                );
+                INSERT INTO session (id, directory, title, time_updated, time_archived)
+                    VALUES ('ses_resurrected', 'D:/proj', 'Resucitada', 5000, 1000);
+                INSERT INTO message (id, session_id, time_created, data)
+                    VALUES ('m1', 'ses_resurrected', 5000, '{\"agent\":\"sdd-orchestrator-cuenta4\",\"providerID\":\"cpamc\",\"modelID\":\"cuenta4/gemini-3.8-flash-high\"}');",
+            )
+            .unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", &oc_db);
+            std::env::set_var("ENGRAM_BIN", "off");
+        }
+
+        let accounts = vec![
+            AccountQuota {
+                prefix: "cuenta1".to_string(),
+                rem_5h: 95,
+                rem_wk: 95,
+                reset_5h: "4h".to_string(),
+                reset_wk: "6d".to_string(),
+                ..Default::default()
+            },
+            AccountQuota {
+                prefix: "cuenta4".to_string(),
+                rem_5h: 5,
+                rem_wk: 80,
+                is_critical: true,
+                reset_5h: "1h".to_string(),
+                reset_wk: "5d".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let rel = hudr2::cleanup::release_inactive_sessions(
+            &proj_dir_str,
+            &accounts,
+            Some("nonexistent_pane"),
+            Some("nonexistent_tab"),
+        );
+        assert_eq!(
+            rel.closed_count, 1,
+            "release_inactive_sessions debe archivar huérfanas resucitadas (time_updated > time_archived): {}",
+            rel.notice
+        );
+        assert_eq!(rel.released_prefixes, vec!["cuenta4".to_string()]);
+
+        // Verificar en SQLite que time_archived fue actualizado por encima de time_updated (5000)
+        {
+            let conn = Connection::open(&oc_db).unwrap();
+            let archived_ts: i64 = conn
+                .query_row(
+                    "SELECT time_archived FROM session WHERE id = 'ses_resurrected'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(archived_ts > 5000);
+        }
+
+        let mut active = HashSet::new();
+        active.insert("cuenta4".to_string());
+        let (migrated_zero, _) = hudr2::cleanup::migrate_critical_sessions_for_model(
+            &proj_dir_str,
+            &accounts,
+            &active,
+            "cpamc/cuenta4/gemini-3.8-flash-high",
+        );
+        assert_eq!(migrated_zero, 0, "Una sesión ya archivada no debe contarse como migrada");
+
+        unsafe {
+            std::env::remove_var("ENGRAM_DB_PATH");
+            std::env::remove_var("OPENCODE_DB_PATH");
+            std::env::remove_var("ENGRAM_BIN");
+        }
+        hudr2::engram::clear_engram_cache();
+    }
 }

@@ -1,5 +1,5 @@
 use crate::models::{EngramTelemetry, HandoffSummary};
-use crate::paths::resolve_engram_db_path;
+use crate::paths::{db_effective_mtime, resolve_engram_db_path};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -7,11 +7,14 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+const ENGRAM_CACHE_TTL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 struct EngramCacheEntry {
     mtime: SystemTime,
+    cached_at: Instant,
     telemetry: EngramTelemetry,
 }
 
@@ -117,18 +120,23 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
     };
 
     let db_path = resolve_engram_db_path();
-    let metadata = match std::fs::metadata(&db_path) {
-        Ok(m) => m,
-        Err(_) => return tele,
+    if !db_path.exists() {
+        return tele;
+    }
+    let Some(mtime) = db_effective_mtime(&db_path) else {
+        return tele;
     };
-
-    let mtime = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
 
     if let Ok(guard) = ENGRAM_CACHE.lock()
         && let Some(entry) = guard.get(&project)
         && entry.mtime == mtime
+        && entry.cached_at.elapsed() < ENGRAM_CACHE_TTL
     {
-        return entry.telemetry.clone();
+        let mut cached = entry.telemetry.clone();
+        if let Some(ref mut handoff) = cached.last_handoff {
+            handoff.relative_time = format_relative_time(handoff.created_at_epoch, now_epoch_secs());
+        }
+        return cached;
     }
 
     let conn = match Connection::open_with_flags(
@@ -227,6 +235,7 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
             project,
             EngramCacheEntry {
                 mtime,
+                cached_at: Instant::now(),
                 telemetry: tele.clone(),
             },
         );

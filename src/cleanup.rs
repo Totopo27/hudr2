@@ -14,19 +14,70 @@ use std::time::{Duration, Instant};
 
 const SUBPROCESS_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Construye un `Command` para invocar el CLI de OpenCode de forma multiplataforma.
-/// En Windows se lanza vía `cmd /c` porque `opencode` suele instalarse como shim
-/// `.cmd` (npm), que `CreateProcess` no resuelve directamente.
-fn opencode_command() -> Command {
+#[derive(Clone, Debug)]
+enum OpenCodeCli {
+    Direct(std::path::PathBuf),
     #[cfg(target_os = "windows")]
-    {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/c", "opencode"]);
-        cmd
+    CmdShim(std::path::PathBuf),
+}
+
+fn resolve_opencode_cli() -> Option<OpenCodeCli> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        #[cfg(target_os = "windows")]
+        {
+            let exe = dir.join("opencode.exe");
+            if exe.is_file() {
+                return Some(OpenCodeCli::Direct(exe));
+            }
+            let cmd = dir.join("opencode.cmd");
+            if cmd.is_file() {
+                return Some(OpenCodeCli::CmdShim(cmd));
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let bin = dir.join("opencode");
+            if bin.is_file() {
+                return Some(OpenCodeCli::Direct(bin));
+            }
+        }
     }
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("opencode")
+    None
+}
+
+fn is_safe_session_id(ses_id: &str) -> bool {
+    !ses_id.is_empty()
+        && ses_id.len() <= 128
+        && ses_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+}
+
+#[cfg(target_os = "windows")]
+fn is_cmd_safe_arg(arg: &str) -> bool {
+    !arg.bytes()
+        .any(|b| matches!(b, b'&' | b'|' | b'<' | b'>' | b'^' | b'%' | b'\r' | b'\n'))
+}
+
+fn build_opencode_api_command(cli: &OpenCodeCli, endpoint: &str, json_body: &str) -> Option<Command> {
+    match cli {
+        OpenCodeCli::Direct(exe) => {
+            let mut cmd = Command::new(exe);
+            cmd.args(["api", "post", endpoint, "-d", json_body]);
+            Some(cmd)
+        }
+        #[cfg(target_os = "windows")]
+        OpenCodeCli::CmdShim(shim) => {
+            if !is_cmd_safe_arg(endpoint) || !is_cmd_safe_arg(json_body) {
+                return None;
+            }
+            let mut cmd = Command::new("cmd");
+            cmd.arg("/c")
+                .arg(shim)
+                .args(["api", "post", endpoint, "-d", json_body]);
+            Some(cmd)
+        }
     }
 }
 
@@ -81,46 +132,51 @@ fn notify_opencode_session_migration(
     to_model_id: &str,
     provider_id: &str,
 ) {
-    let mut agent_cmd = opencode_command();
-    agent_cmd.args([
-        "api",
-        "post",
-        &format!("/api/session/{ses_id}/agent"),
-        "-d",
-        &format!("{{\"agent\":\"{to_agent}\"}}"),
-    ]);
-    configure_silent_command(&mut agent_cmd);
+    if !is_safe_session_id(ses_id) {
+        return;
+    }
+    let Some(cli) = resolve_opencode_cli() else {
+        return;
+    };
 
-    let mut model_cmd = opencode_command();
-    model_cmd.args([
-        "api",
-        "post",
-        &format!("/api/session/{ses_id}/model"),
-        "-d",
-        &format!("{{\"model\":{{\"id\":\"{to_model_id}\",\"providerID\":\"{provider_id}\"}}}}"),
-    ]);
-    configure_silent_command(&mut model_cmd);
+    let agent_endpoint = format!("/api/session/{ses_id}/agent");
+    let agent_body = serde_json::json!({ "agent": to_agent }).to_string();
+
+    let model_endpoint = format!("/api/session/{ses_id}/model");
+    let model_body = serde_json::json!({
+        "model": {
+            "id": to_model_id,
+            "providerID": provider_id
+        }
+    })
+    .to_string();
 
     let mut children = Vec::with_capacity(2);
-    if let Ok(c) = agent_cmd.spawn() {
-        children.push(c);
+    if let Some(mut agent_cmd) = build_opencode_api_command(&cli, &agent_endpoint, &agent_body) {
+        configure_silent_command(&mut agent_cmd);
+        if let Ok(c) = agent_cmd.spawn() {
+            children.push(c);
+        }
     }
-    if let Ok(c) = model_cmd.spawn() {
-        children.push(c);
+    if let Some(mut model_cmd) = build_opencode_api_command(&cli, &model_endpoint, &model_body) {
+        configure_silent_command(&mut model_cmd);
+        if let Ok(c) = model_cmd.spawn() {
+            children.push(c);
+        }
     }
     if !children.is_empty() {
         wait_children_bounded(&mut children, SUBPROCESS_TIMEOUT);
     }
 }
 
-fn collect_sorted_known_prefixes(accounts_list: &[AccountQuota]) -> Vec<String> {
+fn collect_sorted_known_prefixes(cwd: &str, accounts_list: &[AccountQuota]) -> Vec<String> {
     let mut known_prefixes: Vec<String> = accounts_list
         .iter()
         .map(|a| a.prefix.to_lowercase())
         .collect();
     if known_prefixes.is_empty() {
         let mut discovered = Vec::new();
-        crate::quotas::QuotaCollector::discover_accounts(&mut discovered);
+        crate::quotas::QuotaCollector::discover_accounts_for(cwd, &mut discovered);
         known_prefixes = discovered
             .into_iter()
             .map(|a| a.prefix.to_lowercase())
@@ -218,6 +274,7 @@ fn infer_provider_from_model_str(s: &str) -> Option<&'static str> {
 }
 
 fn rewrite_migrated_model(
+    cwd: &str,
     current_model: Option<&str>,
     from_prefix: &str,
     target_prefix: &str,
@@ -241,7 +298,7 @@ fn rewrite_migrated_model(
                 .map(str::to_string)
         })
         .or_else(|| infer_provider_from_model_str(fallback_active_model).map(str::to_string))
-        .unwrap_or_else(crate::sync::detect_configured_proxy_provider);
+        .unwrap_or_else(|| crate::sync::detect_configured_proxy_provider_for(cwd));
 
     let base_model = current_model
         .and_then(|m| extract_base_model_id(m, from_prefix, false))
@@ -512,9 +569,10 @@ pub fn migrate_critical_sessions_for_model(
     };
     let _ = conn.busy_timeout(Duration::from_millis(3000));
 
-    let known_prefixes = collect_sorted_known_prefixes(accounts_list);
+    let known_prefixes = collect_sorted_known_prefixes(cwd, accounts_list);
     let mut total_migrated = 0;
     let mut migrated_from = Vec::new();
+    let mut pending_notifications: Vec<(String, String, String, String)> = Vec::new();
 
     // Obtener sesiones no archivadas según el esquema activo (session vs session_v2)
     let table = resolve_session_table_name(&conn);
@@ -525,13 +583,12 @@ pub fn migrate_critical_sessions_for_model(
     let select_sql =
         format!("SELECT id, {agent_expr}, {model_expr} FROM {table} WHERE time_archived IS NULL");
 
-    let mut stmt = match conn.prepare(&select_sql) {
-        Ok(s) => s,
-        Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
-    };
-
-    let session_rows: Vec<(String, Option<String>, Option<String>)> = stmt
-        .query_map([], |row| {
+    let session_rows: Vec<(String, Option<String>, Option<String>)> = {
+        let mut stmt = match conn.prepare(&select_sql) {
+            Ok(s) => s,
+            Err(e) => return (0, format!("[error] Error consultando sesiones: {e}")),
+        };
+        stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
@@ -539,7 +596,8 @@ pub fn migrate_critical_sessions_for_model(
             ))
         })
         .map(|iter| iter.flatten().collect())
-        .unwrap_or_default();
+        .unwrap_or_default()
+    };
 
     for (ses_id, raw_agent_opt, raw_model_opt) in session_rows {
         let (agent_opt, model_opt) = hydrate_row_agent_model(
@@ -560,6 +618,7 @@ pub fn migrate_critical_sessions_for_model(
 
         let to_agent = rewrite_migrated_agent(agent_opt.as_deref(), from_prefix, &target_prefix);
         let (to_model_id, to_model_json, provider_id) = rewrite_migrated_model(
+            cwd,
             model_opt.as_deref(),
             from_prefix,
             &target_prefix,
@@ -583,7 +642,6 @@ pub fn migrate_critical_sessions_for_model(
                 &to_model_id,
                 &provider_id,
             )
-            .max(1)
         };
         if changes > 0 {
             total_migrated += 1;
@@ -592,8 +650,14 @@ pub fn migrate_critical_sessions_for_model(
                 migrated_from.push(from_owned);
             }
 
-            notify_opencode_session_migration(&ses_id, &to_agent, &to_model_id, &provider_id);
+            pending_notifications.push((ses_id, to_agent, to_model_id, provider_id));
         }
+    }
+
+    drop(conn);
+
+    for (ses_id, to_agent, to_model_id, provider_id) in pending_notifications {
+        notify_opencode_session_migration(&ses_id, &to_agent, &to_model_id, &provider_id);
     }
 
     if total_migrated > 0 {
@@ -602,13 +666,15 @@ pub fn migrate_critical_sessions_for_model(
             "[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_prefix}!"
         );
 
-        // Guardar checkpoint en Engram (acotado con timeout y sin ventana en Windows)
-        if let Some(cand) = crate::paths::resolve_engram_binary() {
+        // Guardar checkpoint en Engram (acotado con timeout y sin ventana en Windows; omitido en BDs efímeras de test)
+        let is_isolated_test_db =
+            std::env::var("OPENCODE_DB_PATH").is_ok() && std::env::var("ENGRAM_BIN").is_err();
+        if !is_isolated_test_db && let Some(cand) = crate::paths::resolve_engram_binary() {
             let engram_project = Path::new(cwd)
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("project")
-                .to_lowercase();
+                .unwrap_or("proyecto")
+                .to_string();
             let title = format!("Checkpoint migración: [{from_str}] -> {target_prefix}");
             let content = format!(
                 "**What**: Checkpoint y rotación en frío de {total_migrated} sesión(es) desde [{from_str}] hacia {target_prefix}.\n**Why**: Cuota crítica agotada (>=85% usado) en cuenta(s) saliente(s).\n**Where**: {cwd}"
@@ -655,10 +721,10 @@ pub fn release_inactive_sessions(
     let engram_project = Path::new(cwd)
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or("project")
-        .to_lowercase();
+        .unwrap_or("proyecto")
+        .to_string();
 
-    let known_prefixes = collect_sorted_known_prefixes(accounts_list);
+    let known_prefixes = collect_sorted_known_prefixes(cwd, accounts_list);
 
     let panes = HerdrClient::get_panes();
 
@@ -806,7 +872,7 @@ pub fn release_inactive_sessions(
     let orphan_sql = format!(
         "SELECT id, {agent_expr}, {model_expr} FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
     );
-    let orphan_update_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ? AND time_archived IS NULL");
+    let orphan_update_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ?");
     if let Ok(mut orphan_stmt) = conn.prepare(&orphan_sql) {
         let rows = orphan_stmt.query_map([], |row| {
             Ok((
@@ -868,8 +934,10 @@ pub fn release_inactive_sessions(
             "cuentas secundarias".to_string()
         };
 
-        // Trazabilidad en Engram de la limpieza (acotada con timeout y sin ventana en Windows)
-        if let Some(cand) = crate::paths::resolve_engram_binary() {
+        // Trazabilidad en Engram de la limpieza (acotada con timeout y sin ventana en Windows; omitida en BDs efímeras de test)
+        let is_isolated_test_db =
+            std::env::var("OPENCODE_DB_PATH").is_ok() && std::env::var("ENGRAM_BIN").is_err();
+        if !is_isolated_test_db && let Some(cand) = crate::paths::resolve_engram_binary() {
             let title =
                 format!("Limpieza de sesiones huérfanas: {engram_project} [{released_list_str}]");
             let content = format!(
@@ -931,6 +999,7 @@ mod tests {
     #[test]
     fn rewrite_migrated_model_preserves_base_model_and_provider() {
         let (id1, json1, prov1) = rewrite_migrated_model(
+            ".",
             Some(r#"{"id":"agy1/claude-sonnet-4-6","providerID":"cliproxy"}"#),
             "agy1",
             "agy2",
@@ -942,6 +1011,7 @@ mod tests {
         assert!(json1.contains(r#""providerID":"cliproxy""#));
 
         let (id_cpamc, json_cpamc, prov_cpamc) = rewrite_migrated_model(
+            ".",
             Some(r#"{"id":"cuenta1/gemini-3.8-flash-high","providerID":"cpamc"}"#),
             "cuenta1",
             "cuenta4",
@@ -952,6 +1022,7 @@ mod tests {
         assert!(json_cpamc.contains(r#""providerID":"cpamc""#));
 
         let (id2, _, prov2) = rewrite_migrated_model(
+            ".",
             Some("cliproxy/AGY1/gpt-oss-120b-medium"),
             "agy1",
             "agy3",
@@ -960,10 +1031,10 @@ mod tests {
         assert_eq!(id2, "agy3/gpt-oss-120b-medium");
         assert_eq!(prov2, "cliproxy");
 
-        let (id3, _, _) = rewrite_migrated_model(None, "agy1", "agy2", "agy1/deepseek-r1");
+        let (id3, _, _) = rewrite_migrated_model(".", None, "agy1", "agy2", "agy1/deepseek-r1");
         assert_eq!(id3, "agy2/deepseek-r1");
 
-        let (id4, _, _) = rewrite_migrated_model(None, "agy1", "agy2", "");
+        let (id4, _, _) = rewrite_migrated_model(".", None, "agy1", "agy2", "");
         assert_eq!(id4, "agy2/gemini-3.8-flash-high");
     }
 

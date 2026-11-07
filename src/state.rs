@@ -65,18 +65,12 @@ pub fn load_config(path: &Path) -> ConfigData {
     ConfigData { collapsed, hidden }
 }
 
-/// Guarda de forma atómica (`<file>.tmp` + `rename`) las tarjetas colapsadas y ocultas.
+/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas y ocultas.
 pub fn save_config(
     path: &Path,
     collapsed: &[bool; 11],
     hidden: &HashSet<String>,
 ) -> Result<(), String> {
-    if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let collapsed_names: Vec<&str> = CARD_KEYS
         .iter()
         .enumerate()
@@ -92,13 +86,7 @@ pub fn save_config(
         "hidden": hidden_names,
     });
     let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)
-        .and_then(|_| std::fs::rename(&tmp, path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            e.to_string()
-        })
+    crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

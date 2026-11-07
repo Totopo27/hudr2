@@ -21,8 +21,30 @@ pub fn normalize_path(p: &str) -> String {
         .to_string()
 }
 
+/// Escribe `body` de forma atómica usando un archivo temporal con sufijo `.{pid}.tmp` + `rename`
+/// para evitar archivos truncados o colisiones entre múltiples instancias del sidebar.
+pub fn atomic_write_bytes(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = PathBuf::from(format!("{}.{}.tmp", path.display(), std::process::id()));
+    if let Err(err) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Resuelve el directorio de credenciales / autenticaciones de Cliproxy o CPAMC
 pub fn resolve_auths_dir() -> PathBuf {
+    resolve_auths_dir_for(".")
+}
+
+/// Resuelve el directorio de credenciales considerando el directorio de proyecto activo (`target_dir`).
+pub fn resolve_auths_dir_for(target_dir: &str) -> PathBuf {
     // 1. Variable de entorno explícita (mayor prioridad para cualquier usuario o CI)
     for env_key in ["CLIPROXY_AUTHS_DIR", "CPAMC_AUTHS_DIR"] {
         if let Ok(dir) = std::env::var(env_key) {
@@ -34,7 +56,7 @@ pub fn resolve_auths_dir() -> PathBuf {
     }
 
     // 2. Extraer 'authsDir' / 'auths_dir' desde opencode.json (compatible con provider/providers y cpamc/cliproxy)
-    let candidates_cfg = opencode_config_candidates(".");
+    let candidates_cfg = opencode_config_candidates(target_dir);
     for cfg_path in candidates_cfg {
         if cfg_path.exists()
             && let Ok(content) = std::fs::read_to_string(&cfg_path)
@@ -242,10 +264,12 @@ pub fn db_effective_mtime(db_path: &Path) -> Option<std::time::SystemTime> {
 /// Resuelve el binario ejecutable de Engram en cualquier sistema operativo
 pub fn resolve_engram_binary() -> Option<PathBuf> {
     if let Ok(bin) = std::env::var("ENGRAM_BIN") {
-        let p = PathBuf::from(bin.trim());
-        if p.exists() {
-            return Some(p);
+        let trimmed = bin.trim();
+        if trimmed.is_empty() || matches!(trimmed, "0" | "false" | "off" | "none") {
+            return None;
         }
+        let p = PathBuf::from(trimmed);
+        return p.exists().then_some(p);
     }
 
     // 1. Verificar si 'engram' está disponible globalmente en PATH
