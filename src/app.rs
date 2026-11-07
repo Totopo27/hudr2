@@ -378,17 +378,28 @@ pub async fn release_sessions_action(app_state: &Arc<RwLock<AppState>>) {
 }
 
 pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, accounts, active_prefixes) = {
+    let (project_dir, accounts, active_prefixes, active_model) = {
         let state = app_state.read().await;
+        let model = if !state.snapshot.agent_session.model.is_empty() {
+            state.snapshot.agent_session.model.clone()
+        } else {
+            state.snapshot.agent_session.model_short.clone()
+        };
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
             state.snapshot.agent_session.all_active_prefixes.clone(),
+            model,
         )
     };
 
     let (_, notice) = tokio::task::spawn_blocking(move || {
-        crate::cleanup::migrate_critical_sessions(&project_dir, &accounts, &active_prefixes)
+        crate::cleanup::migrate_critical_sessions_for_model(
+            &project_dir,
+            &accounts,
+            &active_prefixes,
+            &active_model,
+        )
     })
     .await
     .unwrap_or_else(|err| (0, format!("[error] Falló migración: {err}")));

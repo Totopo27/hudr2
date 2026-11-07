@@ -1,14 +1,17 @@
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::{
-    extract_prefix, is_opencode_terminal_title, resolve_pool_account_prefixes,
-    resolve_session_for_pane,
+    clean_model_name, extract_prefix, is_opencode_terminal_title, normalize_model_str,
+    resolve_pool_account_prefixes, resolve_session_for_pane,
 };
 use crate::paths::resolve_opencode_db_path;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const SUBPROCESS_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Construye un `Command` para invocar el CLI de OpenCode de forma multiplataforma.
 /// En Windows se lanza vía `cmd /c` porque `opencode` suele instalarse como shim
@@ -24,6 +27,216 @@ fn opencode_command() -> Command {
     {
         Command::new("opencode")
     }
+}
+
+fn configure_silent_command(cmd: &mut Command) {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+fn wait_children_bounded(children: &mut [Child], timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut any_running = false;
+        for child in children.iter_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                any_running = true;
+            }
+        }
+        if !any_running {
+            return;
+        }
+        if Instant::now() >= deadline {
+            for child in children.iter_mut() {
+                if matches!(child.try_wait(), Ok(None)) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+fn run_command_bounded(mut cmd: Command, timeout: Duration) {
+    configure_silent_command(&mut cmd);
+    if let Ok(child) = cmd.spawn() {
+        wait_children_bounded(&mut [child], timeout);
+    }
+}
+
+fn notify_opencode_session_migration(ses_id: &str, to_agent: &str, to_model_id: &str) {
+    let mut agent_cmd = opencode_command();
+    agent_cmd.args([
+        "api",
+        "post",
+        &format!("/api/session/{ses_id}/agent"),
+        "-d",
+        &format!("{{\"agent\":\"{to_agent}\"}}"),
+    ]);
+    configure_silent_command(&mut agent_cmd);
+
+    let mut model_cmd = opencode_command();
+    model_cmd.args([
+        "api",
+        "post",
+        &format!("/api/session/{ses_id}/model"),
+        "-d",
+        &format!("{{\"model\":{{\"id\":\"{to_model_id}\",\"providerID\":\"cliproxy\"}}}}"),
+    ]);
+    configure_silent_command(&mut model_cmd);
+
+    let mut children = Vec::with_capacity(2);
+    if let Ok(c) = agent_cmd.spawn() {
+        children.push(c);
+    }
+    if let Ok(c) = model_cmd.spawn() {
+        children.push(c);
+    }
+    if !children.is_empty() {
+        wait_children_bounded(&mut children, SUBPROCESS_TIMEOUT);
+    }
+}
+
+fn collect_sorted_known_prefixes(accounts_list: &[AccountQuota]) -> Vec<String> {
+    let mut known_prefixes: Vec<String> = accounts_list
+        .iter()
+        .map(|a| a.prefix.to_lowercase())
+        .collect();
+    if known_prefixes.is_empty() {
+        let mut discovered = Vec::new();
+        crate::quotas::QuotaCollector::discover_accounts(&mut discovered);
+        known_prefixes = discovered
+            .into_iter()
+            .map(|a| a.prefix.to_lowercase())
+            .collect();
+    }
+    known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
+    known_prefixes
+}
+
+fn rewrite_migrated_agent(
+    current_agent: Option<&str>,
+    from_prefix: &str,
+    target_prefix: &str,
+) -> String {
+    let agent = current_agent.map(str::trim).unwrap_or("");
+    if agent.is_empty() {
+        return format!("sdd-orchestrator-{target_prefix}");
+    }
+    if agent.eq_ignore_ascii_case(from_prefix) {
+        return target_prefix.to_string();
+    }
+    for sep in ['-', '_'] {
+        let suffix = format!("{sep}{from_prefix}");
+        if agent.len() > suffix.len() {
+            let split_idx = agent.len() - suffix.len();
+            if agent
+                .get(split_idx..)
+                .is_some_and(|tail| tail.eq_ignore_ascii_case(&suffix))
+            {
+                return format!("{}{sep}{target_prefix}", &agent[..split_idx]);
+            }
+        }
+    }
+    agent.to_string()
+}
+
+fn extract_base_model_id(
+    raw_model: &str,
+    from_prefix: &str,
+    allow_any_prefix: bool,
+) -> Option<String> {
+    let trimmed = raw_model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let cleaned = clean_model_name(trimmed);
+    let normalized = normalize_model_str(cleaned.trim());
+    if normalized.is_empty() {
+        return None;
+    }
+    if let Some((first_seg, rest)) = normalized.split_once('/') {
+        let rest = rest.trim();
+        if rest.is_empty() {
+            return None;
+        }
+        if first_seg.eq_ignore_ascii_case(from_prefix)
+            || first_seg.to_ascii_lowercase().starts_with("pool-")
+            || allow_any_prefix
+        {
+            return Some(rest.to_string());
+        }
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn rewrite_migrated_model(
+    current_model: Option<&str>,
+    from_prefix: &str,
+    target_prefix: &str,
+    fallback_active_model: &str,
+) -> (String, String) {
+    let provider_id = current_model
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|v| {
+            v.get("providerID")
+                .and_then(|p| p.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "cliproxy".to_string());
+
+    let base_model = current_model
+        .and_then(|m| extract_base_model_id(m, from_prefix, false))
+        .or_else(|| extract_base_model_id(fallback_active_model, from_prefix, true))
+        .unwrap_or_else(|| "gemini-3.8-flash-high".to_string());
+
+    let to_model_id = format!("{target_prefix}/{base_model}");
+    let to_model_json = serde_json::json!({
+        "id": to_model_id,
+        "providerID": provider_id
+    })
+    .to_string();
+
+    (to_model_id, to_model_json)
+}
+
+fn match_critical_prefix_for_session<'a>(
+    agent_opt: Option<&str>,
+    model_opt: Option<&str>,
+    known_prefixes: &[String],
+    critical_accounts: &[&'a AccountQuota],
+) -> Option<&'a str> {
+    let agent_str = agent_opt.unwrap_or("");
+    let model_str = model_opt.unwrap_or("");
+    if let Some(resolved) = extract_prefix(agent_str, model_str, known_prefixes)
+        && let Some(ca) = critical_accounts
+            .iter()
+            .find(|a| a.prefix.eq_ignore_ascii_case(&resolved))
+    {
+        return Some(ca.prefix.as_str());
+    }
+    for pp in resolve_pool_account_prefixes(model_str, known_prefixes) {
+        if let Some(ca) = critical_accounts
+            .iter()
+            .find(|a| a.prefix.eq_ignore_ascii_case(&pp))
+        {
+            return Some(ca.prefix.as_str());
+        }
+    }
+    None
 }
 
 pub struct ReleaseResult {
@@ -87,10 +300,20 @@ pub fn migrate_critical_sessions(
     accounts_list: &[AccountQuota],
     active_prefixes: &HashSet<String>,
 ) -> (usize, String) {
+    migrate_critical_sessions_for_model(cwd, accounts_list, active_prefixes, "")
+}
+
+pub fn migrate_critical_sessions_for_model(
+    cwd: &str,
+    accounts_list: &[AccountQuota],
+    active_prefixes: &HashSet<String>,
+    active_model: &str,
+) -> (usize, String) {
     let critical_list: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
-            (a.is_critical || (100u8.saturating_sub(a.rem_5h) >= 85 && !a.has_error))
+            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
                 && active_prefixes.contains(&a.prefix.to_lowercase())
         })
         .collect();
@@ -102,14 +325,20 @@ pub fn migrate_critical_sessions(
         );
     }
 
-    let target_prefix = get_best_healthy_target_prefix(accounts_list, active_prefixes);
-    let to_agent = format!("sdd-orchestrator-{target_prefix}");
-    let to_model_id = format!("{target_prefix}/gemini-3.8-flash-high");
-    let to_model_json = serde_json::json!({
-        "id": to_model_id,
-        "providerID": "cliproxy"
-    })
-    .to_string();
+    let target_prefix =
+        get_best_healthy_target_prefix_for_model(accounts_list, active_prefixes, active_model);
+    let migratable_critical: Vec<&AccountQuota> = critical_list
+        .iter()
+        .copied()
+        .filter(|a| !a.prefix.eq_ignore_ascii_case(&target_prefix))
+        .collect();
+
+    if migratable_critical.is_empty() {
+        return (
+            0,
+            "No hay cuentas alternativas sanas disponibles para migrar.".to_string(),
+        );
+    }
 
     let db_path = resolve_opencode_db_path();
     if !db_path.exists() {
@@ -123,8 +352,9 @@ pub fn migrate_critical_sessions(
         Ok(c) => c,
         Err(err) => return (0, format!("[error] Error abriendo BD: {err}")),
     };
-    let _ = conn.busy_timeout(std::time::Duration::from_millis(3000));
+    let _ = conn.busy_timeout(Duration::from_millis(3000));
 
+    let known_prefixes = collect_sorted_known_prefixes(accounts_list);
     let mut total_migrated = 0;
     let mut migrated_from = Vec::new();
 
@@ -146,60 +376,38 @@ pub fn migrate_critical_sessions(
         .map(|iter| iter.flatten().collect())
         .unwrap_or_default();
 
-    for ca in &critical_list {
-        let from_agent = format!("sdd-orchestrator-{}", ca.prefix);
-        for (ses_id, agent_opt, model_opt) in &session_rows {
-            let mut matches = false;
-            if let Some(a) = agent_opt
-                && (a == &from_agent
-                    || a.to_lowercase()
-                        .contains(&format!("-{}", ca.prefix.to_lowercase())))
-            {
-                matches = true;
-            }
-            if !matches
-                && let Some(m) = model_opt
-                && m.to_lowercase()
-                    .contains(&format!("{}/", ca.prefix.to_lowercase()))
-            {
-                matches = true;
+    for (ses_id, agent_opt, model_opt) in &session_rows {
+        let Some(from_prefix) = match_critical_prefix_for_session(
+            agent_opt.as_deref(),
+            model_opt.as_deref(),
+            &known_prefixes,
+            &migratable_critical,
+        ) else {
+            continue;
+        };
+
+        let to_agent = rewrite_migrated_agent(agent_opt.as_deref(), from_prefix, &target_prefix);
+        let (to_model_id, to_model_json) = rewrite_migrated_model(
+            model_opt.as_deref(),
+            from_prefix,
+            &target_prefix,
+            active_model,
+        );
+
+        let updated = conn.execute(
+            "UPDATE session_v2 SET agent = ?, model = ? WHERE id = ?",
+            rusqlite::params![to_agent, to_model_json, ses_id],
+        );
+        if let Ok(changes) = updated
+            && changes > 0
+        {
+            total_migrated += changes;
+            let from_owned = from_prefix.to_string();
+            if !migrated_from.contains(&from_owned) {
+                migrated_from.push(from_owned);
             }
 
-            if matches {
-                let updated = conn.execute(
-                    "UPDATE session_v2 SET agent = ?, model = ? WHERE id = ?",
-                    rusqlite::params![to_agent, to_model_json, ses_id],
-                );
-                if let Ok(changes) = updated
-                    && changes > 0
-                {
-                    total_migrated += changes;
-                    if !migrated_from.contains(&ca.prefix) {
-                        migrated_from.push(ca.prefix.clone());
-                    }
-
-                    // Intentar notificar a la API de OpenCode CLI
-                    let _ = opencode_command()
-                        .args([
-                            "api",
-                            "post",
-                            &format!("/api/session/{ses_id}/agent"),
-                            "-d",
-                            &format!("{{\"agent\":\"{to_agent}\"}}"),
-                        ])
-                        .output();
-
-                    let _ = opencode_command()
-                        .args([
-                            "api",
-                            "post",
-                            &format!("/api/session/{ses_id}/model"),
-                            "-d",
-                            &format!("{{\"model\":{{\"id\":\"{to_model_id}\",\"providerID\":\"cliproxy\"}}}}"),
-                        ])
-                        .output();
-                }
-            }
+            notify_opencode_session_migration(ses_id, &to_agent, &to_model_id);
         }
     }
 
@@ -209,7 +417,7 @@ pub fn migrate_critical_sessions(
             "[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_prefix}!"
         );
 
-        // Guardar checkpoint en Engram
+        // Guardar checkpoint en Engram (acotado con timeout y sin ventana en Windows)
         if let Some(cand) = crate::paths::resolve_engram_binary() {
             let engram_project = Path::new(cwd)
                 .file_name()
@@ -220,17 +428,17 @@ pub fn migrate_critical_sessions(
             let content = format!(
                 "**What**: Checkpoint y rotación en frío de {total_migrated} sesión(es) desde [{from_str}] hacia {target_prefix}.\n**Why**: Cuota crítica agotada (>=85% usado) en cuenta(s) saliente(s).\n**Where**: {cwd}"
             );
-            let _ = Command::new(&cand)
-                .args([
-                    "save",
-                    &title,
-                    &content,
-                    "--type",
-                    "decision",
-                    "--project",
-                    &engram_project,
-                ])
-                .output();
+            let mut cmd = Command::new(&cand);
+            cmd.args([
+                "save",
+                &title,
+                &content,
+                "--type",
+                "decision",
+                "--project",
+                &engram_project,
+            ]);
+            run_command_bounded(cmd, SUBPROCESS_TIMEOUT);
         }
 
         (total_migrated, notice)
@@ -239,7 +447,7 @@ pub fn migrate_critical_sessions(
             0,
             format!(
                 "No se encontraron sesiones abiertas usando [{}]",
-                critical_list
+                migratable_critical
                     .iter()
                     .map(|c| c.prefix.as_str())
                     .collect::<Vec<_>>()
@@ -265,19 +473,7 @@ pub fn release_inactive_sessions(
         .unwrap_or("project")
         .to_lowercase();
 
-    let mut known_prefixes: Vec<String> = accounts_list
-        .iter()
-        .map(|a| a.prefix.to_lowercase())
-        .collect();
-    if known_prefixes.is_empty() {
-        let mut discovered = Vec::new();
-        crate::quotas::QuotaCollector::discover_accounts(&mut discovered);
-        known_prefixes = discovered
-            .into_iter()
-            .map(|a| a.prefix.to_lowercase())
-            .collect();
-    }
-    known_prefixes.sort_by_key(|a| std::cmp::Reverse(a.len()));
+    let known_prefixes = collect_sorted_known_prefixes(accounts_list);
 
     let panes = HerdrClient::get_panes();
 
@@ -471,24 +667,24 @@ pub fn release_inactive_sessions(
             "cuentas secundarias".to_string()
         };
 
-        // Trazabilidad en Engram de la limpieza
+        // Trazabilidad en Engram de la limpieza (acotada con timeout y sin ventana en Windows)
         if let Some(cand) = crate::paths::resolve_engram_binary() {
             let title =
                 format!("Limpieza de sesiones huérfanas: {engram_project} [{released_list_str}]");
             let content = format!(
                 "**What**: Cierre y archivado limpio de {closed_count} sesión(es) huérfana(s) en desuso.\n**Cuentas liberadas**: {released_list_str}\n**Why**: Deselección manual vía tecla 'd' para liberar pines en HUD y evitar saturación concurrente.\n**Where**: {cwd}"
             );
-            let _ = Command::new(&cand)
-                .args([
-                    "save",
-                    &title,
-                    &content,
-                    "--type",
-                    "decision",
-                    "--project",
-                    &engram_project,
-                ])
-                .output();
+            let mut cmd = Command::new(&cand);
+            cmd.args([
+                "save",
+                &title,
+                &content,
+                "--type",
+                "decision",
+                "--project",
+                &engram_project,
+            ]);
+            run_command_bounded(cmd, SUBPROCESS_TIMEOUT);
         }
 
         format!("[!] {closed_count} sesion(es) archivadas. Liberadas: [{released_list_str}]")
@@ -500,5 +696,103 @@ pub fn release_inactive_sessions(
         closed_count,
         released_prefixes: released_vec,
         notice,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rewrite_migrated_agent_preserves_role_and_non_prefixed_agents() {
+        assert_eq!(
+            rewrite_migrated_agent(Some("sdd-orchestrator-agy1"), "agy1", "agy2"),
+            "sdd-orchestrator-agy2"
+        );
+        assert_eq!(
+            rewrite_migrated_agent(Some("sdd-apply-AGY1"), "agy1", "agy2"),
+            "sdd-apply-agy2"
+        );
+        assert_eq!(
+            rewrite_migrated_agent(Some("worker_agy_1"), "agy_1", "agy2"),
+            "worker_agy2"
+        );
+        assert_eq!(
+            rewrite_migrated_agent(Some("build"), "agy1", "agy2"),
+            "build"
+        );
+        assert_eq!(
+            rewrite_migrated_agent(None, "agy1", "agy2"),
+            "sdd-orchestrator-agy2"
+        );
+    }
+
+    #[test]
+    fn rewrite_migrated_model_preserves_base_model_and_provider() {
+        let (id1, json1) = rewrite_migrated_model(
+            Some(r#"{"id":"agy1/claude-sonnet-4-6","providerID":"cliproxy"}"#),
+            "agy1",
+            "agy2",
+            "",
+        );
+        assert_eq!(id1, "agy2/claude-sonnet-4-6");
+        assert!(json1.contains(r#""id":"agy2/claude-sonnet-4-6""#));
+        assert!(json1.contains(r#""providerID":"cliproxy""#));
+
+        let (id2, _) = rewrite_migrated_model(
+            Some("cliproxy/AGY1/gpt-oss-120b-medium"),
+            "agy1",
+            "agy3",
+            "",
+        );
+        assert_eq!(id2, "agy3/gpt-oss-120b-medium");
+
+        let (id3, _) = rewrite_migrated_model(None, "agy1", "agy2", "agy1/deepseek-r1");
+        assert_eq!(id3, "agy2/deepseek-r1");
+
+        let (id4, _) = rewrite_migrated_model(None, "agy1", "agy2", "");
+        assert_eq!(id4, "agy2/gemini-3.8-flash-high");
+    }
+
+    #[test]
+    fn match_critical_prefix_respects_prefix_boundaries() {
+        let ca = AccountQuota {
+            prefix: "agy".to_string(),
+            is_critical: true,
+            ..Default::default()
+        };
+        let critical = vec![&ca];
+        let known = vec!["agy2".to_string(), "agy_1".to_string(), "agy".to_string()];
+
+        // Healthy sibling accounts sharing substring "agy" must never be clobbered
+        assert_eq!(
+            match_critical_prefix_for_session(
+                Some("sdd-orchestrator-agy2"),
+                Some(r#"{"id":"agy2/claude-sonnet-4-6"}"#),
+                &known,
+                &critical,
+            ),
+            None
+        );
+        assert_eq!(
+            match_critical_prefix_for_session(
+                Some("sdd-orchestrator-agy_1"),
+                Some(r#"{"id":"agy_1/claude-sonnet-4-6"}"#),
+                &known,
+                &critical,
+            ),
+            None
+        );
+
+        // Exact critical account matches cleanly
+        assert_eq!(
+            match_critical_prefix_for_session(
+                Some("sdd-apply-agy"),
+                Some(r#"{"id":"agy/claude-sonnet-4-6"}"#),
+                &known,
+                &critical,
+            ),
+            Some("agy")
+        );
     }
 }

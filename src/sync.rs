@@ -10,47 +10,137 @@ pub struct SyncResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ModelTemplate {
     context_limit: i64,
     output_limit: i64,
-    base_name: &'static str,
+    base_name: String,
     reasoning_field: Option<&'static str>,
 }
 
-fn get_model_template(key: &str) -> Option<ModelTemplate> {
+fn humanize_model_key(base_key: &str) -> String {
+    base_key
+        .split(['-', '_'])
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| match seg.to_ascii_lowercase().as_str() {
+            "gpt" => "GPT".to_string(),
+            "oss" => "OSS".to_string(),
+            "r1" => "R1".to_string(),
+            "v3" => "V3".to_string(),
+            "thinking" | "high" | "medium" | "low" => format!("({})", seg.to_ascii_lowercase()),
+            _ => {
+                let mut chars = seg.chars();
+                match chars.next() {
+                    Some(first) if first.is_ascii_alphabetic() => {
+                        let mut out = String::with_capacity(seg.len());
+                        out.push(first.to_ascii_uppercase());
+                        out.push_str(chars.as_str());
+                        out
+                    }
+                    _ => seg.to_string(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn resolve_sync_model_template(key: &str) -> ModelTemplate {
     match key {
-        "claude-opus-4-6-thinking" => Some(ModelTemplate {
+        "claude-opus-4-6-thinking" => ModelTemplate {
             context_limit: 200_000,
             output_limit: 64_000,
-            base_name: "Claude Opus 4.6 (thinking)",
+            base_name: "Claude Opus 4.6 (thinking)".to_string(),
             reasoning_field: Some("reasoning_content"),
-        }),
-        "claude-sonnet-4-6" => Some(ModelTemplate {
+        },
+        "claude-sonnet-4-6" => ModelTemplate {
             context_limit: 200_000,
             output_limit: 64_000,
-            base_name: "Claude Sonnet 4.6",
+            base_name: "Claude Sonnet 4.6".to_string(),
             reasoning_field: Some("reasoning_content"),
-        }),
-        "gemini-3.8-flash-high" => Some(ModelTemplate {
+        },
+        "gemini-3.8-flash-high" => ModelTemplate {
             context_limit: 1_048_576,
             output_limit: 65_536,
-            base_name: "Gemini 3.8 Flash (high)",
+            base_name: "Gemini 3.8 Flash (high)".to_string(),
             reasoning_field: Some("reasoning_content"),
-        }),
-        "gemini-pro-agent" => Some(ModelTemplate {
+        },
+        "gemini-pro-agent" => ModelTemplate {
             context_limit: 1_048_576,
             output_limit: 65_536,
-            base_name: "Gemini Pro Agent",
+            base_name: "Gemini Pro Agent".to_string(),
             reasoning_field: Some("reasoning_content"),
-        }),
-        "gpt-oss-120b-medium" => Some(ModelTemplate {
+        },
+        "gpt-oss-120b-medium" => ModelTemplate {
             context_limit: 131_072,
             output_limit: 128_000,
-            base_name: "GPT-OSS 120B (medium)",
+            base_name: "GPT-OSS 120B (medium)".to_string(),
             reasoning_field: Some("reasoning_content"),
-        }),
-        _ => None,
+        },
+        _ => {
+            let lower = key.to_ascii_lowercase();
+            let context_limit = if lower.contains("claude") {
+                200_000
+            } else if lower.contains("deepseek") || lower.contains("gpt-oss") {
+                131_072
+            } else if lower.contains("gemini") {
+                1_048_576
+            } else {
+                crate::opencode::resolve_model_context_limit(key)
+            };
+
+            let output_limit = if lower.contains("gemini") {
+                65_536
+            } else if lower.contains("claude") || lower.contains("deepseek") {
+                64_000
+            } else if lower.contains("gpt-oss") {
+                128_000
+            } else {
+                32_768
+            };
+
+            let reasoning_field = if lower.contains("thinking")
+                || lower.contains("reasoner")
+                || lower.contains("deepseek-r1")
+                || lower.contains("gemini")
+                || lower.contains("gpt-oss")
+            {
+                Some("reasoning_content")
+            } else {
+                None
+            };
+
+            ModelTemplate {
+                context_limit,
+                output_limit,
+                base_name: humanize_model_key(key),
+                reasoning_field,
+            }
+        }
     }
+}
+
+fn resolve_default_orchestrator_model<V>(profile: &str, sorted_models: &BTreeMap<String, V>) -> String {
+    let preferred = format!("{profile}/gemini-3.8-flash-high");
+    if sorted_models.contains_key(&preferred) {
+        return format!("cliproxy/{preferred}");
+    }
+
+    let profile_prefix = format!("{profile}/");
+    if let Some(gemini_key) = sorted_models.keys().find(|k| {
+        k.starts_with(&profile_prefix)
+            && k[profile_prefix.len()..]
+                .to_ascii_lowercase()
+                .contains("gemini")
+    }) {
+        return format!("cliproxy/{gemini_key}");
+    }
+
+    if let Some(any_key) = sorted_models.keys().find(|k| k.starts_with(&profile_prefix)) {
+        return format!("cliproxy/{any_key}");
+    }
+
+    format!("cliproxy/{preferred}")
 }
 
 pub async fn sync_integrations_native() -> Result<SyncResult, String> {
@@ -153,42 +243,40 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
     let mut added_models_count = 0;
     for remote in remote_models {
         if let Some(id) = remote.get("id").and_then(|i| i.as_str())
+            && !id.trim().is_empty()
             && !models_map.contains_key(id)
         {
-            let (prefix, base_key) = if id.contains('/') {
-                let mut parts = id.splitn(2, '/');
-                (parts.next().unwrap_or(""), parts.next().unwrap_or(id))
+            let (prefix, base_key) = id.split_once('/').unwrap_or(("", id));
+            if base_key.trim().is_empty() {
+                continue;
+            }
+
+            let tpl = resolve_sync_model_template(base_key);
+            let name = if !prefix.is_empty() {
+                format!("{} [{}]", tpl.base_name, prefix)
             } else {
-                ("", id)
+                tpl.base_name
             };
 
-            if let Some(tpl) = get_model_template(base_key) {
-                let name = if !prefix.is_empty() {
-                    format!("{} [{}]", tpl.base_name, prefix)
-                } else {
-                    tpl.base_name.to_string()
-                };
-
-                let mut entry = json!({
-                    "name": name,
-                    "limit": {
-                        "context": tpl.context_limit,
-                        "output": tpl.output_limit
-                    },
-                    "capabilities": {
-                        "input": ["text", "image"],
-                        "output": ["text"],
-                        "tools": true
-                    }
-                });
-
-                if let Some(rf) = tpl.reasoning_field {
-                    entry["compatibility"] = json!({ "reasoningField": rf });
+            let mut entry = json!({
+                "name": name,
+                "limit": {
+                    "context": tpl.context_limit,
+                    "output": tpl.output_limit
+                },
+                "capabilities": {
+                    "input": ["text", "image"],
+                    "output": ["text"],
+                    "tools": true
                 }
+            });
 
-                models_map.insert(id.to_string(), entry);
-                added_models_count += 1;
+            if let Some(rf) = tpl.reasoning_field {
+                entry["compatibility"] = json!({ "reasoningField": rf });
             }
+
+            models_map.insert(id.to_string(), entry);
+            added_models_count += 1;
         }
     }
 
@@ -222,7 +310,7 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
                     .unwrap_or("");
                 if current_model.is_empty() {
                     let profile = agent_name.trim_start_matches("sdd-orchestrator-");
-                    let target = format!("cliproxy/{profile}/gemini-3.8-flash-high");
+                    let target = resolve_default_orchestrator_model(profile, &sorted_models);
                     agent_obj.insert("model".to_string(), json!(target));
                     audited_count += 1;
                 }
@@ -248,4 +336,58 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
             audited_count
         ),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_sync_model_template_preserves_presets_and_synthesizes_dynamic_models() {
+        let preset = resolve_sync_model_template("claude-opus-4-6-thinking");
+        assert_eq!(preset.base_name, "Claude Opus 4.6 (thinking)");
+        assert_eq!(preset.context_limit, 200_000);
+        assert_eq!(preset.output_limit, 64_000);
+        assert_eq!(preset.reasoning_field, Some("reasoning_content"));
+
+        let claude_dyn = resolve_sync_model_template("claude-3.7-sonnet");
+        assert_eq!(claude_dyn.base_name, "Claude 3.7 Sonnet");
+        assert_eq!(claude_dyn.context_limit, 200_000);
+        assert_eq!(claude_dyn.output_limit, 64_000);
+        assert_eq!(claude_dyn.reasoning_field, None);
+
+        let deepseek_dyn = resolve_sync_model_template("deepseek-r1");
+        assert_eq!(deepseek_dyn.base_name, "Deepseek R1");
+        assert_eq!(deepseek_dyn.context_limit, 131_072);
+        assert_eq!(deepseek_dyn.reasoning_field, Some("reasoning_content"));
+
+        let gemini_dyn = resolve_sync_model_template("gemini-2.5-pro");
+        assert_eq!(gemini_dyn.base_name, "Gemini 2.5 Pro");
+        assert_eq!(gemini_dyn.context_limit, 1_048_576);
+        assert_eq!(gemini_dyn.output_limit, 65_536);
+
+        let qwen_dyn = resolve_sync_model_template("qwen-2.5-coder-32b");
+        assert_eq!(qwen_dyn.context_limit, 128_000);
+    }
+
+    #[test]
+    fn resolve_default_orchestrator_model_prefers_synced_profile_models() {
+        let mut models = BTreeMap::new();
+        models.insert("agy1/claude-sonnet-4-6".to_string(), json!({}));
+        models.insert("agy1/gemini-2.5-pro".to_string(), json!({}));
+        models.insert("agy2/claude-sonnet-4-6".to_string(), json!({}));
+
+        assert_eq!(
+            resolve_default_orchestrator_model("agy1", &models),
+            "cliproxy/agy1/gemini-2.5-pro"
+        );
+        assert_eq!(
+            resolve_default_orchestrator_model("agy2", &models),
+            "cliproxy/agy2/claude-sonnet-4-6"
+        );
+        assert_eq!(
+            resolve_default_orchestrator_model("agy3", &models),
+            "cliproxy/agy3/gemini-3.8-flash-high"
+        );
+    }
 }
