@@ -10,6 +10,30 @@ use crate::paths::resolve_auths_dir;
 use std::fs;
 use std::path::Path;
 
+/// Marcador explícito para cuentas descubiertas en disco cuyas cuotas aún no se han consultado.
+/// Jamás es producido por [`format_relative_reset`], evitando falsos positivos cuando una ventana
+/// real coincide exactamente con `4h 59m` o `4d 23h`.
+pub const UNFETCHED_RESET: &str = "...";
+
+/// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
+pub fn is_unfetched(acc: &AccountQuota) -> bool {
+    !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
+}
+
+fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)> {
+    let file_name = path.file_name().and_then(|f| f.to_str())?;
+    if !file_name.ends_with(".json") || file_name.starts_with('.') {
+        return None;
+    }
+    let content = fs::read_to_string(path).ok()?;
+    let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
+    let has_creds = val.get("access_token").is_some()
+        || val.get("email").is_some()
+        || val.get("token").is_some()
+        || val.get("type").is_some();
+    has_creds.then(|| (file_name.to_string(), val))
+}
+
 /// Comprueba si el directorio de autenticación existe y contiene credenciales JSON válidas.
 pub fn is_available() -> bool {
     let auths_dir = resolve_auths_dir();
@@ -21,26 +45,9 @@ pub fn is_available() -> bool {
         return false;
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
-            && file_name.ends_with(".json")
-            && !file_name.starts_with('.')
-            && let Ok(content) = fs::read_to_string(&path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
-        {
-            let has_token_or_email = val.get("access_token").is_some()
-                || val.get("email").is_some()
-                || val.get("token").is_some()
-                || val.get("type").is_some();
-
-            if has_token_or_email {
-                return true;
-            }
-        }
-    }
-
-    false
+    entries
+        .flatten()
+        .any(|entry| read_valid_credential_json(&entry.path()).is_some())
 }
 
 /// Descubre y registra cuentas desde los archivos de credenciales de CLIProxy.
@@ -56,37 +63,18 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
     if let Ok(entries) = fs::read_dir(auths_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if let Some(file_name) = path.file_name().and_then(|f| f.to_str())
-                && file_name.ends_with(".json")
-                && !file_name.starts_with('.')
-                && let Ok(content) = fs::read_to_string(&path)
-                && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
-            {
-                // Solo considerar archivos con estructura de credenciales
-                let has_token_or_email = val.get("access_token").is_some()
-                    || val.get("email").is_some()
-                    || val.get("token").is_some()
-                    || val.get("type").is_some();
-
-                if !has_token_or_email {
-                    continue;
-                }
-
+            if let Some((file_name, val)) = read_valid_credential_json(&path) {
                 let email = val
                     .get("email")
                     .and_then(|e| e.as_str())
                     .unwrap_or("")
                     .to_string();
                 let raw_stem = file_name.trim_end_matches(".json");
-                let clean_stem = if let Some(stripped) = raw_stem.strip_prefix("antigravity-") {
-                    stripped
-                } else if let Some(stripped) = raw_stem.strip_prefix("google-") {
-                    stripped
-                } else if let Some(stripped) = raw_stem.strip_prefix("oauth-") {
-                    stripped
-                } else {
-                    raw_stem
-                };
+                let clean_stem = raw_stem
+                    .strip_prefix("antigravity-")
+                    .or_else(|| raw_stem.strip_prefix("google-"))
+                    .or_else(|| raw_stem.strip_prefix("oauth-"))
+                    .unwrap_or(raw_stem);
 
                 let prefix = val
                     .get("prefix")
@@ -117,9 +105,9 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
                         email,
                         auth_file: path_str,
                         rem_5h: 100,
-                        reset_5h: "4h 59m".to_string(),
+                        reset_5h: UNFETCHED_RESET.to_string(),
                         rem_wk: 100,
-                        reset_wk: "4d 23h".to_string(),
+                        reset_wk: UNFETCHED_RESET.to_string(),
                         is_critical: false,
                         is_warning: false,
                         has_error: false,
@@ -128,25 +116,25 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
                             QuotaPool {
                                 label: "Gemini Wk".to_string(),
                                 percent: 100,
-                                reset: "4d 23h".to_string(),
+                                reset: UNFETCHED_RESET.to_string(),
                                 pace: "~0%".to_string(),
                             },
                             QuotaPool {
                                 label: "Gemini 5h".to_string(),
                                 percent: 100,
-                                reset: "4h 59m".to_string(),
+                                reset: UNFETCHED_RESET.to_string(),
                                 pace: "~0%".to_string(),
                             },
                             QuotaPool {
                                 label: "Claude Wk".to_string(),
                                 percent: 100,
-                                reset: "6d 23h".to_string(),
+                                reset: UNFETCHED_RESET.to_string(),
                                 pace: "~0%".to_string(),
                             },
                             QuotaPool {
                                 label: "Claude 5h".to_string(),
                                 percent: 100,
-                                reset: "4h 59m".to_string(),
+                                reset: UNFETCHED_RESET.to_string(),
                                 pace: "~0%".to_string(),
                             },
                         ],
@@ -631,5 +619,52 @@ pub fn format_relative_reset(iso_time: &str) -> String {
         }
     } else {
         "4h 30m".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn unfetched_marker_transitions_cleanly_even_when_real_reset_is_4h59m() {
+        let mut acc = AccountQuota {
+            prefix: "agy1".to_string(),
+            reset_5h: UNFETCHED_RESET.to_string(),
+            reset_wk: UNFETCHED_RESET.to_string(),
+            pools: vec![QuotaPool {
+                label: "Gemini 5h".to_string(),
+                percent: 100,
+                reset: UNFETCHED_RESET.to_string(),
+                pace: "~0%".to_string(),
+            }],
+            ..Default::default()
+        };
+        assert!(is_unfetched(&acc));
+
+        // Incluso cuando la respuesta real coincide con el valor por defecto "4h 59m",
+        // ya NO debe considerarse sin consultar.
+        apply_quota_data(
+            &mut acc,
+            &json!({
+                "groups": [{
+                    "displayName": "Gemini",
+                    "buckets": [{"window": "5h", "remainingFraction": 1.0}]
+                }]
+            }),
+        );
+        assert_eq!(acc.reset_5h, "4h 59m");
+        assert!(!is_unfetched(&acc));
+
+        // Y si una cuenta nueva recibe error HTTP, tampoco queda marcada como pendiente.
+        let mut err_acc = AccountQuota {
+            prefix: "agy2".to_string(),
+            reset_5h: UNFETCHED_RESET.to_string(),
+            ..Default::default()
+        };
+        assert!(is_unfetched(&err_acc));
+        apply_quota_error(&mut err_acc, 401, &json!({}));
+        assert!(!is_unfetched(&err_acc));
     }
 }

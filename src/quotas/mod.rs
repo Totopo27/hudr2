@@ -47,12 +47,17 @@ impl QuotaManager {
     pub fn sync_account_health_for_model(acc: &mut AccountQuota, active_model: &str) {
         cliproxy::sync_account_health_for_model(acc, active_model);
     }
+
+    /// Indica si la cuenta aún no ha recibido respuesta inicial del endpoint de cuotas.
+    pub fn is_unfetched(acc: &AccountQuota) -> bool {
+        cliproxy::is_unfetched(acc)
+    }
 }
 
 /// Alias / fachada para mantener compatibilidad total con llamadas existentes a `QuotaCollector`.
 pub type QuotaCollector = QuotaManager;
 
 pub use cliproxy::{
-    EffectiveAccountHealth, calculate_quota_pace, evaluate_account_for_model,
-    format_relative_reset, resolve_model_family, sync_account_health_for_model,
+    EffectiveAccountHealth, UNFETCHED_RESET, calculate_quota_pace, evaluate_account_for_model,
+    format_relative_reset, is_unfetched, resolve_model_family, sync_account_health_for_model,
 };

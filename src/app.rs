@@ -210,9 +210,8 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
         accounts
             .into_iter()
             .filter(|a| {
-                let is_unfetched = a.pools.is_empty()
-                    || (a.reset_5h == "4h 59m" && a.reset_wk == "4d 23h" && !a.has_error);
-                active_prefixes.contains(&a.prefix.to_lowercase()) || is_unfetched
+                active_prefixes.contains(&a.prefix.to_lowercase())
+                    || QuotaCollector::is_unfetched(a)
             })
             .collect()
     };
