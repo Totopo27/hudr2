@@ -1122,13 +1122,18 @@ pub fn render_screen_with_diff(
                 .all_active_prefixes
                 .contains(&a.prefix.to_lowercase())
     });
-    let critical_action = if has_active_critical {
-        format!("{CORAL}x: migrar ({target_healthy}){TEXT_DIM} \u{00b7} {RESET}")
+    let (audit_label, critical_action) = if has_active_critical {
+        (
+            "a: aud",
+            format!("{CORAL}x: migrar ({target_healthy}){TEXT_DIM} \u{00b7} {RESET}"),
+        )
     } else {
-        String::new()
+        ("a: auditar", String::new())
     };
     lines.push(truncate_to_width(
-        &format!("{TEXT_DIM} s: sync \u{00b7} r: act \u{00b7} {critical_action}q: salir{RESET}"),
+        &format!(
+            "{TEXT_DIM} s: sync \u{00b7} r: act \u{00b7} {audit_label} \u{00b7} {critical_action}q: salir{RESET}"
+        ),
         width,
     ));
 

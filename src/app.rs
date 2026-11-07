@@ -11,14 +11,21 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, accounts_copy, is_tree_collapsed) = {
+    let (project_dir, mut accounts_copy, is_tree_collapsed, cache_path) = {
         let state = app_state.read().await;
+        let cp = state
+            .config_path
+            .as_deref()
+            .map(QuotaCollector::quota_cache_path_for);
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
             state.collapsed_cards[2],
+            cp,
         )
     };
+    QuotaCollector::discover_accounts(&mut accounts_copy);
+    QuotaCollector::hydrate_accounts_from_cache(&mut accounts_copy, cache_path.as_deref());
 
     let panes = HerdrClient::get_panes();
     let (my_pane_id, my_tab_id) = HerdrClient::get_current_pane_and_tab(&panes);
@@ -110,8 +117,11 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.ecosystem = eco;
         }
 
-        // Descubrir cuentas preservando los valores de cuota ya obtenidos
+        // Descubrir cuentas e hidratar desde caché en disco (0ms) cuando hay config_path activo
         QuotaCollector::discover_accounts(&mut state.snapshot.accounts);
+        if let Some(ref cp) = cache_path {
+            QuotaCollector::hydrate_accounts_from_cache(&mut state.snapshot.accounts, Some(cp));
+        }
         let active_model = if !state.snapshot.agent_session.model.is_empty() {
             state.snapshot.agent_session.model.clone()
         } else {
@@ -140,15 +150,126 @@ impl Drop for FetchGuard {
     }
 }
 
+/// Selecciona y ordena las cuentas a consultar según prioridad de estado:
+/// - Prioridad 0: cuenta activa del espacio actual (`local_prefix`) -> consulta inmediata (`0s`).
+/// - Prioridad 1: cuentas activas en otros paneles (`active_prefixes`).
+/// - Prioridad 2: cuentas inactivas (en `force_all` todas salvo cooldown 429; en modo selectivo solo nuevas/vencidas).
+pub fn select_accounts_for_refresh(
+    accounts: &[AccountQuota],
+    local_prefix: Option<&str>,
+    active_prefixes: &std::collections::HashSet<String>,
+    force_all: bool,
+    rate_limited: bool,
+) -> Vec<AccountQuota> {
+    let local_lower = local_prefix.map(str::to_lowercase);
+    let mut tiered: Vec<(u8, AccountQuota)> = accounts
+        .iter()
+        .filter_map(|acc| {
+            let p_low = acc.prefix.to_lowercase();
+            let tier = if local_lower.as_deref() == Some(p_low.as_str()) {
+                0
+            } else if active_prefixes.contains(&p_low) {
+                1
+            } else {
+                2
+            };
+
+            let include = if tier <= 1 {
+                true
+            } else if rate_limited {
+                false
+            } else if force_all {
+                true
+            } else {
+                QuotaCollector::needs_refresh(acc)
+            };
+
+            include.then(|| (tier, acc.clone()))
+        })
+        .collect();
+
+    tiered.sort_by(|(ta, a), (tb, b)| ta.cmp(tb).then_with(|| a.prefix.cmp(&b.prefix)));
+    tiered.into_iter().map(|(_, acc)| acc).collect()
+}
+
+/// Cuando una cuenta activa entra en zona amarilla (`is_warning`, `<= 30%` libre) o crítica (`<= 15%`),
+/// devuelve las mejores candidatas a migración cuya caché aún no sea fresca (`> max_fresh_age_secs`),
+/// deteniéndose en cuanto ya existan `target_ready` candidatas frescas y sanas listas.
+pub fn select_yellow_zone_prewarm_candidates(
+    accounts: &[AccountQuota],
+    active_prefixes: &std::collections::HashSet<String>,
+    active_model: &str,
+    max_fresh_age_secs: i64,
+    target_ready: usize,
+) -> Vec<AccountQuota> {
+    let any_active_pressured = accounts.iter().any(|a| {
+        if !active_prefixes.contains(&a.prefix.to_lowercase()) {
+            return false;
+        }
+        let eff = QuotaCollector::evaluate_account_for_model(a, active_model);
+        eff.is_warning || eff.is_critical
+    });
+    if !any_active_pressured {
+        return Vec::new();
+    }
+
+    let already_ready = accounts
+        .iter()
+        .filter(|a| {
+            if active_prefixes.contains(&a.prefix.to_lowercase()) || a.has_error {
+                return false;
+            }
+            let eff = QuotaCollector::evaluate_account_for_model(a, active_model);
+            !eff.is_critical && eff.rem_5h > 30 && QuotaCollector::is_fresh_within(a, max_fresh_age_secs)
+        })
+        .count();
+
+    if already_ready >= target_ready {
+        return Vec::new();
+    }
+
+    let ranked_prefixes =
+        crate::cleanup::rank_migration_candidates_for_model(accounts, active_prefixes, active_model);
+    ranked_prefixes
+        .into_iter()
+        .filter_map(|pfx| {
+            accounts.iter().find(|a| {
+                a.prefix.eq_ignore_ascii_case(&pfx)
+                    && !QuotaCollector::is_fresh_within(a, max_fresh_age_secs)
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool, force_all: bool) {
+    force_refresh_with_notify(app_state, interactive, force_all, None).await;
+}
+
+pub async fn force_refresh_with_notify(
+    app_state: &Arc<RwLock<AppState>>,
+    interactive: bool,
+    force_all: bool,
+    notify: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    let wake = || {
+        if let Some(cb) = notify {
+            cb();
+        }
+    };
+
     if interactive {
         let mut state = app_state.write().await;
-        let notice = if QuotaCollector::is_available() {
-            "+ Refrescando cuotas y contexto..."
-        } else {
+        let notice = if !QuotaCollector::is_available() {
             "+ Refrescando contexto..."
+        } else if force_all {
+            "+ Auditando todas las cuotas..."
+        } else {
+            "+ Refrescando cuota activa y contexto..."
         };
-        state.set_flash_notice(Some(notice.to_string()), 4000);
+        state.set_flash_notice(Some(notice.to_string()), 4500);
+        drop(state);
+        wake();
     }
 
     crate::git::clear_git_cache();
@@ -158,12 +279,15 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
     crate::ecosystem::clear_ecosystem_cache();
 
     refresh_all(app_state).await;
+    wake();
 
     // Si no hay proveedor de cuotas disponible, evitar llamadas de red innecesarias
     if !QuotaCollector::is_available() {
         if interactive {
             let mut state = app_state.write().await;
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+            drop(state);
+            wake();
         }
         return;
     }
@@ -179,16 +303,23 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
                 Some("+ Contexto actualizado (cuotas en curso...)".to_string()),
                 4000,
             );
+            drop(state);
+            wake();
         }
         return;
     }
     let _fetch_guard = FetchGuard;
 
-    let (accounts, active_prefixes) = {
+    let (accounts, local_prefix, active_prefixes, cache_path) = {
         let state = app_state.read().await;
         (
             state.snapshot.accounts.clone(),
+            state.snapshot.agent_session.local_prefix.clone(),
             state.snapshot.agent_session.all_active_prefixes.clone(),
+            state
+                .config_path
+                .as_deref()
+                .map(QuotaCollector::quota_cache_path_for),
         )
     };
 
@@ -196,42 +327,58 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
         if interactive {
             let mut state = app_state.write().await;
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
+            drop(state);
+            wake();
         }
         return;
     }
 
-    // Estrategia de Refresco Inteligente (Snapshot Inicial / Manual vs Polling Periódico):
-    // - Si force_all es true (arranque inicial o tecla 'r'): se consultan todas las cuentas para pintar la foto completa.
-    // - Si force_all es false (intervalo periódico de 2m): SOLO se consultan las cuentas activas en uso en alguna sesión
-    //   o aquellas recién descubiertas que aún tengan los valores placeholder iniciales.
-    let target_accounts: Vec<AccountQuota> = if force_all {
-        accounts
-    } else {
-        accounts
-            .into_iter()
-            .filter(|a| {
-                active_prefixes.contains(&a.prefix.to_lowercase())
-                    || QuotaCollector::is_unfetched(a)
-            })
-            .collect()
-    };
+    let target_accounts = select_accounts_for_refresh(
+        &accounts,
+        local_prefix.as_deref(),
+        &active_prefixes,
+        force_all,
+        QuotaCollector::is_rate_limit_cooling_down(),
+    );
 
-    if target_accounts.is_empty() {
-        if interactive {
-            let mut state = app_state.write().await;
-            state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
-        }
-        return;
-    }
+    let total = target_accounts.len();
+    let mut calls_made = 0usize;
+    let mut halted_by_rate_limit = false;
+    let mut checked_prefixes = std::collections::HashSet::new();
 
-    // Staggering de 3 segundos entre consultas de cuentas con actualización progresiva en la UI
-    let mut any_updated = false;
     for (idx, mut acc) in target_accounts.into_iter().enumerate() {
-        if idx > 0 {
+        let is_active = local_prefix
+            .as_deref()
+            .is_some_and(|lp| lp.eq_ignore_ascii_case(&acc.prefix))
+            || active_prefixes.contains(&acc.prefix.to_lowercase());
+
+        if !is_active && QuotaCollector::is_rate_limit_cooling_down() {
+            halted_by_rate_limit = true;
+            break;
+        }
+
+        if total > 1 {
+            let progress_msg = if force_all && interactive {
+                format!("+ Auditando cuotas ({}/{total} \u{00b7} {})...", idx + 1, acc.prefix)
+            } else {
+                format!("+ Cuotas ({}/{total} \u{00b7} {})...", idx + 1, acc.prefix)
+            };
+            let mut state = app_state.write().await;
+            state.check_flash_notice_expiry();
+            if interactive || state.flash_notice.is_none() {
+                state.set_flash_notice(Some(progress_msg), 5000);
+                drop(state);
+                wake();
+            }
+        }
+
+        if calls_made > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
-        QuotaCollector::fetch_quota_for_account(&mut acc).await;
-        any_updated = true;
+
+        checked_prefixes.insert(acc.prefix.to_lowercase());
+        QuotaCollector::fetch_quota_for_account_with_cache(&mut acc, cache_path.as_deref()).await;
+        calls_made += 1;
 
         let mut state = app_state.write().await;
         let active_model = if !state.snapshot.agent_session.model.is_empty() {
@@ -250,16 +397,89 @@ pub async fn force_refresh(app_state: &Arc<RwLock<AppState>>, interactive: bool,
         }
         state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
         state.needs_redraw = true;
+        drop(state);
+        wake();
+    }
+
+    // Pre-calentamiento silencioso desde Zona Amarilla (`is_warning` <= 30% libre):
+    // valida hasta 3 mejores candidatas a migración para que 'x' sea instantáneo al llegar a crítico.
+    if !force_all && !halted_by_rate_limit {
+        const PREWARM_FRESH_SECS: i64 = 600;
+        const PREWARM_TARGET_READY: usize = 3;
+        const PREWARM_MAX_CHECKS: usize = 4;
+        let mut prewarm_checks = 0usize;
+
+        while prewarm_checks < PREWARM_MAX_CHECKS && !QuotaCollector::is_rate_limit_cooling_down() {
+            let next_cand = {
+                let state = app_state.read().await;
+                let active_model = if !state.snapshot.agent_session.model.is_empty() {
+                    state.snapshot.agent_session.model.clone()
+                } else {
+                    state.snapshot.agent_session.model_short.clone()
+                };
+                select_yellow_zone_prewarm_candidates(
+                    &state.snapshot.accounts,
+                    &state.snapshot.agent_session.all_active_prefixes,
+                    &active_model,
+                    PREWARM_FRESH_SECS,
+                    PREWARM_TARGET_READY,
+                )
+                .into_iter()
+                .find(|c| !checked_prefixes.contains(&c.prefix.to_lowercase()))
+            };
+
+            let Some(mut cand) = next_cand else {
+                break;
+            };
+
+            if calls_made > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            checked_prefixes.insert(cand.prefix.to_lowercase());
+            prewarm_checks += 1;
+            calls_made += 1;
+
+            QuotaCollector::fetch_quota_for_account_with_cache(&mut cand, cache_path.as_deref())
+                .await;
+
+            let mut state = app_state.write().await;
+            let active_model = if !state.snapshot.agent_session.model.is_empty() {
+                state.snapshot.agent_session.model.clone()
+            } else {
+                state.snapshot.agent_session.model_short.clone()
+            };
+            QuotaCollector::sync_account_health_for_model(&mut cand, &active_model);
+            if let Some(existing) = state
+                .snapshot
+                .accounts
+                .iter_mut()
+                .find(|a| a.prefix == cand.prefix || a.auth_file == cand.auth_file)
+            {
+                *existing = cand;
+            }
+            state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            state.needs_redraw = true;
+            drop(state);
+            wake();
+        }
     }
 
     if interactive {
         let mut state = app_state.write().await;
-        let msg = if any_updated {
-            "+ Cuotas y contexto actualizados"
+        let msg = if halted_by_rate_limit {
+            "[!] Rate limit detectado: pausa preventiva en inactivas"
+        } else if calls_made > 0 {
+            if force_all {
+                "+ Auditor\u{00ed}a de cuotas y contexto completada"
+            } else {
+                "+ Cuotas y contexto actualizados"
+            }
         } else {
-            "+ Contexto actualizado"
+            "+ Contexto actualizado (cuotas al d\u{00ed}a)"
         };
         state.set_flash_notice(Some(msg.to_string()), 4000);
+        drop(state);
+        wake();
     }
 }
 
@@ -325,22 +545,39 @@ pub fn open_folder_in_explorer(target_path: &str) {
 }
 
 pub async fn sync_integrations_action(app_state: &Arc<RwLock<AppState>>) {
+    sync_integrations_action_with_notify(app_state, None).await;
+}
+
+pub async fn sync_integrations_action_with_notify(
+    app_state: &Arc<RwLock<AppState>>,
+    notify: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    let wake = || {
+        if let Some(cb) = notify {
+            cb();
+        }
+    };
+
     {
         let mut state = app_state.write().await;
         state.set_flash_notice(Some(">> Sincronizando integraciones...".to_string()), 6000);
     }
+    wake();
 
-    // 1. Sincronización nativa en Rust (cero dependencias externas)
+    // 1. Sincronización nativa en Rust (~20ms) y aviso inmediato sin bloqueo por cuotas
     let sync_res = crate::sync::sync_integrations_native().await;
     let notice = match sync_res {
         Ok(res) => format!("+ {}", res.message),
         Err(err) => format!("[!] Sync: {err}"),
     };
 
-    force_refresh(app_state, false, true).await;
+    refresh_all(app_state).await;
 
-    let mut state = app_state.write().await;
-    state.set_flash_notice(Some(notice), 4000);
+    {
+        let mut state = app_state.write().await;
+        state.set_flash_notice(Some(notice), 5000);
+    }
+    wake();
 }
 
 pub async fn release_sessions_action(app_state: &Arc<RwLock<AppState>>) {
@@ -378,7 +615,7 @@ pub async fn release_sessions_action(app_state: &Arc<RwLock<AppState>>) {
 }
 
 pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, accounts, active_prefixes, active_model) = {
+    let (project_dir, mut accounts, active_prefixes, active_model, cache_path) = {
         let state = app_state.read().await;
         let model = if !state.snapshot.agent_session.model.is_empty() {
             state.snapshot.agent_session.model.clone()
@@ -390,8 +627,55 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.accounts.clone(),
             state.snapshot.agent_session.all_active_prefixes.clone(),
             model,
+            state
+                .config_path
+                .as_deref()
+                .map(QuotaCollector::quota_cache_path_for),
         )
     };
+
+    // Respaldo puntual: si la candidata #1 no fue pre-verificada en zona amarilla (ej. caída brusca),
+    // validar solo esa candidata (máx. 2 intentos) en vez de escanear todas las cuentas.
+    for _ in 0..2 {
+        let target_pfx = crate::cleanup::get_best_healthy_target_prefix_for_model(
+            &accounts,
+            &active_prefixes,
+            &active_model,
+        );
+        let Some(idx) = accounts.iter().position(|a| {
+            a.prefix.eq_ignore_ascii_case(&target_pfx)
+                && !active_prefixes.contains(&a.prefix.to_lowercase())
+        }) else {
+            break;
+        };
+        if QuotaCollector::is_fresh_within(&accounts[idx], 600)
+            || !std::path::Path::new(&accounts[idx].auth_file).exists()
+        {
+            break;
+        }
+        QuotaCollector::fetch_quota_for_account_with_cache(
+            &mut accounts[idx],
+            cache_path.as_deref(),
+        )
+        .await;
+        QuotaCollector::sync_account_health_for_model(&mut accounts[idx], &active_model);
+        let refreshed = accounts[idx].clone();
+        {
+            let mut state = app_state.write().await;
+            if let Some(existing) = state
+                .snapshot
+                .accounts
+                .iter_mut()
+                .find(|a| a.prefix == refreshed.prefix || a.auth_file == refreshed.auth_file)
+            {
+                *existing = refreshed.clone();
+            }
+            state.needs_redraw = true;
+        }
+        if !refreshed.has_error && !refreshed.is_critical {
+            break;
+        }
+    }
 
     let (_, notice) = tokio::task::spawn_blocking(move || {
         crate::cleanup::migrate_critical_sessions_for_model(

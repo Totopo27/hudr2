@@ -5,7 +5,7 @@
 | File | Responsibility |
 | :--- | :--- |
 | [`src/main.rs`](../../../src/main.rs) | CLI parser (`--once`, `--pane`, `--cwd`, `--config`, `--help`), SGR button-only mouse guard (`\x1b[?1000h\x1b[?1006h`), `notify` 300ms debounced filesystem watcher, Herdr IPC subscriber hookup, and reactive `mpsc` event loop. |
-| [`src/app.rs`](../../../src/app.rs) | Orchestrates `refresh_all` (parallel `spawn_blocking` tasks for session, git, engram, tree, MCP, ecosystem), `PartialEq` snapshot diffing, `force_refresh` (3s staggered quota fetching), folder opening, sync, session release, and critical account migration. |
+| [`src/app.rs`](../../../src/app.rs) | Orchestrates `refresh_all` (parallel `spawn_blocking` tasks for session, git, engram, tree, MCP, ecosystem + `quotas_cache.json` hydration), `PartialEq` snapshot diffing, state-driven `force_refresh_with_notify` (active-first 0s, 3s staggered background + yellow-zone candidate pre-warming + live progress notices), non-blocking `sync_integrations_action_with_notify`, session release, and critical account migration. |
 | [`src/models.rs`](../../../src/models.rs) | Data structures (`TelemetrySnapshot`, `AgentSession`, `AccountQuota`, `QuotaPool`, `GitTelemetry`, `GitFileChange`, `EngramTelemetry`, `HandoffSummary`, `ProjectTreeData`, `McpServer`, `EcosystemTelemetry`, `HerdrPane`). All derive `Clone, Debug, PartialEq`. |
 | [`src/state.rs`](../../../src/state.rs) | `AppState` (`snapshot`, `collapsed_cards`, `hidden_cards`, `card_bounds`, `scroll_offset`, `flash_notice`, `selected_diff_file`, `needs_redraw`), atomic config persistence (`load_config` / `save_config`), and mouse hit-testing (`handle_mouse_click`). |
 | [`src/ui.rs`](../../../src/ui.rs) | Pure ANSI renderer (`render_screen` / `render_screen_with_diff`), width-safe primitives (`strip_ansi`, `string_width`, `truncate_to_width`, `draw_top`, `draw_row`, `draw_divider`, `draw_bottom`), and all 9 cards + footer. |
@@ -55,8 +55,9 @@
      - `type: "message"` (`role: "assistant"` usage tokens, cost, tool calls; `role: "toolResult"` with `toolName: "todo"` for `SessionTodo` items).
    - Context window resolved from `<agent_dir>/cpamc-models-cache.json`, then `<agent_dir>/models-store.json`, then `resolve_model_context_limit`.
 2. **OpenCode (`opencode.db`):**
-   - Correlates active Herdr panes (`focused` > `working` > `cwd`) against `session_v2 WHERE time_archived IS NULL`.
-   - Message token/tool/file-change stats in `session_message` are cached by `(session_id, time_updated)` to avoid rescanning JSON blobs when idle.
+   - Resolves `opencode.db` by max `mtime` across `opencode.db`, `opencode.db-wal`, and `opencode.db-shm`.
+   - Pairs modern Drizzle tables (`session` + `message` + `part`, OpenCode 1.19+) cleanly when coexisting with legacy `session_v2` + `session_message` + `session_part`, hydrating `agent`, `model` (`providerID` + `modelID`), `tokens_input`, `tokens_output`, and `cost` from `message.data` / `part.data` JSON when `session` lacks SQL columns.
+   - Message token/tool/file-change stats are cached by `(session_id, time_updated)` to avoid rescanning JSON blobs when idle.
 
 ---
 

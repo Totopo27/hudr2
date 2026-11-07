@@ -6,6 +6,7 @@
 pub mod cliproxy;
 
 use crate::models::AccountQuota;
+use std::path::{Path, PathBuf};
 
 pub struct QuotaManager;
 
@@ -20,9 +21,27 @@ impl QuotaManager {
         cliproxy::discover_accounts(target_list);
     }
 
+    /// Hidrata cuentas desde la caché compartida (`quotas_cache.json`) recalculando tiempos relativos.
+    pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Option<&Path>) {
+        cliproxy::hydrate_accounts_from_cache(accounts, cache_path);
+    }
+
+    /// Devuelve la ruta de `quotas_cache.json` hermana al archivo de configuración.
+    pub fn quota_cache_path_for(config_path: &Path) -> PathBuf {
+        cliproxy::quota_cache_path_for(config_path)
+    }
+
     /// Consulta y actualiza la cuota remota para una cuenta dada.
     pub async fn fetch_quota_for_account(acc: &mut AccountQuota) {
         cliproxy::fetch_quota_for_account(acc).await;
+    }
+
+    /// Consulta la cuota remota y persiste el resultado en la caché compartida opcional.
+    pub async fn fetch_quota_for_account_with_cache(
+        acc: &mut AccountQuota,
+        cache_path: Option<&Path>,
+    ) -> u16 {
+        cliproxy::fetch_quota_for_account_with_cache(acc, cache_path).await
     }
 
     /// Aplica datos crudos de cuota (JSON) a la estructura de la cuenta.
@@ -52,12 +71,30 @@ impl QuotaManager {
     pub fn is_unfetched(acc: &AccountQuota) -> bool {
         cliproxy::is_unfetched(acc)
     }
+
+    /// Indica si la cuenta requiere consulta por ser nueva, haber cambiado credencial o haber vencido su `resetTime`.
+    pub fn needs_refresh(acc: &AccountQuota) -> bool {
+        cliproxy::needs_refresh(acc)
+    }
+
+    /// Indica si la cuenta fue verificada dentro de `max_age_secs` y sigue sana/vigente.
+    pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
+        cliproxy::is_fresh_within(acc, max_age_secs)
+    }
+
+    /// Indica si el freno preventivo ante HTTP 429 está activo.
+    pub fn is_rate_limit_cooling_down() -> bool {
+        cliproxy::is_rate_limit_cooling_down()
+    }
 }
 
 /// Alias / fachada para mantener compatibilidad total con llamadas existentes a `QuotaCollector`.
 pub type QuotaCollector = QuotaManager;
 
 pub use cliproxy::{
-    EffectiveAccountHealth, UNFETCHED_RESET, calculate_quota_pace, evaluate_account_for_model,
-    format_relative_reset, is_unfetched, resolve_model_family, sync_account_health_for_model,
+    EffectiveAccountHealth, UNFETCHED_RESET, calculate_quota_pace, clear_quota_runtime_cache,
+    evaluate_account_for_model, format_relative_reset, hydrate_accounts_from_cache,
+    is_fresh_within, is_rate_limit_cooling_down, is_unfetched, needs_refresh,
+    quota_cache_path_for, record_cached_quota_at, resolve_model_family,
+    sync_account_health_for_model, trigger_rate_limit_cooldown,
 };

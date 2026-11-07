@@ -1,6 +1,6 @@
 # HUDR2 Card Catalog
 
-`hudr2` renders 9 collapsible cards (indexed `0..8`, toggled via keys `1..9`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer.
+`hudr2` renders 11 collapsible cards (toggled via keys `1..9`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
 
 | Index | Key | `CardBounds.id` | Title in `src/ui.rs` | Default State |
 | :---: | :---: | :--- | :--- | :--- |

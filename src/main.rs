@@ -101,6 +101,7 @@ impl Drop for TerminalGuard {
 enum MainMsg {
     Terminal(Event),
     DataChanged { git_touched: bool },
+    Redraw,
     QuotaTick,
     Quit,
 }
@@ -159,14 +160,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
         crossterm::cursor::Hide
     )?;
 
-    // 2. Disparar de inmediato la consulta de cuotas de red en segundo plano (snapshot inicial completo)
+    // 2. Disparar en segundo plano el refresco selectivo de cuotas (activas + nuevas/vencidas; el resto carga en 0ms desde caché)
     let (tx, mut rx) = mpsc::unbounded_channel::<MainMsg>();
 
     if hudr2::quotas::QuotaCollector::is_available() {
         let initial_fetch_state = app_state.clone();
         let tx_quota = tx.clone();
         tokio::spawn(async move {
-            app::force_refresh(&initial_fetch_state, false, true).await;
+            let wake_tx = tx_quota.clone();
+            app::force_refresh_with_notify(
+                &initial_fetch_state,
+                false,
+                false,
+                Some(&move || {
+                    let _ = wake_tx.send(MainMsg::Redraw);
+                }),
+            )
+            .await;
             let _ = tx_quota.send(MainMsg::DataChanged { git_touched: false });
         });
     }
@@ -461,6 +471,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         git_dirty = true;
                     }
                 }
+                MainMsg::Redraw => {}
                 MainMsg::QuotaTick => {
                     quota_tick = true;
                 }
@@ -480,7 +491,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         let state_ref = app_state.clone();
                                         let tx_done = tx.clone();
                                         tokio::spawn(async move {
-                                            app::sync_integrations_action(&state_ref).await;
+                                            let wake_tx = tx_done.clone();
+                                            let notify_cb = move || {
+                                                let _ = wake_tx.send(MainMsg::Redraw);
+                                            };
+                                            app::sync_integrations_action_with_notify(
+                                                &state_ref,
+                                                Some(&notify_cb),
+                                            )
+                                            .await;
+                                            app::force_refresh_with_notify(
+                                                &state_ref,
+                                                false,
+                                                false,
+                                                Some(&notify_cb),
+                                            )
+                                            .await;
                                             let _ = tx_done
                                                 .send(MainMsg::DataChanged { git_touched: false });
                                         });
@@ -515,14 +541,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         _ => {}
                     },
                     Event::Key(key) => {
+                        let norm_code = match key.code {
+                            KeyCode::Char(ch) => KeyCode::Char(ch.to_ascii_lowercase()),
+                            other => other,
+                        };
                         if key.modifiers.contains(KeyModifiers::CONTROL)
-                            && key.code == KeyCode::Char('c')
+                            && norm_code == KeyCode::Char('c')
                         {
                             should_quit = true;
                         } else {
                             let mut state = app_state.write().await;
                             state.needs_redraw = true;
-                            match key.code {
+                            match norm_code {
                                 KeyCode::Char('q') => should_quit = true,
                                 KeyCode::Char('c') => state.toggle_all_collapse(),
                                 KeyCode::Char('1') => state.toggle_card(0), // Estado
@@ -540,7 +570,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     let state_ref = app_state.clone();
                                     let tx_done = tx.clone();
                                     tokio::spawn(async move {
-                                        app::sync_integrations_action(&state_ref).await;
+                                        let wake_tx = tx_done.clone();
+                                        let notify_cb = move || {
+                                            let _ = wake_tx.send(MainMsg::Redraw);
+                                        };
+                                        app::sync_integrations_action_with_notify(
+                                            &state_ref,
+                                            Some(&notify_cb),
+                                        )
+                                        .await;
+                                        app::force_refresh_with_notify(
+                                            &state_ref,
+                                            false,
+                                            false,
+                                            Some(&notify_cb),
+                                        )
+                                        .await;
                                         let _ = tx_done
                                             .send(MainMsg::DataChanged { git_touched: false });
                                     });
@@ -549,7 +594,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     let state_ref = app_state.clone();
                                     let tx_done = tx.clone();
                                     tokio::spawn(async move {
-                                        app::force_refresh(&state_ref, true, true).await;
+                                        let wake_tx = tx_done.clone();
+                                        app::force_refresh_with_notify(
+                                            &state_ref,
+                                            true,
+                                            false,
+                                            Some(&move || {
+                                                let _ = wake_tx.send(MainMsg::Redraw);
+                                            }),
+                                        )
+                                        .await;
+                                        let _ = tx_done
+                                            .send(MainMsg::DataChanged { git_touched: false });
+                                    });
+                                }
+                                KeyCode::Char('a') => {
+                                    let state_ref = app_state.clone();
+                                    let tx_done = tx.clone();
+                                    tokio::spawn(async move {
+                                        let wake_tx = tx_done.clone();
+                                        app::force_refresh_with_notify(
+                                            &state_ref,
+                                            true,
+                                            true,
+                                            Some(&move || {
+                                                let _ = wake_tx.send(MainMsg::Redraw);
+                                            }),
+                                        )
+                                        .await;
                                         let _ = tx_done
                                             .send(MainMsg::DataChanged { git_touched: false });
                                     });
@@ -618,7 +690,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let s_clone = app_state.clone();
             let tx_done = tx.clone();
             tokio::spawn(async move {
-                app::force_refresh(&s_clone, false, false).await;
+                let wake_tx = tx_done.clone();
+                app::force_refresh_with_notify(
+                    &s_clone,
+                    false,
+                    false,
+                    Some(&move || {
+                        let _ = wake_tx.send(MainMsg::Redraw);
+                    }),
+                )
+                .await;
                 let _ = tx_done.send(MainMsg::DataChanged { git_touched: false });
             });
         }

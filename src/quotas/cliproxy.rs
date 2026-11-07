@@ -7,13 +7,276 @@
 use crate::config::{QUOTA_URL, USER_AGENT};
 use crate::models::{AccountQuota, QuotaPool};
 use crate::paths::resolve_auths_dir;
+use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Marcador explícito para cuentas descubiertas en disco cuyas cuotas aún no se han consultado.
 /// Jamás es producido por [`format_relative_reset`], evitando falsos positivos cuando una ventana
 /// real coincide exactamente con `4h 59m` o `4d 23h`.
 pub const UNFETCHED_RESET: &str = "...";
+
+/// Segundos de enfriamiento preventivo para cuentas inactivas tras recibir HTTP 429 de Google.
+const RATE_LIMIT_COOLDOWN_SECS: i64 = 90;
+
+static RATE_LIMIT_UNTIL_EPOCH: AtomicI64 = AtomicI64::new(0);
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct CachedQuotaRecord {
+    fetched_at: i64,
+    auth_mtime: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_body: Option<serde_json::Value>,
+}
+
+#[derive(Default)]
+struct QuotaCacheState {
+    loaded_path: Option<PathBuf>,
+    loaded_mtime: Option<SystemTime>,
+    entries: HashMap<String, CachedQuotaRecord>,
+}
+
+static QUOTA_CACHE_STATE: LazyLock<Mutex<QuotaCacheState>> =
+    LazyLock::new(|| Mutex::new(QuotaCacheState::default()));
+
+/// Devuelve la ruta de `quotas_cache.json` hermana al archivo de configuración `hudr2.json`.
+pub fn quota_cache_path_for(config_path: &Path) -> PathBuf {
+    config_path.with_file_name("quotas_cache.json")
+}
+
+/// Limpia el estado de caché en memoria y el freno de rate-limit (útil para aislamiento en tests).
+pub fn clear_quota_runtime_cache() {
+    RATE_LIMIT_UNTIL_EPOCH.store(0, Ordering::SeqCst);
+    if let Ok(mut guard) = QUOTA_CACHE_STATE.lock() {
+        *guard = QuotaCacheState::default();
+    }
+}
+
+/// Indica si el freno preventivo por HTTP 429 está activo para pausar barridos en segundo plano.
+pub fn is_rate_limit_cooling_down() -> bool {
+    chrono::Utc::now().timestamp() < RATE_LIMIT_UNTIL_EPOCH.load(Ordering::SeqCst)
+}
+
+/// Activa el freno preventivo ante HTTP 429 durante `secs` segundos.
+pub fn trigger_rate_limit_cooldown(secs: i64) {
+    let until = chrono::Utc::now().timestamp() + secs.max(1);
+    RATE_LIMIT_UNTIL_EPOCH.store(until, Ordering::SeqCst);
+}
+
+fn file_mtime_secs(path_str: &str) -> u64 {
+    if path_str.is_empty() {
+        return 0;
+    }
+    Path::new(path_str)
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn sync_disk_cache_if_needed(state: &mut QuotaCacheState, cache_path: &Path) {
+    let disk_mtime = cache_path.metadata().and_then(|m| m.modified()).ok();
+    if state.loaded_path.as_deref() == Some(cache_path)
+        && state.loaded_mtime == disk_mtime
+        && disk_mtime.is_some()
+    {
+        return;
+    }
+
+    if state.loaded_path.as_deref() != Some(cache_path) {
+        state.entries.clear();
+    }
+
+    if let Ok(bytes) = fs::read(cache_path)
+        && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        && let Some(accs_obj) = val.get("accounts").and_then(|a| a.as_object())
+    {
+        for (k, v) in accs_obj {
+            if let Ok(rec) = serde_json::from_value::<CachedQuotaRecord>(v.clone()) {
+                let key = k.to_lowercase();
+                let should_update = state
+                    .entries
+                    .get(&key)
+                    .is_none_or(|existing| rec.fetched_at >= existing.fetched_at);
+                if should_update {
+                    state.entries.insert(key, rec);
+                }
+            }
+        }
+    }
+
+    state.loaded_path = Some(cache_path.to_path_buf());
+    state.loaded_mtime = disk_mtime;
+}
+
+fn persist_disk_cache(state: &mut QuotaCacheState, cache_path: &Path) {
+    if let Some(parent) = cache_path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+        && fs::create_dir_all(parent).is_err()
+    {
+        return;
+    }
+    let payload = serde_json::json!({
+        "version": 1,
+        "accounts": &state.entries,
+    });
+    let Ok(body) = serde_json::to_vec(&payload) else {
+        return;
+    };
+    let tmp = cache_path.with_extension("json.tmp");
+    if fs::write(&tmp, body)
+        .and_then(|_| fs::rename(&tmp, cache_path))
+        .is_ok()
+    {
+        state.loaded_path = Some(cache_path.to_path_buf());
+        state.loaded_mtime = cache_path.metadata().and_then(|m| m.modified()).ok();
+    } else {
+        let _ = fs::remove_file(&tmp);
+    }
+}
+
+fn has_expired_bucket_window(data: &serde_json::Value, fetched_at: i64, now_epoch: i64) -> bool {
+    let Some(groups) = data.get("groups").and_then(|g| g.as_array()) else {
+        return false;
+    };
+    for grp in groups {
+        let Some(buckets) = grp.get("buckets").and_then(|b| b.as_array()) else {
+            continue;
+        };
+        for b in buckets {
+            if let Some(rt) = b.get("resetTime").and_then(|r| r.as_str())
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(rt)
+            {
+                let reset_ts = dt.timestamp();
+                if fetched_at < reset_ts && now_epoch >= reset_ts {
+                    return true;
+                }
+                if reset_ts <= fetched_at && now_epoch - fetched_at >= 120 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Hidrata cuentas descubiertas desde `quotas_cache.json` (si se provee) y recalcula al instante
+/// los contadores relativos (`en Xh Ym`) y `pace` respecto a la hora actual sin llamadas HTTP.
+pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Option<&Path>) {
+    let Ok(mut guard) = QUOTA_CACHE_STATE.lock() else {
+        return;
+    };
+    if let Some(cp) = cache_path {
+        sync_disk_cache_if_needed(&mut guard, cp);
+    }
+
+    let mut stale_keys = Vec::new();
+    for acc in accounts.iter_mut() {
+        let key = acc.prefix.to_lowercase();
+        let Some(rec) = guard.entries.get(&key).cloned() else {
+            continue;
+        };
+        let cur_mtime = file_mtime_secs(&acc.auth_file);
+        if cur_mtime > 0 && rec.auth_mtime > 0 && cur_mtime != rec.auth_mtime {
+            stale_keys.push(key);
+            acc.has_error = false;
+            acc.error_msg.clear();
+            acc.reset_5h = UNFETCHED_RESET.to_string();
+            acc.reset_wk = UNFETCHED_RESET.to_string();
+            continue;
+        }
+
+        if let Some(ref data) = rec.data {
+            apply_quota_data(acc, data);
+        } else if let Some(status) = rec.error_status {
+            apply_quota_error(
+                acc,
+                status,
+                rec.error_body.as_ref().unwrap_or(&serde_json::Value::Null),
+            );
+        }
+    }
+
+    for k in stale_keys {
+        guard.entries.remove(&k);
+    }
+}
+
+/// Registra una respuesta válida de cuotas en la caché (memoria + disco opcional) con marca temporal explícita.
+pub fn record_cached_quota_at(
+    acc: &mut AccountQuota,
+    data: &serde_json::Value,
+    fetched_at: i64,
+    cache_path: Option<&Path>,
+) {
+    apply_quota_data(acc, data);
+    let rec = CachedQuotaRecord {
+        fetched_at,
+        auth_mtime: file_mtime_secs(&acc.auth_file),
+        data: Some(data.clone()),
+        error_status: None,
+        error_body: None,
+    };
+    if let Ok(mut guard) = QUOTA_CACHE_STATE.lock() {
+        if let Some(cp) = cache_path {
+            sync_disk_cache_if_needed(&mut guard, cp);
+        }
+        guard.entries.insert(acc.prefix.to_lowercase(), rec);
+        if let Some(cp) = cache_path {
+            persist_disk_cache(&mut guard, cp);
+        }
+    }
+}
+
+/// Determina si una cuenta inactiva necesita consulta remota por ser nueva (`unfetched`),
+/// haber cambiado su archivo de credenciales, o haber superado la hora `resetTime` de alguna bolsa.
+pub fn needs_refresh(acc: &AccountQuota) -> bool {
+    if is_unfetched(acc) {
+        return true;
+    }
+    let Ok(guard) = QUOTA_CACHE_STATE.lock() else {
+        return false;
+    };
+    let Some(rec) = guard.entries.get(&acc.prefix.to_lowercase()) else {
+        return false;
+    };
+    let cur_mtime = file_mtime_secs(&acc.auth_file);
+    if cur_mtime > 0 && rec.auth_mtime > 0 && cur_mtime != rec.auth_mtime {
+        return true;
+    }
+    let now_epoch = chrono::Utc::now().timestamp();
+    if let Some(ref data) = rec.data {
+        has_expired_bucket_window(data, rec.fetched_at, now_epoch)
+    } else if rec.error_status == Some(429) {
+        now_epoch - rec.fetched_at >= 120
+    } else {
+        false
+    }
+}
+
+/// Comprueba si una cuenta candidata fue verificada recientemente (`<= max_age_secs`) y sigue vigente.
+pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
+    if is_unfetched(acc) || acc.has_error || needs_refresh(acc) {
+        return false;
+    }
+    let Ok(guard) = QUOTA_CACHE_STATE.lock() else {
+        return false;
+    };
+    let Some(rec) = guard.entries.get(&acc.prefix.to_lowercase()) else {
+        return false;
+    };
+    rec.data.is_some() && (chrono::Utc::now().timestamp() - rec.fetched_at) <= max_age_secs
+}
 
 /// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
 pub fn is_unfetched(acc: &AccountQuota) -> bool {
@@ -151,23 +414,31 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
 
 /// Consulta el endpoint de cuotas de CLIProxy para la cuenta especificada.
 pub async fn fetch_quota_for_account(acc: &mut AccountQuota) {
+    let _ = fetch_quota_for_account_with_cache(acc, None).await;
+}
+
+/// Consulta el endpoint de cuotas y actualiza la caché compartida (`quotas_cache.json`) + freno 429.
+pub async fn fetch_quota_for_account_with_cache(
+    acc: &mut AccountQuota,
+    cache_path: Option<&Path>,
+) -> u16 {
     if !Path::new(&acc.auth_file).exists() {
-        return;
+        return 0;
     }
 
     let raw = match fs::read_to_string(&acc.auth_file) {
         Ok(r) => r,
-        Err(_) => return,
+        Err(_) => return 0,
     };
 
     let val: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return 0,
     };
 
     let token = match val.get("access_token").and_then(|t| t.as_str()) {
         Some(t) => t,
-        None => return,
+        None => return 0,
     };
 
     let project_id = val.get("project_id").and_then(|p| p.as_str()).unwrap_or("");
@@ -183,19 +454,47 @@ pub async fn fetch_quota_for_account(acc: &mut AccountQuota) {
         .send()
         .await
     {
+        let status = res.status().as_u16();
         if res.status().is_success() {
             if let Ok(data) = res.json::<serde_json::Value>().await {
-                apply_quota_data(acc, &data);
+                let now = chrono::Utc::now().timestamp();
+                record_cached_quota_at(acc, &data, now, cache_path);
             }
-        } else {
-            let status = res.status().as_u16();
-            let err_val = res
-                .json::<serde_json::Value>()
-                .await
-                .unwrap_or(serde_json::Value::Null);
-            apply_quota_error(acc, status, &err_val);
+            return status;
         }
+
+        let err_val = res
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or(serde_json::Value::Null);
+        apply_quota_error(acc, status, &err_val);
+
+        if status == 429 || acc.error_msg == "rate limited" {
+            trigger_rate_limit_cooldown(RATE_LIMIT_COOLDOWN_SECS);
+        } else if matches!(status, 401 | 403)
+            && let Ok(mut guard) = QUOTA_CACHE_STATE.lock()
+        {
+            if let Some(cp) = cache_path {
+                sync_disk_cache_if_needed(&mut guard, cp);
+            }
+            guard.entries.insert(
+                acc.prefix.to_lowercase(),
+                CachedQuotaRecord {
+                    fetched_at: chrono::Utc::now().timestamp(),
+                    auth_mtime: file_mtime_secs(&acc.auth_file),
+                    data: None,
+                    error_status: Some(status),
+                    error_body: Some(err_val),
+                },
+            );
+            if let Some(cp) = cache_path {
+                persist_disk_cache(&mut guard, cp);
+            }
+        }
+        return status;
     }
+
+    0
 }
 
 /// Registra estados de error HTTP (401 expirado, 403 TOS/verificación, 429 rate limit) en la cuenta.

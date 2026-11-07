@@ -16,8 +16,8 @@ pub use model_info::{
 };
 pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
 pub use session::{
-    DbSessionRecord, has_column, resolve_session_for_pane, resolve_session_table_name,
-    session_select_columns, table_exists,
+    DbSessionRecord, has_column, hydrate_session_from_messages, paired_message_and_part_tables,
+    resolve_session_for_pane, resolve_session_table_name, session_select_columns, table_exists,
 };
 
 use crate::models::{AccountQuota, AttributedChanges, HerdrPane, OpenCodeSession};
@@ -31,6 +31,9 @@ use std::sync::{LazyLock, Mutex};
 struct MessageStatsCacheEntry {
     time_updated: Option<i64>,
     active_turn_tokens: i64,
+    tokens_input: Option<i64>,
+    tokens_output: Option<i64>,
+    cost: Option<f64>,
     tool_total: usize,
     tool_reads: usize,
     tool_writes: usize,
@@ -296,6 +299,15 @@ fn collect_message_stats(
         && cached.time_updated == Some(t_up)
     {
         session.active_turn_tokens = cached.active_turn_tokens;
+        if let Some(ti) = cached.tokens_input {
+            session.tokens_input = ti;
+        }
+        if let Some(to) = cached.tokens_output {
+            session.tokens_output = to;
+        }
+        if let Some(c) = cached.cost {
+            session.cost = c;
+        }
         session.tool_total = cached.tool_total;
         session.tool_reads = cached.tool_reads;
         session.tool_writes = cached.tool_writes;
@@ -308,25 +320,33 @@ fn collect_message_stats(
 
     let mut modified_files = HashSet::new();
     let mut found_active_tokens = false;
+    let mut msg_tokens_in: i64 = 0;
+    let mut msg_tokens_out: i64 = 0;
+    let mut msg_cost: f64 = 0.0;
+    let mut part_tokens_in: i64 = 0;
+    let mut part_tokens_out: i64 = 0;
+    let mut part_cost: f64 = 0.0;
 
-    // 1. Consultar tabla de mensajes (legacy `session_message` o moderna `message`)
-    let msg_table = if table_exists(conn, "session_message") {
-        Some("session_message")
-    } else if table_exists(conn, "message") {
-        Some("message")
-    } else {
-        None
-    };
+    let (msg_table, part_table) = paired_message_and_part_tables(conn, session_table);
 
-    if let Some(tbl) = msg_table {
-        let type_filter = if has_column(conn, tbl, "type") {
-            "AND type = 'assistant'"
+    // 1. Consultar tabla de mensajes emparejada con la tabla de sesiones activa
+    if let Some(tbl) = msg_table
+        && has_column(conn, tbl, "data")
+    {
+        let (type_filter, sql_filtered_assistant) = if has_column(conn, tbl, "type") {
+            ("AND type = 'assistant'", true)
         } else if has_column(conn, tbl, "role") {
-            "AND role = 'assistant'"
+            ("AND role = 'assistant'", true)
         } else {
-            ""
+            ("", false)
         };
-        let sql = format!("SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY time_created DESC");
+        let order_col = if has_column(conn, tbl, "time_created") {
+            "time_created"
+        } else {
+            "rowid"
+        };
+        let sql =
+            format!("SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC");
 
         if let Ok(mut msg_stmt) = conn.prepare(&sql)
             && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| row.get::<_, String>(0))
@@ -336,12 +356,34 @@ fn collect_message_stats(
                     continue;
                 };
 
-                // Tokens de turno activo
+                if !sql_filtered_assistant
+                    && let Some(role) = val
+                        .get("role")
+                        .or_else(|| val.get("type"))
+                        .and_then(|r| r.as_str())
+                    && !role.eq_ignore_ascii_case("assistant")
+                {
+                    continue;
+                }
+
+                // Tokens de turno activo y acumulado de sesión desde message.data
                 if !found_active_tokens
                     && let Some(toks) = parse_tokens_from_value(&val)
                 {
                     session.active_turn_tokens = toks;
                     found_active_tokens = true;
+                }
+
+                if let Some(tok_obj) = val.get("tokens").or_else(|| val.get("usage")) {
+                    msg_tokens_in += tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+                    msg_tokens_out += tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
+                        + tok_obj
+                            .get("reasoning")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                }
+                if let Some(c) = val.get("cost").and_then(|v| v.as_f64()) {
+                    msg_cost += c;
                 }
 
                 // Uso de herramientas en contenido estructurado
@@ -365,7 +407,11 @@ fn collect_message_stats(
                 }
 
                 // Uso de herramientas en arrays alternativos (tool_calls / tools)
-                if let Some(tools_arr) = val.get("tool_calls").or_else(|| val.get("tools")).and_then(|t| t.as_array()) {
+                if let Some(tools_arr) = val
+                    .get("tool_calls")
+                    .or_else(|| val.get("tools"))
+                    .and_then(|t| t.as_array())
+                {
                     for item in tools_arr {
                         let tool_name = item
                             .get("function")
@@ -380,15 +426,7 @@ fn collect_message_stats(
         }
     }
 
-    // 2. Consultar tabla de partes (legacy `session_part` o moderna `part`)
-    let part_table = if table_exists(conn, "session_part") {
-        Some("session_part")
-    } else if table_exists(conn, "part") {
-        Some("part")
-    } else {
-        None
-    };
-
+    // 2. Consultar tabla de partes emparejada (`part` o `session_part`), ordenada de más reciente a más antigua
     if let Some(ptbl) = part_table
         && has_column(conn, ptbl, "data")
     {
@@ -397,7 +435,13 @@ fn collect_message_stats(
         } else {
             "'unknown' AS type"
         };
-        let psql = format!("SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ?");
+        let order_col = if has_column(conn, ptbl, "time_created") {
+            "time_created"
+        } else {
+            "rowid"
+        };
+        let psql =
+            format!("SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ? ORDER BY {order_col} DESC");
 
         if let Ok(mut part_stmt) = conn.prepare(&psql)
             && let Ok(part_rows) = part_stmt.query_map([session_id], |row| {
@@ -408,22 +452,43 @@ fn collect_message_stats(
                 let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_raw) else {
                     continue;
                 };
+                let effective_type = if part_type == "unknown" {
+                    val.get("type").and_then(|t| t.as_str()).unwrap_or("")
+                } else {
+                    part_type.as_str()
+                };
 
-                if !found_active_tokens
-                    && (part_type == "step-finish"
-                        || part_type == "finish"
-                        || part_type == "tokens"
-                        || val.get("tokens").is_some()
-                        || val.get("usage").is_some())
-                    && let Some(toks) = parse_tokens_from_value(&val)
-                {
-                    session.active_turn_tokens = toks;
-                    found_active_tokens = true;
+                let is_step_tokens = effective_type == "step-finish"
+                    || effective_type == "finish"
+                    || effective_type == "tokens"
+                    || val.get("tokens").is_some()
+                    || val.get("usage").is_some();
+
+                if is_step_tokens {
+                    if !found_active_tokens
+                        && let Some(toks) = parse_tokens_from_value(&val)
+                    {
+                        session.active_turn_tokens = toks;
+                        found_active_tokens = true;
+                    }
+                    if let Some(tok_obj) = val.get("tokens").or_else(|| val.get("usage")) {
+                        part_tokens_in +=
+                            tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+                        part_tokens_out +=
+                            tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
+                                + tok_obj
+                                    .get("reasoning")
+                                    .and_then(|v| v.as_i64())
+                                    .unwrap_or(0);
+                    }
+                    if let Some(c) = val.get("cost").and_then(|v| v.as_f64()) {
+                        part_cost += c;
+                    }
                 }
 
-                if part_type == "tool"
-                    || part_type == "tool-call"
-                    || part_type == "tool_call"
+                if effective_type == "tool"
+                    || effective_type == "tool-call"
+                    || effective_type == "tool_call"
                     || val.get("tool").is_some()
                     || val.get("name").is_some()
                 {
@@ -438,7 +503,32 @@ fn collect_message_stats(
         }
     }
 
-    // 3. Fallback de tokens de turno: si las tablas de mensajes/partes no proveyeron el desglose,
+    // 3. Hidratar acumulado de sesión y costo si la tabla `session` no tenía columnas dedicadas
+    let mut cached_ti = None;
+    let mut cached_to = None;
+    let mut cached_cost = None;
+    if session.tokens_input == 0 && session.tokens_output == 0 {
+        let (ti, to) = if msg_tokens_in > 0 || msg_tokens_out > 0 {
+            (msg_tokens_in, msg_tokens_out)
+        } else {
+            (part_tokens_in, part_tokens_out)
+        };
+        if ti > 0 || to > 0 {
+            session.tokens_input = ti;
+            session.tokens_output = to;
+            cached_ti = Some(ti);
+            cached_to = Some(to);
+        }
+    }
+    if session.cost == 0.0 {
+        let resolved_cost = if msg_cost > 0.0 { msg_cost } else { part_cost };
+        if resolved_cost > 0.0 {
+            session.cost = resolved_cost;
+            cached_cost = Some(resolved_cost);
+        }
+    }
+
+    // 4. Fallback de tokens de turno: si las tablas de mensajes/partes no proveyeron el desglose,
     // utilizar el acumulado persistido directamente en el registro de sesión de OpenCode
     if (!found_active_tokens || session.active_turn_tokens == 0)
         && (session.tokens_input > 0 || session.tokens_output > 0)
@@ -458,6 +548,9 @@ fn collect_message_stats(
             MessageStatsCacheEntry {
                 time_updated: resolved_time_updated,
                 active_turn_tokens: session.active_turn_tokens,
+                tokens_input: cached_ti,
+                tokens_output: cached_to,
+                cost: cached_cost,
                 tool_total: session.tool_total,
                 tool_reads: session.tool_reads,
                 tool_writes: session.tool_writes,

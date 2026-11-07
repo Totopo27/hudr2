@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 static RE_POOL: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[/\\'])pool-0?([0-9]+)").unwrap());
 static RE_AGENT_PREFIX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)sdd-[a-z0-9]+-([a-z0-9_-]+)").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:sdd|gentle)-[a-z0-9]+-([a-z0-9_-]+)").unwrap());
 static RE_MODEL_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?i)(?:^|[/"'\\\\])([a-z0-9_-]+)/(?:gemini|claude|antigravity|[a-z0-9.-]+)"#)
         .unwrap()
@@ -113,13 +113,22 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
     // 2. Del modelo (ej: "nina/gemini-3.8-flash-high", "cliproxy/nina/...", "cpamc/cuenta4/...", "gemini-3.8-flash-high (cuenta4)")
     if !model.is_empty() {
         let raw_model = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(model) {
+            let nested_model = parsed.get("model").and_then(|m| {
+                m.as_str().or_else(|| {
+                    m.get("id")
+                        .or_else(|| m.get("modelID"))
+                        .or_else(|| m.get("model_id"))
+                        .or_else(|| m.get("name"))
+                        .and_then(|i| i.as_str())
+                })
+            });
             parsed
                 .get("id")
                 .or_else(|| parsed.get("modelID"))
                 .or_else(|| parsed.get("model_id"))
-                .or_else(|| parsed.get("model"))
-                .or_else(|| parsed.get("name"))
                 .and_then(|i| i.as_str())
+                .or(nested_model)
+                .or_else(|| parsed.get("name").and_then(|i| i.as_str()))
                 .unwrap_or(model)
                 .to_string()
         } else {

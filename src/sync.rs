@@ -120,10 +120,65 @@ fn resolve_sync_model_template(key: &str) -> ModelTemplate {
     }
 }
 
-fn resolve_default_orchestrator_model<V>(profile: &str, sorted_models: &BTreeMap<String, V>) -> String {
+pub fn detect_proxy_provider_key(
+    providers_obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    for preferred in ["cpamc", "cliproxy"] {
+        if providers_obj.get(preferred).is_some_and(|v| v.is_object()) {
+            return Some(preferred.to_string());
+        }
+    }
+
+    for (key, val) in providers_obj {
+        let Some(obj) = val.as_object() else {
+            continue;
+        };
+        let base_url = obj
+            .get("settings")
+            .and_then(|s| s.get("baseURL"))
+            .and_then(|u| u.as_str())
+            .or_else(|| {
+                obj.get("options")
+                    .and_then(|o| o.get("baseURL"))
+                    .and_then(|u| u.as_str())
+            })
+            .or_else(|| obj.get("baseURL").and_then(|u| u.as_str()))
+            .unwrap_or("");
+        if base_url.contains("127.0.0.1:8317") || base_url.contains("localhost:8317") {
+            return Some(key.clone());
+        }
+    }
+
+    None
+}
+
+/// Detecta el nombre del provider de proxy local configurado en `opencode.json` (`"cpamc"`, `"cliproxy"`, etc.).
+pub fn detect_configured_proxy_provider() -> String {
+    for cfg_path in crate::paths::opencode_config_candidates(".") {
+        if cfg_path.exists()
+            && let Ok(content) = fs::read_to_string(&cfg_path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            for section in ["providers", "provider"] {
+                if let Some(map) = val.get(section).and_then(|v| v.as_object())
+                    && let Some(found) = detect_proxy_provider_key(map)
+                {
+                    return found;
+                }
+            }
+        }
+    }
+    "cliproxy".to_string()
+}
+
+fn resolve_default_orchestrator_model<V>(
+    provider_key: &str,
+    profile: &str,
+    sorted_models: &BTreeMap<String, V>,
+) -> String {
     let preferred = format!("{profile}/gemini-3.8-flash-high");
     if sorted_models.contains_key(&preferred) {
-        return format!("cliproxy/{preferred}");
+        return format!("{provider_key}/{preferred}");
     }
 
     let profile_prefix = format!("{profile}/");
@@ -133,75 +188,100 @@ fn resolve_default_orchestrator_model<V>(profile: &str, sorted_models: &BTreeMap
                 .to_ascii_lowercase()
                 .contains("gemini")
     }) {
-        return format!("cliproxy/{gemini_key}");
+        return format!("{provider_key}/{gemini_key}");
     }
 
     if let Some(any_key) = sorted_models.keys().find(|k| k.starts_with(&profile_prefix)) {
-        return format!("cliproxy/{any_key}");
+        return format!("{provider_key}/{any_key}");
     }
 
-    format!("cliproxy/{preferred}")
+    format!("{provider_key}/{preferred}")
+}
+
+fn extract_orchestrator_profile(agent_name: &str) -> Option<&str> {
+    for prefix in ["sdd-orchestrator-", "gentle-orchestrator-"] {
+        if agent_name.len() > prefix.len()
+            && agent_name
+                .get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            return Some(&agent_name[prefix.len()..]);
+        }
+    }
+    None
 }
 
 pub async fn sync_integrations_native() -> Result<SyncResult, String> {
-    // 1. Localizar opencode.json activo
     let candidates = crate::paths::opencode_config_candidates(".");
     let target_path = candidates
         .into_iter()
         .find(|c| c.exists())
         .ok_or_else(|| "No se encontró ningún opencode.json para sincronizar.".to_string())?;
+    sync_integrations_for_path(&target_path).await
+}
 
-    let content = fs::read_to_string(&target_path)
+pub async fn sync_integrations_for_path(
+    target_path: &std::path::Path,
+) -> Result<SyncResult, String> {
+    let content = fs::read_to_string(target_path)
         .map_err(|e| format!("Error leyendo {}: {e}", target_path.display()))?;
 
     let mut raw_config: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| format!("Error parseando JSON de {}: {e}", target_path.display()))?;
 
-    // 2. Extraer o crear cliproxy provider
+    // 2. Extraer provider activo (`cpamc`, `cliproxy` o proxy local en :8317)
     let providers_key = if raw_config.get("providers").is_some() {
         "providers"
     } else if raw_config.get("provider").is_some() {
         "provider"
     } else {
-        return Err("No se encontró la sección 'providers' en opencode.json".to_string());
+        return Err("No se encontró la sección 'provider'/'providers' en opencode.json".to_string());
     };
 
     let providers_obj = raw_config[providers_key]
         .as_object_mut()
         .ok_or_else(|| "La sección de providers no es un objeto JSON válido".to_string())?;
 
-    let cliproxy = providers_obj
-        .get_mut("cliproxy")
-        .and_then(|c| c.as_object_mut())
-        .ok_or_else(|| "No se encontró el provider 'cliproxy' en opencode.json".to_string())?;
+    let provider_name = detect_proxy_provider_key(providers_obj).ok_or_else(|| {
+        "No se encontró el provider 'cpamc' ni 'cliproxy' en opencode.json".to_string()
+    })?;
 
-    let base_url = cliproxy
+    let proxy_provider = providers_obj
+        .get_mut(&provider_name)
+        .and_then(|c| c.as_object_mut())
+        .ok_or_else(|| format!("El provider '{provider_name}' no es un objeto válido"))?;
+
+    let base_url = proxy_provider
         .get("settings")
         .and_then(|s| s.get("baseURL"))
         .and_then(|u| u.as_str())
         .or_else(|| {
-            cliproxy
+            proxy_provider
                 .get("options")
                 .and_then(|o| o.get("baseURL"))
                 .and_then(|u| u.as_str())
         })
-        .unwrap_or("http://127.0.0.1:8317/v1");
+        .or_else(|| proxy_provider.get("baseURL").and_then(|u| u.as_str()))
+        .unwrap_or("http://127.0.0.1:8317/v1")
+        .to_string();
 
-    let api_key = cliproxy
+    let api_key = proxy_provider
         .get("settings")
         .and_then(|s| s.get("apiKey"))
         .and_then(|k| k.as_str())
         .or_else(|| {
-            cliproxy
+            proxy_provider
                 .get("options")
                 .and_then(|o| o.get("apiKey"))
                 .and_then(|k| k.as_str())
         })
-        .unwrap_or("");
+        .or_else(|| proxy_provider.get("apiKey").and_then(|k| k.as_str()))
+        .unwrap_or("")
+        .to_string();
 
-    // 3. Consultar modelos remotos de Cliproxy
+    // 3. Consultar modelos remotos del proxy local
     let models_endpoint = if base_url.ends_with("/models") {
-        base_url.to_string()
+        base_url
     } else {
         format!("{}/models", base_url.trim_end_matches('/'))
     };
@@ -216,27 +296,27 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
     let res = req
         .send()
         .await
-        .map_err(|e| format!("No se pudo conectar con Cliproxy ({models_endpoint}): {e}"))?;
+        .map_err(|e| format!("No se pudo conectar con {provider_name} ({models_endpoint}): {e}"))?;
 
     if !res.status().is_success() {
-        return Err(format!("Cliproxy retornó status HTTP {}", res.status()));
+        return Err(format!("{provider_name} retornó status HTTP {}", res.status()));
     }
 
     let remote_data: serde_json::Value = res
         .json()
         .await
-        .map_err(|e| format!("Error decodificando respuesta de Cliproxy: {e}"))?;
+        .map_err(|e| format!("Error decodificando respuesta de {provider_name}: {e}"))?;
 
     let remote_models = remote_data
         .get("data")
         .and_then(|d| d.as_array())
-        .ok_or_else(|| "Formato inválido de modelos remotos de Cliproxy".to_string())?;
+        .ok_or_else(|| format!("Formato inválido de modelos remotos de {provider_name}"))?;
 
     // 4. Actualizar modelos existentes
-    if !cliproxy.contains_key("models") || !cliproxy["models"].is_object() {
-        cliproxy.insert("models".to_string(), json!({}));
+    if !proxy_provider.contains_key("models") || !proxy_provider["models"].is_object() {
+        proxy_provider.insert("models".to_string(), json!({}));
     }
-    let models_map = cliproxy["models"]
+    let models_map = proxy_provider["models"]
         .as_object_mut()
         .ok_or_else(|| "El campo 'models' no es un objeto válido".to_string())?;
 
@@ -285,9 +365,9 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
     for (k, v) in models_map.iter() {
         sorted_models.insert(k.clone(), v.clone());
     }
-    cliproxy.insert("models".to_string(), json!(sorted_models));
+    proxy_provider.insert("models".to_string(), json!(sorted_models));
 
-    // 5. Auditar orquestadores SDD
+    // 5. Auditar orquestadores SDD y Gentle-Orchestrator
     let mut audited_count = 0;
     let agents_key = if raw_config.get("agents").is_some() {
         Some("agents")
@@ -301,7 +381,7 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
         && let Some(agents) = raw_config[key].as_object_mut()
     {
         for (agent_name, agent_val) in agents.iter_mut() {
-            if agent_name.starts_with("sdd-orchestrator-")
+            if let Some(profile) = extract_orchestrator_profile(agent_name)
                 && let Some(agent_obj) = agent_val.as_object_mut()
             {
                 let current_model = agent_obj
@@ -309,8 +389,8 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
                     .and_then(|m| m.as_str())
                     .unwrap_or("");
                 if current_model.is_empty() {
-                    let profile = agent_name.trim_start_matches("sdd-orchestrator-");
-                    let target = resolve_default_orchestrator_model(profile, &sorted_models);
+                    let target =
+                        resolve_default_orchestrator_model(&provider_name, profile, &sorted_models);
                     agent_obj.insert("model".to_string(), json!(target));
                     audited_count += 1;
                 }
@@ -322,7 +402,7 @@ pub async fn sync_integrations_native() -> Result<SyncResult, String> {
     let formatted = serde_json::to_string_pretty(&raw_config)
         .map_err(|e| format!("Error formateando JSON: {e}"))?;
 
-    fs::write(&target_path, formatted)
+    fs::write(target_path, formatted)
         .map_err(|e| format!("Error guardando {}: {e}", target_path.display()))?;
 
     Ok(SyncResult {
@@ -378,16 +458,16 @@ mod tests {
         models.insert("agy2/claude-sonnet-4-6".to_string(), json!({}));
 
         assert_eq!(
-            resolve_default_orchestrator_model("agy1", &models),
+            resolve_default_orchestrator_model("cliproxy", "agy1", &models),
             "cliproxy/agy1/gemini-2.5-pro"
         );
         assert_eq!(
-            resolve_default_orchestrator_model("agy2", &models),
-            "cliproxy/agy2/claude-sonnet-4-6"
+            resolve_default_orchestrator_model("cpamc", "agy2", &models),
+            "cpamc/agy2/claude-sonnet-4-6"
         );
         assert_eq!(
-            resolve_default_orchestrator_model("agy3", &models),
-            "cliproxy/agy3/gemini-3.8-flash-high"
+            resolve_default_orchestrator_model("cpamc", "agy3", &models),
+            "cpamc/agy3/gemini-3.8-flash-high"
         );
     }
 }

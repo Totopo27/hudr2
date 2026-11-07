@@ -1,7 +1,8 @@
 use crate::herdr::HerdrClient;
 use crate::models::AccountQuota;
 use crate::opencode::{
-    clean_model_name, extract_prefix, has_column, is_opencode_terminal_title, normalize_model_str,
+    DbSessionRecord, clean_model_name, extract_prefix, has_column, hydrate_session_from_messages,
+    is_opencode_terminal_title, normalize_model_str, paired_message_and_part_tables,
     resolve_pool_account_prefixes, resolve_session_for_pane, resolve_session_table_name,
 };
 use crate::paths::resolve_opencode_db_path;
@@ -74,7 +75,12 @@ fn run_command_bounded(mut cmd: Command, timeout: Duration) {
     }
 }
 
-fn notify_opencode_session_migration(ses_id: &str, to_agent: &str, to_model_id: &str) {
+fn notify_opencode_session_migration(
+    ses_id: &str,
+    to_agent: &str,
+    to_model_id: &str,
+    provider_id: &str,
+) {
     let mut agent_cmd = opencode_command();
     agent_cmd.args([
         "api",
@@ -91,7 +97,7 @@ fn notify_opencode_session_migration(ses_id: &str, to_agent: &str, to_model_id: 
         "post",
         &format!("/api/session/{ses_id}/model"),
         "-d",
-        &format!("{{\"model\":{{\"id\":\"{to_model_id}\",\"providerID\":\"cliproxy\"}}}}"),
+        &format!("{{\"model\":{{\"id\":\"{to_model_id}\",\"providerID\":\"{provider_id}\"}}}}"),
     ]);
     configure_silent_command(&mut model_cmd);
 
@@ -135,6 +141,19 @@ fn rewrite_migrated_agent(
     }
     if agent.eq_ignore_ascii_case(from_prefix) {
         return target_prefix.to_string();
+    }
+    for (open, close) in [('(', ')'), ('[', ']')] {
+        let wrapped = format!("{open}{from_prefix}{close}");
+        let lower_agent = agent.to_ascii_lowercase();
+        let lower_wrapped = wrapped.to_ascii_lowercase();
+        if let Some(pos) = lower_agent.find(&lower_wrapped) {
+            let end = pos + wrapped.len();
+            return format!(
+                "{}{open}{target_prefix}{close}{}",
+                &agent[..pos],
+                &agent[end..]
+            );
+        }
     }
     for sep in ['-', '_'] {
         let suffix = format!("{sep}{from_prefix}");
@@ -182,21 +201,47 @@ fn extract_base_model_id(
     }
 }
 
+fn infer_provider_from_model_str(s: &str) -> Option<&'static str> {
+    let trimmed = s.trim();
+    if trimmed
+        .get(..6)
+        .is_some_and(|h| h.eq_ignore_ascii_case("cpamc/") || h.eq_ignore_ascii_case("cpamc:"))
+    {
+        Some("cpamc")
+    } else if trimmed.get(..9).is_some_and(|h| {
+        h.eq_ignore_ascii_case("cliproxy/") || h.eq_ignore_ascii_case("cliproxy:")
+    }) {
+        Some("cliproxy")
+    } else {
+        None
+    }
+}
+
 fn rewrite_migrated_model(
     current_model: Option<&str>,
     from_prefix: &str,
     target_prefix: &str,
     fallback_active_model: &str,
-) -> (String, String) {
+) -> (String, String, String) {
     let provider_id = current_model
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|v| {
             v.get("providerID")
+                .or_else(|| {
+                    v.get("model")
+                        .and_then(|m| m.get("providerID"))
+                })
                 .and_then(|p| p.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .map(str::to_string)
         })
-        .unwrap_or_else(|| "cliproxy".to_string());
+        .or_else(|| {
+            current_model
+                .and_then(infer_provider_from_model_str)
+                .map(str::to_string)
+        })
+        .or_else(|| infer_provider_from_model_str(fallback_active_model).map(str::to_string))
+        .unwrap_or_else(crate::sync::detect_configured_proxy_provider);
 
     let base_model = current_model
         .and_then(|m| extract_base_model_id(m, from_prefix, false))
@@ -210,7 +255,7 @@ fn rewrite_migrated_model(
     })
     .to_string();
 
-    (to_model_id, to_model_json)
+    (to_model_id, to_model_json, provider_id)
 }
 
 fn match_critical_prefix_for_session<'a>(
@@ -245,6 +290,41 @@ pub struct ReleaseResult {
     pub notice: String,
 }
 
+fn compute_account_health_score(acc: &AccountQuota, active_model: &str) -> i32 {
+    let eff = crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
+    let rem_5h = eff.rem_5h as i32;
+    let rem_wk = eff.rem_wk as i32;
+    if rem_wk < 10 {
+        return 0;
+    }
+    ((rem_5h as f64 * 0.7) + (rem_wk as f64 * 0.3)).round() as i32
+}
+
+/// Ordena las cuentas no activas sanas como candidatas a migración, priorizando siempre
+/// cuentas ya verificadas (`!is_unfetched`) sobre las que aún tienen `"..."`.
+pub fn rank_migration_candidates_for_model(
+    accounts_list: &[AccountQuota],
+    active_prefixes: &HashSet<String>,
+    active_model: &str,
+) -> Vec<String> {
+    let mut healthy: Vec<&AccountQuota> = accounts_list
+        .iter()
+        .filter(|a| {
+            let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
+            !active_prefixes.contains(&a.prefix.to_lowercase()) && !eff.is_critical && !a.has_error
+        })
+        .collect();
+
+    healthy.sort_by_key(|a| {
+        std::cmp::Reverse((
+            !crate::quotas::QuotaManager::is_unfetched(a),
+            compute_account_health_score(a, active_model),
+        ))
+    });
+
+    healthy.into_iter().map(|a| a.prefix.clone()).collect()
+}
+
 pub fn get_best_healthy_target_prefix(
     accounts_list: &[AccountQuota],
     active_prefixes: &HashSet<String>,
@@ -257,27 +337,21 @@ pub fn get_best_healthy_target_prefix_for_model(
     active_prefixes: &HashSet<String>,
     active_model: &str,
 ) -> String {
-    let compute_health_score = |acc: &AccountQuota| -> i32 {
-        let eff = crate::quotas::QuotaManager::evaluate_account_for_model(acc, active_model);
-        let rem_5h = eff.rem_5h as i32;
-        let rem_wk = eff.rem_wk as i32;
-        if rem_wk < 10 {
-            return 0;
-        }
-        ((rem_5h as f64 * 0.7) + (rem_wk as f64 * 0.3)).round() as i32
-    };
-
-    // 1. Si hay alguna cuenta activa que esté sana (> 30% libre y sin error), preferir esa
+    // 1. Si hay alguna cuenta activa ya verificada que esté sana (> 30% libre y sin error), preferir esa
     for p in active_prefixes {
         if let Some(acc) = accounts_list.iter().find(|a| {
             let eff = crate::quotas::QuotaManager::evaluate_account_for_model(a, active_model);
-            a.prefix.to_lowercase() == *p && !eff.is_critical && !a.has_error && eff.rem_5h > 30
+            a.prefix.to_lowercase() == *p
+                && !crate::quotas::QuotaManager::is_unfetched(a)
+                && !eff.is_critical
+                && !a.has_error
+                && eff.rem_5h > 30
         }) {
             return acc.prefix.clone();
         }
     }
 
-    // 2. Si no, elegir la cuenta con mayor score de salud balanceado para el modelo activo
+    // 2. Si no, elegir la cuenta con mayor score de salud, priorizando verificadas (`!is_unfetched`) sobre pendientes
     let mut healthy: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
@@ -286,13 +360,97 @@ pub fn get_best_healthy_target_prefix_for_model(
         })
         .collect();
 
-    healthy.sort_by_key(|a| std::cmp::Reverse(compute_health_score(a)));
+    healthy.sort_by_key(|a| {
+        std::cmp::Reverse((
+            !crate::quotas::QuotaManager::is_unfetched(a),
+            compute_account_health_score(a, active_model),
+        ))
+    });
 
     healthy
         .first()
         .map(|a| a.prefix.clone())
         .or_else(|| accounts_list.first().map(|a| a.prefix.clone()))
         .unwrap_or_else(|| "default".to_string())
+}
+
+fn hydrate_row_agent_model(
+    conn: &Connection,
+    session_table: &str,
+    ses_id: &str,
+    agent_opt: Option<String>,
+    model_opt: Option<String>,
+) -> (Option<String>, Option<String>) {
+    if agent_opt.is_some() && model_opt.is_some() {
+        return (agent_opt, model_opt);
+    }
+    let mut rec = DbSessionRecord {
+        id: ses_id.to_string(),
+        agent: agent_opt,
+        model: model_opt,
+        directory: None,
+        title: None,
+        time_updated: None,
+        time_archived: None,
+        tokens_input: None,
+        tokens_output: None,
+        cost: None,
+    };
+    hydrate_session_from_messages(conn, session_table, &mut rec);
+    (rec.agent, rec.model)
+}
+
+fn update_latest_message_for_migration(
+    conn: &Connection,
+    session_table: &str,
+    ses_id: &str,
+    to_agent: &str,
+    to_model_id: &str,
+    provider_id: &str,
+) -> usize {
+    let (Some(msg_tbl), _) = paired_message_and_part_tables(conn, session_table) else {
+        return 0;
+    };
+    if !has_column(conn, msg_tbl, "data") {
+        return 0;
+    }
+    let order_col = if has_column(conn, msg_tbl, "time_created") {
+        "time_created"
+    } else {
+        "rowid"
+    };
+    let sel_sql =
+        format!("SELECT rowid, data FROM {msg_tbl} WHERE session_id = ? ORDER BY {order_col} DESC LIMIT 1");
+    let Ok((rowid, raw)) = conn.query_row(&sel_sql, [ses_id], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+    }) else {
+        return 0;
+    };
+    let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return 0;
+    };
+    if let Some(obj) = val.as_object_mut() {
+        obj.insert("agent".to_string(), serde_json::json!(to_agent));
+        if obj.get("model").is_some_and(|m| m.is_object()) {
+            obj.insert(
+                "model".to_string(),
+                serde_json::json!({
+                    "providerID": provider_id,
+                    "modelID": to_model_id,
+                }),
+            );
+        } else {
+            obj.insert("modelID".to_string(), serde_json::json!(to_model_id));
+            obj.insert("providerID".to_string(), serde_json::json!(provider_id));
+        }
+        if let Ok(updated_raw) = serde_json::to_string(&val) {
+            let upd_sql = format!("UPDATE {msg_tbl} SET data = ? WHERE rowid = ?");
+            return conn
+                .execute(&upd_sql, rusqlite::params![updated_raw, rowid])
+                .unwrap_or(0);
+        }
+    }
+    0
 }
 
 pub fn migrate_critical_sessions(
@@ -361,8 +519,11 @@ pub fn migrate_critical_sessions_for_model(
     // Obtener sesiones no archivadas según el esquema activo (session vs session_v2)
     let table = resolve_session_table_name(&conn);
     let has_agent = has_column(&conn, table, "agent");
+    let has_model = has_column(&conn, table, "model");
     let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
-    let select_sql = format!("SELECT id, {agent_expr}, model FROM {table} WHERE time_archived IS NULL");
+    let model_expr = if has_model { "model" } else { "NULL AS model" };
+    let select_sql =
+        format!("SELECT id, {agent_expr}, {model_expr} FROM {table} WHERE time_archived IS NULL");
 
     let mut stmt = match conn.prepare(&select_sql) {
         Ok(s) => s,
@@ -380,7 +541,14 @@ pub fn migrate_critical_sessions_for_model(
         .map(|iter| iter.flatten().collect())
         .unwrap_or_default();
 
-    for (ses_id, agent_opt, model_opt) in &session_rows {
+    for (ses_id, raw_agent_opt, raw_model_opt) in session_rows {
+        let (agent_opt, model_opt) = hydrate_row_agent_model(
+            &conn,
+            table,
+            &ses_id,
+            raw_agent_opt,
+            raw_model_opt,
+        );
         let Some(from_prefix) = match_critical_prefix_for_session(
             agent_opt.as_deref(),
             model_opt.as_deref(),
@@ -391,30 +559,40 @@ pub fn migrate_critical_sessions_for_model(
         };
 
         let to_agent = rewrite_migrated_agent(agent_opt.as_deref(), from_prefix, &target_prefix);
-        let (to_model_id, to_model_json) = rewrite_migrated_model(
+        let (to_model_id, to_model_json, provider_id) = rewrite_migrated_model(
             model_opt.as_deref(),
             from_prefix,
             &target_prefix,
             active_model,
         );
 
-        let updated = if has_agent {
+        let changes = if has_agent && has_model {
             let update_sql = format!("UPDATE {table} SET agent = ?, model = ? WHERE id = ?");
             conn.execute(&update_sql, rusqlite::params![to_agent, to_model_json, ses_id])
-        } else {
+                .unwrap_or(0)
+        } else if has_model {
             let update_sql = format!("UPDATE {table} SET model = ? WHERE id = ?");
             conn.execute(&update_sql, rusqlite::params![to_model_json, ses_id])
+                .unwrap_or(0)
+        } else {
+            update_latest_message_for_migration(
+                &conn,
+                table,
+                &ses_id,
+                &to_agent,
+                &to_model_id,
+                &provider_id,
+            )
+            .max(1)
         };
-        if let Ok(changes) = updated
-            && changes > 0
-        {
-            total_migrated += changes;
+        if changes > 0 {
+            total_migrated += 1;
             let from_owned = from_prefix.to_string();
             if !migrated_from.contains(&from_owned) {
                 migrated_from.push(from_owned);
             }
 
-            notify_opencode_session_migration(ses_id, &to_agent, &to_model_id);
+            notify_opencode_session_migration(&ses_id, &to_agent, &to_model_id, &provider_id);
         }
     }
 
@@ -622,9 +800,11 @@ pub fn release_inactive_sessions(
     }
 
     // Archivar también cualquier sesión huérfana en DB que haya quedado en desuso
+    let has_model = has_column(&conn, table, "model");
     let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
+    let model_expr = if has_model { "model" } else { "NULL AS model" };
     let orphan_sql = format!(
-        "SELECT id, {agent_expr}, model FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
+        "SELECT id, {agent_expr}, {model_expr} FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
     );
     let orphan_update_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ? AND time_archived IS NULL");
     if let Ok(mut orphan_stmt) = conn.prepare(&orphan_sql) {
@@ -636,7 +816,7 @@ pub fn release_inactive_sessions(
             ))
         });
         if let Ok(iter) = rows {
-            for (orphan_id, agent_opt, model_opt) in iter.flatten() {
+            for (orphan_id, raw_agent_opt, raw_model_opt) in iter.flatten() {
                 if keep_session_id.as_deref() == Some(&orphan_id) {
                     continue;
                 }
@@ -647,6 +827,14 @@ pub fn release_inactive_sessions(
                 if is_live_working {
                     continue;
                 }
+
+                let (agent_opt, model_opt) = hydrate_row_agent_model(
+                    &conn,
+                    table,
+                    &orphan_id,
+                    raw_agent_opt,
+                    raw_model_opt,
+                );
 
                 if let Ok(affected) = conn.execute(
                     &orphan_update_sql,
@@ -742,28 +930,40 @@ mod tests {
 
     #[test]
     fn rewrite_migrated_model_preserves_base_model_and_provider() {
-        let (id1, json1) = rewrite_migrated_model(
+        let (id1, json1, prov1) = rewrite_migrated_model(
             Some(r#"{"id":"agy1/claude-sonnet-4-6","providerID":"cliproxy"}"#),
             "agy1",
             "agy2",
             "",
         );
         assert_eq!(id1, "agy2/claude-sonnet-4-6");
+        assert_eq!(prov1, "cliproxy");
         assert!(json1.contains(r#""id":"agy2/claude-sonnet-4-6""#));
         assert!(json1.contains(r#""providerID":"cliproxy""#));
 
-        let (id2, _) = rewrite_migrated_model(
+        let (id_cpamc, json_cpamc, prov_cpamc) = rewrite_migrated_model(
+            Some(r#"{"id":"cuenta1/gemini-3.8-flash-high","providerID":"cpamc"}"#),
+            "cuenta1",
+            "cuenta4",
+            "",
+        );
+        assert_eq!(id_cpamc, "cuenta4/gemini-3.8-flash-high");
+        assert_eq!(prov_cpamc, "cpamc");
+        assert!(json_cpamc.contains(r#""providerID":"cpamc""#));
+
+        let (id2, _, prov2) = rewrite_migrated_model(
             Some("cliproxy/AGY1/gpt-oss-120b-medium"),
             "agy1",
             "agy3",
             "",
         );
         assert_eq!(id2, "agy3/gpt-oss-120b-medium");
+        assert_eq!(prov2, "cliproxy");
 
-        let (id3, _) = rewrite_migrated_model(None, "agy1", "agy2", "agy1/deepseek-r1");
+        let (id3, _, _) = rewrite_migrated_model(None, "agy1", "agy2", "agy1/deepseek-r1");
         assert_eq!(id3, "agy2/deepseek-r1");
 
-        let (id4, _) = rewrite_migrated_model(None, "agy1", "agy2", "");
+        let (id4, _, _) = rewrite_migrated_model(None, "agy1", "agy2", "");
         assert_eq!(id4, "agy2/gemini-3.8-flash-high");
     }
 

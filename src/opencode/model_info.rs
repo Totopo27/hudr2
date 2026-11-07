@@ -22,16 +22,26 @@ static RE_ACCOUNT_ANNOTATION: LazyLock<Regex> =
 
 pub fn clean_model_name(model_raw: &str) -> String {
     let mut s = model_raw.trim().to_string();
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&s)
-        && let Some(id_val) = parsed
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&s) {
+        let nested_model = parsed.get("model").and_then(|m| {
+            m.as_str().or_else(|| {
+                m.get("id")
+                    .or_else(|| m.get("modelID"))
+                    .or_else(|| m.get("model_id"))
+                    .or_else(|| m.get("name"))
+                    .and_then(|i| i.as_str())
+            })
+        });
+        if let Some(id_val) = parsed
             .get("id")
             .or_else(|| parsed.get("modelID"))
             .or_else(|| parsed.get("model_id"))
-            .or_else(|| parsed.get("model"))
-            .or_else(|| parsed.get("name"))
             .and_then(|i| i.as_str())
-    {
-        s = id_val.to_string();
+            .or(nested_model)
+            .or_else(|| parsed.get("name").and_then(|i| i.as_str()))
+        {
+            s = id_val.to_string();
+        }
     }
     RE_ACCOUNT_ANNOTATION.replace(&s, "").trim().to_string()
 }

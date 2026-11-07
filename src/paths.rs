@@ -21,38 +21,59 @@ pub fn normalize_path(p: &str) -> String {
         .to_string()
 }
 
-/// Resuelve el directorio de credenciales / autenticaciones de Cliproxy
+/// Resuelve el directorio de credenciales / autenticaciones de Cliproxy o CPAMC
 pub fn resolve_auths_dir() -> PathBuf {
     // 1. Variable de entorno explícita (mayor prioridad para cualquier usuario o CI)
-    if let Ok(dir) = std::env::var("CLIPROXY_AUTHS_DIR") {
-        let p = PathBuf::from(dir.trim());
-        if p.exists() {
-            return p;
+    for env_key in ["CLIPROXY_AUTHS_DIR", "CPAMC_AUTHS_DIR"] {
+        if let Ok(dir) = std::env::var(env_key) {
+            let p = PathBuf::from(dir.trim());
+            if p.exists() {
+                return p;
+            }
         }
     }
 
-    // 2. Extraer 'authsDir' o 'cliproxy_auths_dir' desde opencode.json si está configurado
+    // 2. Extraer 'authsDir' / 'auths_dir' desde opencode.json (compatible con provider/providers y cpamc/cliproxy)
     let candidates_cfg = opencode_config_candidates(".");
     for cfg_path in candidates_cfg {
         if cfg_path.exists()
             && let Ok(content) = std::fs::read_to_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
-            if let Some(auth_dir) = val
-                .get("providers")
-                .and_then(|p| p.get("cliproxy"))
-                .and_then(|c| c.get("authsDir").or_else(|| c.get("auths_dir")))
-                .and_then(|s| s.as_str())
-            {
-                let p = PathBuf::from(auth_dir.trim());
-                if p.exists() {
-                    return p;
+            for section in ["providers", "provider"] {
+                if let Some(prov_map) = val.get(section).and_then(|p| p.as_object()) {
+                    for preferred in ["cpamc", "cliproxy"] {
+                        if let Some(auth_dir) = prov_map
+                            .get(preferred)
+                            .and_then(|c| c.get("authsDir").or_else(|| c.get("auths_dir")))
+                            .and_then(|s| s.as_str())
+                        {
+                            let p = PathBuf::from(auth_dir.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
+                    }
+                    for prov_val in prov_map.values() {
+                        if let Some(auth_dir) = prov_val
+                            .get("authsDir")
+                            .or_else(|| prov_val.get("auths_dir"))
+                            .and_then(|s| s.as_str())
+                        {
+                            let p = PathBuf::from(auth_dir.trim());
+                            if p.exists() {
+                                return p;
+                            }
+                        }
+                    }
                 }
             }
-            if let Some(auth_dir) = val.get("cliproxy_auths_dir").and_then(|s| s.as_str()) {
-                let p = PathBuf::from(auth_dir.trim());
-                if p.exists() {
-                    return p;
+            for top_key in ["cpamc_auths_dir", "cliproxy_auths_dir"] {
+                if let Some(auth_dir) = val.get(top_key).and_then(|s| s.as_str()) {
+                    let p = PathBuf::from(auth_dir.trim());
+                    if p.exists() {
+                        return p;
+                    }
                 }
             }
         }
@@ -62,11 +83,13 @@ pub fn resolve_auths_dir() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut candidates = vec![
         home.join(".cliproxy").join("auths"),
+        home.join(".cpamc").join("auths"),
         home.join("cliproxyapi").join("auths"),
     ];
 
     if let Some(config_dir) = dirs::config_dir() {
         candidates.push(config_dir.join("cliproxy").join("auths"));
+        candidates.push(config_dir.join("cpamc").join("auths"));
     }
 
     #[cfg(target_os = "windows")]
@@ -75,7 +98,10 @@ pub fn resolve_auths_dir() -> PathBuf {
         if let Ok(system_drive) = std::env::var("SystemDrive") {
             candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/auths")));
         }
-        push_windows_drive_candidates(&mut candidates, &["cliproxyapi/auths", ".cliproxy/auths"]);
+        push_windows_drive_candidates(
+            &mut candidates,
+            &["cliproxyapi/auths", ".cliproxy/auths", ".cpamc/auths"],
+        );
     }
 
     for c in candidates {
@@ -192,14 +218,25 @@ pub fn resolve_opencode_db_path() -> PathBuf {
         return existing.remove(0);
     }
 
-    // Si existen múltiples copias, ordenar por fecha de modificación más reciente (activa)
-    existing.sort_by(|a, b| {
-        let ma = a.metadata().and_then(|m| m.modified()).ok();
-        let mb = b.metadata().and_then(|m| m.modified()).ok();
-        mb.cmp(&ma)
-    });
+    // Si existen múltiples copias, ordenar por actividad real incluyendo el archivo `-wal` de SQLite
+    existing.sort_by_key(|a| std::cmp::Reverse(db_effective_mtime(a)));
 
     existing.remove(0)
+}
+
+/// Calcula el `mtime` efectivo de una base SQLite considerando sus archivos adjuntos `-wal` y `-shm`
+/// (en modo WAL, las escrituras recientes actualizan `opencode.db-wal` antes del checkpoint).
+pub fn db_effective_mtime(db_path: &Path) -> Option<std::time::SystemTime> {
+    let base = db_path.metadata().and_then(|m| m.modified()).ok();
+    let wal = PathBuf::from(format!("{}-wal", db_path.display()))
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+    let shm = PathBuf::from(format!("{}-shm", db_path.display()))
+        .metadata()
+        .and_then(|m| m.modified())
+        .ok();
+    [base, wal, shm].into_iter().flatten().max()
 }
 
 /// Resuelve el binario ejecutable de Engram en cualquier sistema operativo

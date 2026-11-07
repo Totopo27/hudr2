@@ -792,22 +792,38 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_force_refresh_updates_both_context_and_quotas() {
+    #[test]
+    fn test_force_refresh_updates_both_context_and_quotas() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use hudr2::app::force_refresh;
         use std::sync::Arc;
         use tokio::sync::RwLock;
 
-        let app_state = Arc::new(RwLock::new(AppState::new()));
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path());
+        }
 
-        // Ejecutar force_refresh interactivo (simulando tecla 'r')
-        force_refresh(&app_state, true, true).await;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app_state = Arc::new(RwLock::new(AppState::new()));
 
-        let state = app_state.read().await;
-        // El flash notice debe reflejar que actualizó cuotas y contexto
-        assert!(state.flash_notice.is_some());
-        let notice = state.flash_notice.as_ref().unwrap();
-        assert!(notice.contains("contexto") || notice.contains("Contexto"));
+            // Ejecutar force_refresh interactivo sin golpear credenciales reales del host
+            force_refresh(&app_state, true, true).await;
+
+            let state = app_state.read().await;
+            // El flash notice debe reflejar que actualizó cuotas y contexto
+            assert!(state.flash_notice.is_some());
+            let notice = state.flash_notice.as_ref().unwrap();
+            assert!(notice.contains("contexto") || notice.contains("Contexto"));
+        });
+
+        unsafe {
+            std::env::remove_var("CLIPROXY_AUTHS_DIR");
+        }
     }
 
     #[test]
@@ -1927,26 +1943,33 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_refresh_all_skips_redraw_when_snapshot_unchanged() {
-        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
-        hudr2::app::refresh_all(&app_state).await;
+    #[test]
+    fn test_refresh_all_skips_redraw_when_snapshot_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+            hudr2::app::refresh_all(&app_state).await;
 
-        {
-            let mut state = app_state.write().await;
-            state.needs_redraw = false;
-        }
+            {
+                let mut state = app_state.write().await;
+                state.needs_redraw = false;
+            }
 
-        // Segunda llamada consecutiva sin cambios en el estado subyacente:
-        // needs_redraw debe mantenerse en false (cero redibujados redundantes)
-        hudr2::app::refresh_all(&app_state).await;
-        {
-            let state = app_state.read().await;
-            assert!(
-                !state.needs_redraw,
-                "refresh_all no debe forzar needs_redraw = true cuando el snapshot no cambió"
-            );
-        }
+            // Segunda llamada consecutiva sin cambios en el estado subyacente:
+            // needs_redraw debe mantenerse en false (cero redibujados redundantes)
+            hudr2::app::refresh_all(&app_state).await;
+            {
+                let state = app_state.read().await;
+                assert!(
+                    !state.needs_redraw,
+                    "refresh_all no debe forzar needs_redraw = true cuando el snapshot no cambió"
+                );
+            }
+        });
     }
 
     #[test]
@@ -2664,5 +2687,525 @@ mod tests {
             hudr2::opencode::clean_model_name("gemini-3.8-flash-high (cuenta4)"),
             "gemini-3.8-flash-high"
         );
+    }
+
+    #[test]
+    fn test_opencode_upgraded_db_coexisting_legacy_tables_and_message_data_hydration() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+
+        // 1. Tablas legacy coexistentes con datos viejos de cuenta1 (caso real tras upgrade de OpenCode)
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY,
+                agent TEXT,
+                model TEXT,
+                directory TEXT,
+                title TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                type TEXT,
+                data TEXT,
+                time_created INTEGER
+            );
+            CREATE TABLE session_part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                message_id TEXT,
+                type TEXT,
+                data TEXT,
+                time_created INTEGER
+            );
+            -- 2. Esquema Drizzle real de OpenCode 1.19+ (SIN columnas agent/model/tokens en session, y SIN type en message/part)
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                title TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                data TEXT
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT,
+                session_id TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                data TEXT
+            );",
+        )
+        .unwrap();
+
+        let target_dir = "d:/social-hub-pro";
+        conn.execute(
+            "INSERT INTO session_v2 VALUES ('ses_old', 'sdd-orchestrator-cuenta1', 'cuenta1/gemini-2.5-pro', ?, 'Vieja', 1000, 2000, NULL)",
+            [target_dir],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO session VALUES ('ses_live_cpamc', ?, 'Social Hub', 50000, 60000, NULL)",
+            [target_dir],
+        )
+        .unwrap();
+
+        // Mensaje de usuario + mensaje de asistente con providerID=cpamc y modelID=cuenta4/...
+        conn.execute(
+            "INSERT INTO message VALUES ('msg_u1', 'ses_live_cpamc', 50100, 50100, ?)",
+            [r#"{"id":"msg_u1","role":"user","agent":"Gentle-Orchestrator","model":{"providerID":"cpamc","modelID":"cuenta4/gemini-3.8-flash-high"}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('msg_a1', 'ses_live_cpamc', 50200, 50200, ?)",
+            [r#"{"id":"msg_a1","role":"assistant","mode":"Gentle-Orchestrator","providerID":"cpamc","modelID":"cuenta4/gemini-3.8-flash-high","cost":0.021,"tokens":{"input":12000,"output":1500,"reasoning":500,"cache":{"read":146100,"write":0}}}"#],
+        )
+        .unwrap();
+
+        // Partes: un turno viejo (4k) y uno reciente (160.1k) + edit con filePath camelCase (sin columna SQL `type`)
+        conn.execute(
+            "INSERT INTO part VALUES ('prt_old', 'msg_a0', 'ses_live_cpamc', 50050, 50050, ?)",
+            [r#"{"type":"step-finish","tokens":{"input":3000,"output":1000}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('prt_edit', 'msg_a1', 'ses_live_cpamc', 50150, 50150, ?)",
+            [r#"{"type":"tool","tool":"edit","state":{"input":{"filePath":"src/social.ts"}}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('prt_new', 'msg_a1', 'ses_live_cpamc', 50250, 50250, ?)",
+            [r#"{"type":"step-finish","tokens":{"input":12000,"output":1500,"reasoning":500,"cache":{"read":146100,"write":0}}}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        hudr2::opencode::clear_message_stats_cache();
+
+        let accounts = vec![
+            hudr2::models::AccountQuota {
+                prefix: "cuenta1".to_string(),
+                rem_5h: 100,
+                rem_wk: 100,
+                reset_5h: "4h 59m".to_string(),
+                reset_wk: "6d 23h".to_string(),
+                ..Default::default()
+            },
+            hudr2::models::AccountQuota {
+                prefix: "cuenta2".to_string(),
+                rem_5h: 98,
+                rem_wk: 99,
+                reset_5h: "4h 50m".to_string(),
+                reset_wk: "6d 20h".to_string(),
+                ..Default::default()
+            },
+            hudr2::models::AccountQuota {
+                prefix: "cuenta4".to_string(),
+                rem_5h: 10,
+                rem_wk: 80,
+                is_critical: true,
+                reset_5h: "2h 10m".to_string(),
+                reset_wk: "5d 10h".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let panes = vec![HerdrPane {
+            pane_id: "w19:p1".to_string(),
+            cwd: Some(target_dir.to_string()),
+            agent_status: Some("working".to_string()),
+            ..Default::default()
+        }];
+
+        let session =
+            hudr2::opencode::read_opencode_session(target_dir, &panes, &accounts, None, None);
+
+        assert_eq!(session.local_prefix.as_deref(), Some("cuenta4"));
+        assert!(session.all_active_prefixes.contains("cuenta4"));
+        assert!(!session.all_active_prefixes.contains("cuenta1"));
+        assert_eq!(session.agent, "Gentle-Orchestrator");
+        assert_eq!(session.model_short, "gemini-3.8-flash-high");
+        assert_eq!(session.active_turn_tokens, 160_100);
+        assert_eq!(session.tokens_input, 12_000);
+        assert_eq!(session.tokens_output, 2_000);
+        assert!((session.cost - 0.021).abs() < 1e-6);
+        assert_eq!(session.tool_writes, 1);
+        assert_eq!(session.attributed_changes.files_count, 1);
+
+        // Probar migración crítica en esquema `session` sin columna SQL `model` preservando `cpamc`
+        let (migrated, notice) = hudr2::cleanup::migrate_critical_sessions_for_model(
+            target_dir,
+            &accounts,
+            &session.all_active_prefixes,
+            &session.model,
+        );
+        assert_eq!(migrated, 1, "Debe migrar ses_live_cpamc: {notice}");
+        assert!(notice.contains("cuenta1"));
+
+        hudr2::opencode::clear_message_stats_cache();
+        let post_mig =
+            hudr2::opencode::read_opencode_session(target_dir, &panes, &accounts, None, None);
+        assert_eq!(post_mig.local_prefix.as_deref(), Some("cuenta1"));
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
+        hudr2::opencode::clear_message_stats_cache();
+    }
+
+    #[test]
+    fn test_quota_disk_cache_50_accounts_scaling_reset_expiry_and_429_circuit_breaker() {
+        use hudr2::app::select_accounts_for_refresh;
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::{
+            UNFETCHED_RESET, clear_quota_runtime_cache, hydrate_accounts_from_cache,
+            is_rate_limit_cooling_down, quota_cache_path_for, record_cached_quota_at,
+            trigger_rate_limit_cooldown,
+        };
+        use serde_json::json;
+        use std::collections::HashSet;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_quota_runtime_cache();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+        let cache_path = quota_cache_path_for(&cfg_path);
+        let now = chrono::Utc::now().timestamp();
+        let future_iso = (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339();
+        let expired_iso = (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339();
+
+        // 1. Poblar 49 cuentas en caché en disco y dejar cuenta50 nueva sin consultar ("...")
+        for i in 1..=49 {
+            let pfx = format!("cuenta{i:02}");
+            let auth_path = tmp.path().join(format!("{pfx}.json"));
+            std::fs::write(&auth_path, r#"{"access_token":"tok"}"#).unwrap();
+
+            let mut acc = AccountQuota {
+                prefix: pfx,
+                auth_file: auth_path.to_string_lossy().to_string(),
+                reset_5h: UNFETCHED_RESET.to_string(),
+                reset_wk: UNFETCHED_RESET.to_string(),
+                ..Default::default()
+            };
+
+            let (fetched_at, reset_iso, frac) = if i == 12 {
+                // Ventana vencida: se consultó hace 1h y su resetTime ya pasó hace 2m
+                (now - 3600, expired_iso.as_str(), 0.20)
+            } else {
+                (now - 300, future_iso.as_str(), 0.96)
+            };
+
+            record_cached_quota_at(
+                &mut acc,
+                &json!({
+                    "groups": [{
+                        "displayName": "Gemini",
+                        "buckets": [
+                            {"window": "5h", "remainingFraction": frac, "resetTime": reset_iso},
+                            {"window": "weekly", "remainingFraction": 0.98, "resetTime": future_iso}
+                        ]
+                    }]
+                }),
+                fetched_at,
+                Some(&cache_path),
+            );
+        }
+        assert!(cache_path.exists(), "quotas_cache.json debe persistirse en disco");
+
+        // 2. Simular arranque en frío de otra instancia/panel en Herdr con las 50 cuentas
+        clear_quota_runtime_cache();
+        let mut cold_accounts: Vec<AccountQuota> = (1..=50)
+            .map(|i| {
+                let pfx = format!("cuenta{i:02}");
+                let auth_path = tmp.path().join(format!("{pfx}.json"));
+                if i == 50 {
+                    std::fs::write(&auth_path, r#"{"access_token":"tok50"}"#).unwrap();
+                }
+                AccountQuota {
+                    prefix: pfx,
+                    auth_file: auth_path.to_string_lossy().to_string(),
+                    rem_5h: 100,
+                    rem_wk: 100,
+                    reset_5h: UNFETCHED_RESET.to_string(),
+                    reset_wk: UNFETCHED_RESET.to_string(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        hydrate_accounts_from_cache(&mut cold_accounts, Some(&cache_path));
+        assert_eq!(cold_accounts[3].rem_5h, 96, "cuenta04 debe hidratar 96% en 0ms");
+        assert_ne!(cold_accounts[3].reset_5h, UNFETCHED_RESET);
+        assert_eq!(cold_accounts[49].reset_5h, UNFETCHED_RESET, "cuenta50 sigue nueva");
+
+        // 3. Comando 'r' (selectivo): de 50 cuentas solo debe consultar cuenta04 (activa), cuenta12 (vencida) y cuenta50 (nueva)
+        let mut active = HashSet::new();
+        active.insert("cuenta04".to_string());
+        let selected_r = select_accounts_for_refresh(
+            &cold_accounts,
+            Some("cuenta04"),
+            &active,
+            false,
+            false,
+        );
+        let prefixes_r: Vec<&str> = selected_r.iter().map(|a| a.prefix.as_str()).collect();
+        assert_eq!(
+            prefixes_r,
+            vec!["cuenta04", "cuenta12", "cuenta50"],
+            "En modo 'r' con 50 cuentas solo deben consultarse activa + vencida + nueva, con activa en idx 0"
+        );
+
+        // 4. Comando 'a' (auditar todas): selecciona las 50 pero poniendo cuenta04 en idx 0
+        let selected_a = select_accounts_for_refresh(
+            &cold_accounts,
+            Some("cuenta04"),
+            &active,
+            true,
+            false,
+        );
+        assert_eq!(selected_a.len(), 50);
+        assert_eq!(selected_a[0].prefix, "cuenta04");
+
+        // 5. Freno ante HTTP 429: corta de inmediato las 49 inactivas
+        trigger_rate_limit_cooldown(60);
+        assert!(is_rate_limit_cooling_down());
+        let selected_429 = select_accounts_for_refresh(
+            &cold_accounts,
+            Some("cuenta04"),
+            &active,
+            true,
+            is_rate_limit_cooling_down(),
+        );
+        assert_eq!(selected_429.len(), 1);
+        assert_eq!(selected_429[0].prefix, "cuenta04");
+
+        clear_quota_runtime_cache();
+    }
+
+    #[test]
+    fn test_yellow_zone_migration_candidate_prewarming_and_unfetched_exclusion() {
+        use hudr2::app::select_yellow_zone_prewarm_candidates;
+        use hudr2::cleanup::get_best_healthy_target_prefix_for_model;
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::{
+            UNFETCHED_RESET, clear_quota_runtime_cache, record_cached_quota_at,
+            sync_account_health_for_model,
+        };
+        use serde_json::json;
+        use std::collections::HashSet;
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        clear_quota_runtime_cache();
+
+        let now = chrono::Utc::now().timestamp();
+        let future_iso = (chrono::Utc::now() + chrono::Duration::hours(3)).to_rfc3339();
+        let make_quota_json = |frac_5h: f64, frac_wk: f64| {
+            json!({
+                "groups": [{
+                    "displayName": "Gemini",
+                    "buckets": [
+                        {"window": "5h", "remainingFraction": frac_5h, "resetTime": future_iso},
+                        {"window": "weekly", "remainingFraction": frac_wk, "resetTime": future_iso}
+                    ]
+                }]
+            })
+        };
+
+        // cuenta1: activa en ZONA AMARILLA (25% libre -> 75% usado -> is_warning = true, no crítica aún)
+        let mut c1 = AccountQuota {
+            prefix: "cuenta1".to_string(),
+            ..Default::default()
+        };
+        record_cached_quota_at(&mut c1, &make_quota_json(0.25, 0.90), now - 30, None);
+        sync_account_health_for_model(&mut c1, "gemini-3.8-flash-high");
+        assert!(c1.is_warning && !c1.is_critical);
+
+        // cuenta2: pendiente sin consultar ("...") con 100% provisional — NO debe ganarle a cuentas verificadas
+        let c2 = AccountQuota {
+            prefix: "cuenta2".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            reset_5h: UNFETCHED_RESET.to_string(),
+            reset_wk: UNFETCHED_RESET.to_string(),
+            ..Default::default()
+        };
+
+        // cuenta3: verificada hace 25 min (> 10 min -> requiere pre-validación), 96% libre
+        let mut c3 = AccountQuota {
+            prefix: "cuenta3".to_string(),
+            ..Default::default()
+        };
+        record_cached_quota_at(&mut c3, &make_quota_json(0.96, 0.98), now - 1500, None);
+
+        // cuenta4: verificada hace 2 min (< 10 min -> YA está fresca y lista), 92% libre
+        let mut c4 = AccountQuota {
+            prefix: "cuenta4".to_string(),
+            ..Default::default()
+        };
+        record_cached_quota_at(&mut c4, &make_quota_json(0.92, 0.95), now - 120, None);
+
+        // cuenta5: verificada hace 30 min (> 10 min -> requiere pre-validación), 88% libre
+        let mut c5 = AccountQuota {
+            prefix: "cuenta5".to_string(),
+            ..Default::default()
+        };
+        record_cached_quota_at(&mut c5, &make_quota_json(0.88, 0.90), now - 1800, None);
+
+        let mut accounts = vec![c1, c2, c3, c4, c5];
+        let mut active = HashSet::new();
+        active.insert("cuenta1".to_string());
+
+        // 1. La sugerencia de migración debe preferir cuenta3 (verificada 96%) sobre cuenta2 ("..." 100% falso)
+        assert_eq!(
+            get_best_healthy_target_prefix_for_model(&accounts, &active, "gemini-3.8-flash-high"),
+            "cuenta3"
+        );
+
+        // 2. En zona amarilla, cuenta4 ya es fresca (<10m); deben encolarse cuenta3 y cuenta5 antes que cuenta2
+        let prewarm = select_yellow_zone_prewarm_candidates(
+            &accounts,
+            &active,
+            "gemini-3.8-flash-high",
+            600,
+            3,
+        );
+        let prewarm_pfxs: Vec<&str> = prewarm.iter().map(|a| a.prefix.as_str()).collect();
+        assert!(
+            !prewarm_pfxs.contains(&"cuenta4"),
+            "cuenta4 ya estaba fresca (<10m), no debe re-consultarse"
+        );
+        assert_eq!(prewarm_pfxs[0], "cuenta3");
+        assert_eq!(prewarm_pfxs[1], "cuenta5");
+
+        // 3. Una vez pre-validadas cuenta3 y cuenta5 en segundo plano, ya hay 3 candidatas frescas -> 0 consultas extra
+        record_cached_quota_at(&mut accounts[2], &make_quota_json(0.95, 0.98), now, None);
+        record_cached_quota_at(&mut accounts[4], &make_quota_json(0.87, 0.90), now, None);
+        let prewarm_after = select_yellow_zone_prewarm_candidates(
+            &accounts,
+            &active,
+            "gemini-3.8-flash-high",
+            600,
+            3,
+        );
+        assert!(
+            prewarm_after.is_empty(),
+            "Con 3 candidatas frescas confirmadas en zona amarilla, no debe hacer más llamadas"
+        );
+
+        clear_quota_runtime_cache();
+    }
+
+    #[tokio::test]
+    async fn test_cpamc_sync_integrations_and_gentle_orchestrator_audit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let req_str = String::from_utf8_lossy(&buf[..n]);
+            assert!(
+                req_str
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer cpamc-key-test"),
+                "Debe enviar el apiKey del bloque provider.cpamc: {req_str}"
+            );
+            let body = r#"{"data":[{"id":"cuenta4/gemini-3.8-flash-high"},{"id":"cuenta4/claude-sonnet-4-6"}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("opencode.json");
+        let initial_cfg = serde_json::json!({
+            "provider": {
+                "cpamc": {
+                    "options": {
+                        "apiKey": "cpamc-key-test",
+                        "baseURL": format!("http://{addr}/v1")
+                    }
+                }
+            },
+            "agent": {
+                "gentle-orchestrator-cuenta4": { "model": "" },
+                "sdd-orchestrator-cuenta4": { "model": "" }
+            }
+        });
+        std::fs::write(&cfg_path, serde_json::to_string_pretty(&initial_cfg).unwrap()).unwrap();
+
+        let res = hudr2::sync::sync_integrations_for_path(&cfg_path)
+            .await
+            .expect("sync con provider.cpamc debe completarse sin error");
+        server.await.unwrap();
+
+        assert_eq!(res.total_models, 2);
+        assert_eq!(res.added_models, 2);
+        assert_eq!(res.audited_orchestrators, 2);
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert!(saved["provider"]["cpamc"]["models"]["cuenta4/gemini-3.8-flash-high"].is_object());
+        assert_eq!(
+            saved["agent"]["gentle-orchestrator-cuenta4"]["model"].as_str(),
+            Some("cpamc/cuenta4/gemini-3.8-flash-high")
+        );
+        assert_eq!(
+            saved["agent"]["sdd-orchestrator-cuenta4"]["model"].as_str(),
+            Some("cpamc/cuenta4/gemini-3.8-flash-high")
+        );
+    }
+
+    #[test]
+    fn test_wal_mtime_precedence_and_footer_a_r_shortcuts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_file = tmp.path().join("opencode.db");
+        let wal_file = tmp.path().join("opencode.db-wal");
+        std::fs::write(&db_file, b"sqlite").unwrap();
+        let m1 = hudr2::paths::db_effective_mtime(&db_file).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        std::fs::write(&wal_file, b"wal-newer").unwrap();
+        let m2 = hudr2::paths::db_effective_mtime(&db_file).unwrap();
+        assert!(m2 >= m1, "db_effective_mtime debe considerar opencode.db-wal");
+
+        let state = AppState::new();
+        for w in [36usize, 44, 48] {
+            let out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, w);
+            for line in &out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Ninguna línea puede exceder {w} columnas: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            if w >= 44 {
+                let plain = ui::strip_ansi(&out.lines.join("\n"));
+                assert!(plain.contains("r: act") && plain.contains("a: auditar"));
+            }
+        }
     }
 }
