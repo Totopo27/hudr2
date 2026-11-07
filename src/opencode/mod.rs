@@ -435,13 +435,19 @@ fn collect_message_stats(
         } else {
             "'unknown' AS type"
         };
+        let type_filter = if has_column(conn, ptbl, "type") {
+            "AND type IN ('tool', 'tool-call', 'tool_call', 'step-finish', 'finish', 'tokens')"
+        } else {
+            ""
+        };
         let order_col = if has_column(conn, ptbl, "time_created") {
             "time_created"
         } else {
             "rowid"
         };
-        let psql =
-            format!("SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ? ORDER BY {order_col} DESC");
+        let psql = format!(
+            "SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC"
+        );
 
         if let Ok(mut part_stmt) = conn.prepare(&psql)
             && let Ok(part_rows) = part_stmt.query_map([session_id], |row| {
@@ -543,6 +549,9 @@ fn collect_message_stats(
     };
 
     if let Ok(mut guard) = MESSAGE_STATS_CACHE.lock() {
+        if guard.len() >= 64 {
+            guard.clear();
+        }
         guard.insert(
             session_id.to_string(),
             MessageStatsCacheEntry {

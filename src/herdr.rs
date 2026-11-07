@@ -1,9 +1,55 @@
 use crate::models::HerdrPane;
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+static RESOLVED_HERDR_BIN: LazyLock<Mutex<Option<Option<&'static str>>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub fn clear_herdr_binary_cache() {
+    if let Ok(mut guard) = RESOLVED_HERDR_BIN.lock() {
+        *guard = None;
+    }
+}
+
+fn resolve_available_herdr_binary() -> Option<&'static str> {
+    if let Ok(guard) = RESOLVED_HERDR_BIN.lock()
+        && let Some(cached) = *guard
+    {
+        return cached;
+    }
+
+    let found = (|| {
+        let path_var = std::env::var_os("PATH")?;
+        for &bin in &["herdr", "telardev", "telar"] {
+            for dir in std::env::split_paths(&path_var) {
+                #[cfg(target_os = "windows")]
+                {
+                    for ext in [".exe", ".cmd", ".bat", ""] {
+                        if dir.join(format!("{bin}{ext}")).is_file() {
+                            return Some(bin);
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    if dir.join(bin).is_file() {
+                        return Some(bin);
+                    }
+                }
+            }
+        }
+        None
+    })();
+
+    if let Ok(mut guard) = RESOLVED_HERDR_BIN.lock() {
+        *guard = Some(found);
+    }
+    found
+}
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]
@@ -35,13 +81,23 @@ impl HerdrClient {
         }
         #[cfg(unix)]
         {
+            let mut bases = Vec::new();
+            if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+                bases.push(PathBuf::from(runtime));
+            }
+            if let Some(config) = dirs::config_dir() {
+                bases.push(config);
+            }
             if let Some(home) = dirs::home_dir() {
+                bases.push(home.join(".config"));
+            }
+            for base in bases {
                 for (dir, file) in [
                     ("herdr", "herdr.sock"),
                     ("telardev", "telardev.sock"),
                     ("telar", "telar.sock"),
                 ] {
-                    let sock = home.join(".config").join(dir).join(file);
+                    let sock = base.join(dir).join(file);
                     if sock.exists() {
                         return Some(sock);
                     }
@@ -286,34 +342,50 @@ impl HerdrClient {
     }
 
     fn run_herdr_cli(args: &[&str]) -> Option<Value> {
-        for bin in ["herdr", "telardev", "telar"] {
-            let mut cmd = Command::new(bin);
-            cmd.args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+        let bin = resolve_available_herdr_binary()?;
+        let mut cmd = Command::new(bin);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
 
-            #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
-
-            let Ok(output) = cmd.output() else {
-                continue;
-            };
-            if !output.status.success() {
-                continue;
-            }
-            let Ok(raw) = String::from_utf8(output.stdout) else {
-                continue;
-            };
-            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
-                return Some(v);
-            }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        None
+
+        let mut child = cmd.spawn().ok()?;
+        let stdout_pipe = child.stdout.take()?;
+        let out_handle = std::thread::spawn(move || {
+            let mut s = String::new();
+            let _ = stdout_pipe.take(512 * 1024).read_to_string(&mut s);
+            s
+        });
+
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return None;
+                    }
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                Err(_) => return None,
+            }
+        };
+
+        if !status.success() {
+            return None;
+        }
+
+        let raw = out_handle.join().unwrap_or_default();
+        serde_json::from_str::<Value>(&raw).ok()
     }
 
     pub fn get_panes() -> Vec<HerdrPane> {

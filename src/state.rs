@@ -295,7 +295,6 @@ impl AppState {
         clicked_row: usize,
         actual_scroll_offset: usize,
     ) -> Option<ClickAction> {
-        self.needs_redraw = true;
         let absolute_line = clicked_row + actual_scroll_offset;
 
         // 1. Prioridad: Acciones especiales exactas (abrir carpeta, diff, quick peek o visibilidad)

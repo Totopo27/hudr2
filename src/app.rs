@@ -27,18 +27,21 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
     QuotaCollector::discover_accounts_for(&project_dir, &mut accounts_copy);
     QuotaCollector::hydrate_accounts_from_cache(&mut accounts_copy, cache_path.as_deref());
 
-    let panes = HerdrClient::get_panes();
+    let panes = tokio::task::spawn_blocking(HerdrClient::get_panes)
+        .await
+        .unwrap_or_default();
     let (my_pane_id, my_tab_id) = HerdrClient::get_current_pane_and_tab(&panes);
 
     let dir_clone = project_dir.clone();
     let panes_clone = panes.clone();
+    let accounts_for_opencode = accounts_copy.clone();
     let my_pid_clone = my_pane_id.clone();
     let my_tid_clone = my_tab_id.clone();
     let opencode_fut = tokio::task::spawn_blocking(move || {
         if let Some((_, pi_session)) = crate::pi::try_read_pi_session(
             &dir_clone,
             &panes_clone,
-            &accounts_copy,
+            &accounts_for_opencode,
             my_pid_clone.as_deref(),
             my_tid_clone.as_deref(),
         ) {
@@ -47,7 +50,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         read_opencode_session(
             &dir_clone,
             &panes_clone,
-            &accounts_copy,
+            &accounts_for_opencode,
             my_pid_clone.as_deref(),
             my_tid_clone.as_deref(),
         )
@@ -117,19 +120,15 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.ecosystem = eco;
         }
 
-        // Descubrir cuentas e hidratar desde caché en disco (0ms) cuando hay config_path activo
-        QuotaCollector::discover_accounts_for(&project_dir, &mut state.snapshot.accounts);
-        if let Some(ref cp) = cache_path {
-            QuotaCollector::hydrate_accounts_from_cache(&mut state.snapshot.accounts, Some(cp));
-        }
         let active_model = if !state.snapshot.agent_session.model.is_empty() {
             state.snapshot.agent_session.model.clone()
         } else {
             state.snapshot.agent_session.model_short.clone()
         };
-        for acc in &mut state.snapshot.accounts {
+        for acc in &mut accounts_copy {
             QuotaCollector::sync_account_health_for_model(acc, &active_model);
         }
+        state.snapshot.accounts = accounts_copy;
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
 

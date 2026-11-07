@@ -295,7 +295,17 @@ pub fn collect_cross_session_conflicts(
 pub fn is_sensitive_file(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let name = norm.rsplit('/').next().unwrap_or(&norm).to_lowercase();
-    name.starts_with(".env")
+    let lower_path = norm.to_lowercase();
+
+    lower_path.contains("/.ssh/")
+        || lower_path.starts_with(".ssh/")
+        || lower_path.contains("/.aws/")
+        || lower_path.starts_with(".aws/")
+        || lower_path.contains("/.kube/")
+        || lower_path.starts_with(".kube/")
+        || lower_path.contains("/.gnupg/")
+        || lower_path.starts_with(".gnupg/")
+        || name.starts_with(".env")
         || [
             "secret",
             "credential",
@@ -308,6 +318,10 @@ pub fn is_sensitive_file(path: &str) -> bool {
             ".pfx",
             "id_rsa",
             "id_ed25519",
+            "id_ecdsa",
+            "id_dsa",
+            ".keystore",
+            ".jks",
             ".netrc",
             ".npmrc",
         ]
@@ -406,6 +420,14 @@ pub fn read_file_quick_peek(target_dir: &str, rel_path: &str) -> Vec<String> {
 }
 
 fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usize) -> Vec<String> {
+    let p = Path::new(rel_path);
+    if p.is_absolute()
+        || p.components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return vec!["[ruta inválida fuera del repositorio]".to_string()];
+    }
+
     if is_sensitive_file(rel_path) {
         return vec!["[archivo sensible protegido - diff oculto]".to_string()];
     }
@@ -413,6 +435,14 @@ fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usi
     let Some((repo_root, _)) = find_git_root_and_dir(target_dir) else {
         return vec!["[no es un repositorio git]".to_string()];
     };
+
+    let full_path = repo_root.join(rel_path);
+    if let Ok(canon_root) = repo_root.canonicalize()
+        && let Ok(canon_path) = full_path.canonicalize()
+        && !canon_path.starts_with(&canon_root)
+    {
+        return vec!["[ruta inválida fuera del repositorio]".to_string()];
+    }
 
     if let Some(diff_out) = run_git_cmd(
         &repo_root,

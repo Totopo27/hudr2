@@ -1,5 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[cfg(target_os = "windows")]
 const WINDOWS_FALLBACK_DRIVES: [char; 4] = ['C', 'D', 'E', 'F'];
@@ -272,23 +271,21 @@ pub fn resolve_engram_binary() -> Option<PathBuf> {
         return p.exists().then_some(p);
     }
 
-    // 1. Verificar si 'engram' está disponible globalmente en PATH
-    let probe_cmd = if cfg!(target_os = "windows") {
-        "where"
-    } else {
-        "which"
-    };
-    if let Ok(output) = Command::new(probe_cmd).arg("engram").output()
-        && output.status.success()
-    {
-        let path_str = String::from_utf8_lossy(&output.stdout);
-        if let Some(first_line) = path_str.lines().next() {
-            let p = PathBuf::from(first_line.trim());
-            if p.exists() {
-                return Some(p);
+    // 1. Verificar si 'engram' está disponible globalmente en PATH sin invocar subprocesos
+    if let Some(path_var) = std::env::var_os("PATH") {
+        let exe_names = if cfg!(target_os = "windows") {
+            &["engram.exe", "engram.cmd", "engram.bat", "engram"][..]
+        } else {
+            &["engram"][..]
+        };
+        for dir in std::env::split_paths(&path_var) {
+            for &exe in exe_names {
+                let candidate = dir.join(exe);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
             }
         }
-        return Some(PathBuf::from("engram"));
     }
 
     // 2. Probar rutas conocidas según el sistema operativo

@@ -353,7 +353,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Duration::from_millis(2000)
                     }
                 } else if has_ipc {
-                    Duration::from_secs(12)
+                    Duration::from_secs(60)
                 } else {
                     Duration::from_secs(5)
                 }
@@ -500,7 +500,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let mut state = app_state.write().await;
-                            state.needs_redraw = true;
                             if let Some(action) =
                                 state.handle_mouse_click(mouse.row as usize, last_rendered_offset)
                             {
@@ -552,7 +551,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             should_quit = true;
                         } else {
                             let mut state = app_state.write().await;
-                            state.needs_redraw = true;
                             match norm_code {
                                 KeyCode::Char('q') => should_quit = true,
                                 KeyCode::Char('c') => {

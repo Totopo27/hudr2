@@ -349,6 +349,9 @@ pub fn read_pi_session_file(
 
     let result = tail.session.clone();
     if let Ok(mut guard) = PI_TAIL_CACHE.lock() {
+        if guard.len() >= 64 {
+            guard.clear();
+        }
         guard.insert(key, tail);
     }
 

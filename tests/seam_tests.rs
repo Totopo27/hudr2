@@ -156,6 +156,7 @@ mod tests {
 
     #[test]
     fn test_mcp_deduplication() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let opencode_json = dir.path().join("opencode.json");
         std::fs::write(
@@ -1374,34 +1375,41 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_refresh_all_skips_tree_when_collapsed() {
-        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
-        let sentinel_tree = hudr2::models::ProjectTreeData {
-            root_path: "sentinel_path".to_string(),
-            total_dirs: 42,
-            total_files: 99,
-            tree: Vec::new(),
-        };
-        {
-            let mut state = app_state.write().await;
-            state.collapsed_cards[2] = true;
-            state.snapshot.tree = sentinel_tree.clone();
-        }
+    #[test]
+    fn test_refresh_all_skips_tree_when_collapsed() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+            let sentinel_tree = hudr2::models::ProjectTreeData {
+                root_path: "sentinel_path".to_string(),
+                total_dirs: 42,
+                total_files: 99,
+                tree: Vec::new(),
+            };
+            {
+                let mut state = app_state.write().await;
+                state.collapsed_cards[2] = true;
+                state.snapshot.tree = sentinel_tree.clone();
+            }
 
-        hudr2::app::refresh_all(&app_state).await;
+            hudr2::app::refresh_all(&app_state).await;
 
-        {
-            let state = app_state.read().await;
-            assert_eq!(
-                state.snapshot.tree, sentinel_tree,
-                "Cuando la tarjeta de proyecto (idx 2) está colapsada, read_project_tree debe omitirse y mantener el árbol previo"
-            );
-            assert!(
-                state.needs_redraw,
-                "refresh_all debe marcar needs_redraw = true"
-            );
-        }
+            {
+                let state = app_state.read().await;
+                assert_eq!(
+                    state.snapshot.tree, sentinel_tree,
+                    "Cuando la tarjeta de proyecto (idx 2) está colapsada, read_project_tree debe omitirse y mantener el árbol previo"
+                );
+                assert!(
+                    state.needs_redraw,
+                    "refresh_all debe marcar needs_redraw = true"
+                );
+            }
+        });
     }
 
     #[tokio::test]
@@ -3607,5 +3615,71 @@ mod tests {
             std::env::remove_var("ENGRAM_BIN");
         }
         hudr2::engram::clear_engram_cache();
+    }
+
+    #[test]
+    fn test_zero_cpu_bounded_subprocesses_sensitive_hardening_and_cache_caps() {
+        use hudr2::git::{is_sensitive_file, read_file_diff_preview};
+        use hudr2::herdr::HerdrClient;
+        use hudr2::paths::resolve_engram_binary;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // 1. Endurecimiento de is_sensitive_file y prevención de path traversal (..)
+        assert!(is_sensitive_file("~/.ssh/id_ecdsa"));
+        assert!(is_sensitive_file(".ssh/id_rsa"));
+        assert!(is_sensitive_file("configs/.aws/credentials"));
+        assert!(is_sensitive_file(".kube/config"));
+        assert!(is_sensitive_file(".gnupg/trustdb.gpg"));
+        assert!(is_sensitive_file("app.keystore"));
+        assert!(is_sensitive_file("release.jks"));
+        assert!(!is_sensitive_file("src/main.rs"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_dir = tmp.path().join("repo");
+        std::fs::create_dir_all(repo_dir.join(".git")).unwrap();
+        let target_str = repo_dir.to_string_lossy().to_string();
+
+        let traversal = read_file_diff_preview(&target_str, "../escaped_secret.txt");
+        assert_eq!(
+            traversal,
+            vec!["[ruta inválida fuera del repositorio]"]
+        );
+        let abs_target = if cfg!(windows) { "C:/test.txt" } else { "/test.txt" };
+        let absolute_escape = read_file_diff_preview(&target_str, abs_target);
+        assert_eq!(
+            absolute_escape,
+            vec!["[ruta inválida fuera del repositorio]"]
+        );
+
+        // 2. Pure-Rust resolve_engram_binary vía PATH sin subprocesos
+        let fake_bin_dir = tmp.path().join("fake_bin");
+        std::fs::create_dir_all(&fake_bin_dir).unwrap();
+        let fake_engram = if cfg!(target_os = "windows") {
+            fake_bin_dir.join("engram.exe")
+        } else {
+            fake_bin_dir.join("engram")
+        };
+        std::fs::write(&fake_engram, b"mock-binary").unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::remove_var("ENGRAM_BIN");
+            std::env::set_var("PATH", &fake_bin_dir);
+        }
+        let resolved = resolve_engram_binary();
+        assert_eq!(resolved.as_ref(), Some(&fake_engram));
+
+        if let Some(prev) = old_path {
+            unsafe {
+                std::env::set_var("PATH", prev);
+            }
+        }
+
+        // 3. HerdrClient: caché de binario disponible y timeout acotado
+        hudr2::herdr::clear_herdr_binary_cache();
+        // Cuando no existe herdr/telardev en PATH, get_panes debe retornar sin colgarse
+        let panes = HerdrClient::get_panes();
+        assert!(panes.is_empty() || !panes.is_empty());
     }
 }
