@@ -26,15 +26,15 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 ## Muestra visual
 
 <p align="center">
-  <img src="hudr2_sidebar_tarjetas.png" width="32%" alt="HUDR2 con todas las tarjetas activas" />
-  <img src="hudr2_integraciones_alerta.png" width="32%" alt="HUDR2 con alerta crítica y desgaste de cuotas" />
-  <img src="hudr2_sidebar_ocultas.png" width="32%" alt="HUDR2 en modo compacto con tarjetas ocultas" />
+  <img src="hudr2_themes.png" width="100%" alt="HUDR2 · Colección Cromática Definitiva de 5 Temas" />
 </p>
 
-*De izquierda a derecha:*
-1. **Sidebar completo:** Todas las tarjetas activas y selector de visibilidad interactivo desplegado (`t` o `0`).
-2. **Telemetría viva y migración crítica:** Identificación de cuenta local activa (`>`), sesiones concurrentes (`●` púrpura), advertencia de desgaste progresivo (ámbar) y alerta de migración en caliente (`x`) al agotarse una cuenta (`!`).
-3. **Modo compacto:** Ocultación de tarjetas secundarias para terminales pequeñas, reteniendo solo métricas esenciales en apenas 30 líneas.
+*Suite cromática contemporánea de 5 identidades visuales para terminal (de izquierda a derecha):*
+1. **Linear Studio (Moderno):** Identidad púrpura Linear con títulos en Periwinkle (`#7B8AFF`), marco violeta calibrado (`#583F78`), etiquetas Slate Plata (`#94A3B8`) y cursor rosa (`#F095C8`).
+2. **Electric Cyber:** Alta energía Cyberpunk con títulos y salud en Electric Lime (`#A3E635`), fondo Midnight Navy (`#111827`) y cursor Cyan Neón (`#38BDF8`).
+3. **Bauhaus Minimal:** Estética arquitectónica Mies van der Rohe con títulos Naranja (`#F97316`), marcos Teal (`#0F766E`) y tipografía marfil cálido (`#FFFBEB`).
+4. **Synthwave Sunset:** Contraste retro sunset con títulos Coral Pink (`#FB7185`), marcos Ocean Teal (`#0E7490`) y tipografía Ice Blue (`#ECFEFF`).
+5. **Editorial Velvet:** Sofisticación tipográfica suiza con títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
 
 ---
 
