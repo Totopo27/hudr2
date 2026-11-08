@@ -151,25 +151,34 @@ impl HerdrClient {
             } else {
                 return None;
             };
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(pipe_name)
-                .ok()?;
-            writeln!(
-                file,
-                "{}",
-                json!({"id": "hud", "method": method, "params": params})
-            )
-            .ok()?;
-            file.flush().ok()?;
-            let mut line = String::new();
-            BufReader::new(file).read_line(&mut line).ok()?;
-            let v: Value = serde_json::from_str(&line).ok()?;
-            if !v["error"].is_null() {
-                return None;
-            }
-            Some(v["result"].clone())
+            let (tx, rx) = std::sync::mpsc::channel();
+            let method_str = method.to_string();
+            let params_val = params.clone();
+            std::thread::spawn(move || {
+                let run = || -> Option<Value> {
+                    let mut file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&pipe_name)
+                        .ok()?;
+                    writeln!(
+                        file,
+                        "{}",
+                        json!({"id": "hud", "method": method_str, "params": params_val})
+                    )
+                    .ok()?;
+                    file.flush().ok()?;
+                    let mut line = String::new();
+                    BufReader::new(file).read_line(&mut line).ok()?;
+                    let v: Value = serde_json::from_str(&line).ok()?;
+                    if !v["error"].is_null() {
+                        return None;
+                    }
+                    Some(v["result"].clone())
+                };
+                let _ = tx.send(run());
+            });
+            rx.recv_timeout(Duration::from_millis(1500)).ok().flatten()
         }
         #[cfg(not(any(unix, windows)))]
         {

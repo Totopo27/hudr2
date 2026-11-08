@@ -469,12 +469,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // 2. Esperar el próximo evento sin consumir CPU (0% en reposo)
-        let next_msg = if let Some(wait_dur) = app_state
-            .read()
-            .await
-            .flash_notice_until
-            .map(|u| u.saturating_duration_since(Instant::now()))
-        {
+        let flash_wait = {
+            let st = app_state.read().await;
+            st.flash_notice_until
+                .map(|u| u.saturating_duration_since(Instant::now()))
+        };
+        let next_msg = if let Some(wait_dur) = flash_wait {
             match tokio::time::timeout(wait_dur, rx.recv()).await {
                 Ok(Some(m)) => Some(m),
                 Ok(None) => break,
@@ -508,7 +508,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         git_dirty = true;
                     }
                 }
-                MainMsg::Redraw => {}
+                MainMsg::Redraw => {
+                    app_state.write().await.needs_redraw = true;
+                }
                 MainMsg::QuotaTick => {
                     quota_tick = true;
                     if is_auto_theme {

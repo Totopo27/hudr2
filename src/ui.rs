@@ -294,6 +294,7 @@ pub fn render_screen_with_diff(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_diff_and_theme(
     snap: &TelemetrySnapshot,
     collapsed: &[bool; 11],

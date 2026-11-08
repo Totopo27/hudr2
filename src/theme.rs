@@ -510,12 +510,13 @@ pub fn parse_herdr_theme_name(content: &str) -> Option<String> {
             in_theme_section = section == "theme";
             continue;
         }
-        if in_theme_section && clean_line.starts_with("name") {
-            if let Some((_, raw_val)) = clean_line.split_once('=') {
-                let clean = raw_val.trim().trim_matches(['"', '\'']);
-                if !clean.is_empty() {
-                    return Some(clean.to_string());
-                }
+        if in_theme_section
+            && clean_line.starts_with("name")
+            && let Some((_, raw_val)) = clean_line.split_once('=')
+        {
+            let clean = raw_val.trim().trim_matches(['"', '\'']);
+            if !clean.is_empty() {
+                return Some(clean.to_string());
             }
         }
     }
@@ -605,12 +606,12 @@ pub fn resolve_adaptive_theme() -> &'static Theme {
 
     cache.last_mtime = current_mtime;
 
-    if let Ok(content) = std::fs::read_to_string(&path) {
-        if let Some(herdr_name) = parse_herdr_theme_name(&content) {
-            let adopted = adopt_herdr_theme(&herdr_name);
-            cache.cached_theme = adopted;
-            return adopted;
-        }
+    if let Ok(content) = std::fs::read_to_string(&path)
+        && let Some(herdr_name) = parse_herdr_theme_name(&content)
+    {
+        let adopted = adopt_herdr_theme(&herdr_name);
+        cache.cached_theme = adopted;
+        return adopted;
     }
 
     // Si existe archivo de Herdr pero no especifica tema, Herdr usa Catppuccin por defecto

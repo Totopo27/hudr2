@@ -1,4 +1,4 @@
-#[cfg(test)]
+﻿#[cfg(test)]
 mod tests {
     use hudr2::models::HerdrPane;
     use hudr2::opencode::{extract_prefix, resolve_pool_account_prefixes};
@@ -3760,5 +3760,34 @@ mod tests {
         assert_eq!(active_theme().id, "catppuccin");
         set_active_theme(&LINEAR_STUDIO);
         assert_eq!(active_theme().id, "linear");
+    }
+
+    #[tokio::test]
+    async fn test_windows_ipc_timeout_and_silent_quota_notice_clear() {
+        use hudr2::herdr::HerdrClient;
+        use std::path::Path;
+
+        let dummy_pipe = if cfg!(windows) {
+            Path::new(r"\\.\pipe\hudr2_nonexistent_ipc_test")
+        } else {
+            Path::new("/tmp/hudr2_nonexistent_ipc.sock")
+        };
+        let res = HerdrClient::request_ipc_at(dummy_pipe, "pane.list", serde_json::json!({}));
+        assert!(res.is_none());
+
+        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(hudr2::state::AppState::new()));
+        {
+            let mut st = app_state.write().await;
+            st.set_flash_notice(Some("+ Cuotas (2/9)".to_string()), 5000);
+        }
+        hudr2::app::force_refresh_with_notify(&app_state, false, false, None).await;
+        {
+            let st = app_state.read().await;
+            assert_ne!(
+                st.flash_notice.as_deref(),
+                Some("+ Cuotas (2/9)"),
+                "El aviso residual de cuotas debe limpiarse al finalizar el barrido silencioso"
+            );
+        }
     }
 }

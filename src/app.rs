@@ -465,6 +465,15 @@ pub async fn force_refresh_with_notify(
         state.set_flash_notice(Some(msg.to_string()), 4000);
         drop(state);
         wake();
+    } else {
+        let mut state = app_state.write().await;
+        if state.flash_notice.as_deref().is_some_and(|n| n.starts_with("+ Cuotas (")) {
+            state.flash_notice = None;
+            state.flash_notice_until = None;
+            state.needs_redraw = true;
+            drop(state);
+            wake();
+        }
     }
 }
 
