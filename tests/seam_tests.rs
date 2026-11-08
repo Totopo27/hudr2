@@ -1,6 +1,6 @@
-﻿#[cfg(test)]
+#[cfg(test)]
 mod tests {
-    use hudr2::models::HerdrPane;
+    use hudr2::models::{HerdrPane, TelemetrySnapshot};
     use hudr2::opencode::{extract_prefix, resolve_pool_account_prefixes};
     use hudr2::state::{AppState, ClickAction};
     use hudr2::tree::read_mcp_servers;
@@ -2305,13 +2305,18 @@ mod tests {
         );
         let clean = ui::strip_ansi(&render_out.lines.join("\n"));
 
-        // Comprobar que aparecen los items con sus casillas activas y fija
+        // Comprobar que aparecen los items con sus casillas activas y sin fila fija redundante
         assert!(clean.contains("Tarjetas"), "debe mostrar el título Tarjetas");
         assert!(clean.contains("[✓] Estado"));
         assert!(clean.contains("[✓] Contexto"));
         assert!(clean.contains("[✓] Proyecto"));
-        assert!(clean.contains("[✓] Tarjetas"));
-        assert!(clean.contains("fija"));
+        assert!(!clean.contains("fija"), "la fila fija redundante fue removida");
+        assert!(!clean.contains("[✓] Tarjetas"), "no debe listar Tarjetas dentro de Tarjetas");
+        assert!(clean.contains("Nombre"), "debe incluir sección de Nombre");
+        assert!(clean.contains("HUDR2"), "debe indicar nombre por defecto");
+        assert!(clean.contains("[defecto]"));
+        assert!(clean.contains("Tema"), "debe incluir sección interactiva de Tema");
+        assert!(clean.contains("[cambiar >]"));
 
         // Ocultar card "proyecto"
         state.toggle_card_visibility("proyecto");
@@ -2402,6 +2407,8 @@ mod tests {
         st.toggle_card_visibility("ecosystem");
         st.toggle_card_visibility("engram");
         st.toggle_card(10); // expandir tarjetas
+        st.set_sidebar_name(Some("Mi Proyecto HUD".to_string()));
+        st.cycle_theme(); // avanza a "linear"
 
         assert!(cfg_path.exists(), "hudr2.json debe existir tras persistencia atómica");
 
@@ -2411,6 +2418,86 @@ mod tests {
         assert!(st2.is_card_hidden("engram"));
         assert!(!st2.is_card_hidden("estado"));
         assert!(!st2.collapsed_cards[10]); // recuerda el estado colapsado/expandido
+        assert_eq!(st2.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
+        assert_eq!(st2.theme.as_deref(), Some("linear"));
+        assert_eq!(st2.snapshot.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
+        assert_eq!(st2.snapshot.theme_name.as_deref(), Some("linear"));
+    }
+
+    #[test]
+    fn test_custom_sidebar_name_gs3_style() {
+        let mut snap = TelemetrySnapshot::default();
+        let collapsed = [true; 11];
+
+        // 1. Fallback por defecto: HUDR2
+        let out_default = ui::render_screen(&snap, &collapsed, None, 48);
+        let header_def = ui::strip_ansi(&out_default.lines[0]);
+        assert!(header_def.contains(":: HUDR2 ::"));
+
+        // 2. Nombre personalizado estilo gs3-sidebar
+        snap.sidebar_name = Some("Gentle Shell".to_string());
+        let out_custom = ui::render_screen(&snap, &collapsed, None, 48);
+        let header_custom = ui::strip_ansi(&out_custom.lines[0]);
+        assert!(header_custom.contains(":: Gentle Shell ::"));
+
+        // 3. Tarjetas card muestra el nombre y la insignia [personalizado]
+        let mut collapsed_open = [true; 11];
+        collapsed_open[10] = false;
+        let out_card = ui::render_screen(&snap, &collapsed_open, None, 48);
+        let clean_card = ui::strip_ansi(&out_card.lines.join("\n"));
+        assert!(clean_card.contains("Nombre  Gentle Shell"));
+        assert!(clean_card.contains("[personalizado]"));
+
+        // 4. Protección contra desbordamiento en anchos reducidos (ancho 20)
+        snap.sidebar_name = Some("Nombre Extremadamente Largo Que Desborda El Panel".to_string());
+        let out_narrow = ui::render_screen(&snap, &collapsed, None, 20);
+        let narrow_header = &out_narrow.lines[0];
+        assert!(ui::string_width(narrow_header) <= 20, "el header nunca debe exceder el ancho");
+    }
+
+    #[test]
+    fn test_theme_cycle_interaction_and_persistence() {
+        let mut state = AppState::new();
+        state.collapsed_cards[10] = false; // Expandir Tarjetas
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        state.card_bounds = render_out.bounds;
+
+        // Buscar la línea de bound para ciclar tema
+        let theme_start_line = state
+            .card_bounds
+            .iter()
+            .find(|b| b.action_type == Some("cycle_theme"))
+            .expect("debe existir bound interactivo para ciclar tema")
+            .start_line;
+
+        // Clic en la fila de tema
+        let click_res = state.handle_mouse_click(theme_start_line, 0);
+        assert_eq!(
+            click_res,
+            Some(ClickAction::CycleTheme("linear".to_string())),
+            "primer ciclo debe avanzar a linear"
+        );
+        assert_eq!(state.theme.as_deref(), Some("linear"));
+        assert_eq!(hudr2::theme::active_theme().id, "linear");
+        assert!(state.flash_notice.as_ref().unwrap().contains("Linear Studio"));
+
+        // Siguiente ciclo avanza a "cyber"
+        let click_res2 = state.handle_mouse_click(theme_start_line, 0);
+        assert_eq!(
+            click_res2,
+            Some(ClickAction::CycleTheme("cyber".to_string()))
+        );
+        assert_eq!(state.theme.as_deref(), Some("cyber"));
+        assert_eq!(hudr2::theme::active_theme().id, "cyber");
     }
 
     #[test]

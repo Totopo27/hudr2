@@ -34,6 +34,7 @@ Opciones:
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
   --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 13 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
+  --name, --title    Nombre personalizado del sidebar (por defecto: HUDR2)
   -h, --help         Muestra esta ayuda";
 
 struct CliArgs {
@@ -43,6 +44,7 @@ struct CliArgs {
     cwd: Option<String>,
     config_path: Option<PathBuf>,
     theme: Option<String>,
+    sidebar_name: Option<String>,
     show_help: bool,
 }
 
@@ -54,6 +56,7 @@ fn parse_cli_args() -> CliArgs {
     let mut cwd = None;
     let mut config_path = None;
     let mut theme = None;
+    let mut sidebar_name = None;
     let mut show_help = false;
 
     while let Some(arg) = args.next() {
@@ -81,6 +84,11 @@ fn parse_cli_args() -> CliArgs {
                     theme = Some(v);
                 }
             }
+            "--name" | "--title" => {
+                if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
+                    sidebar_name = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -92,6 +100,7 @@ fn parse_cli_args() -> CliArgs {
         cwd,
         config_path,
         theme,
+        sidebar_name,
         show_help,
     }
 }
@@ -141,23 +150,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    // Inicializar tema visual: adaptativo desde Herdr o forzado por CLI
-    let is_auto_theme = matches!(cli.theme.as_deref(), None | Some("auto") | Some("herdr"));
-    let active_theme = match cli.theme.as_deref() {
-        Some("auto") | Some("herdr") | None => hudr2::theme::resolve_adaptive_theme(),
-        Some(name) => hudr2::theme::find_theme(name).unwrap_or_else(|| {
+    let resolved_config = cli
+        .config_path
+        .or_else(|| Some(hudr2::paths::resolve_hudr2_config_path()));
+    let mut initial_state = state::AppState::with_config(
+        resolved_config,
+        cli.cwd.clone(),
+    );
+
+    if let Some(ref name) = cli.sidebar_name {
+        initial_state.set_sidebar_name(Some(name.clone()));
+    }
+
+    if let Some(ref th) = cli.theme {
+        initial_state.theme = Some(th.clone());
+        initial_state.snapshot.theme_name = Some(th.clone());
+    }
+
+    // Inicializar tema visual: prioridad CLI -> config persistida -> adaptativo Herdr
+    let target_theme_str = initial_state.theme.as_deref().unwrap_or("auto");
+    let active_theme = match target_theme_str {
+        "auto" | "herdr" => hudr2::theme::resolve_adaptive_theme(),
+        name => hudr2::theme::find_theme(name).unwrap_or_else(|| {
             hudr2::theme::resolve_adaptive_theme()
         }),
     };
     hudr2::theme::set_active_theme(active_theme);
 
-    let resolved_config = cli
-        .config_path
-        .or_else(|| Some(hudr2::paths::resolve_hudr2_config_path()));
-    let app_state = Arc::new(RwLock::new(state::AppState::with_config(
-        resolved_config,
-        cli.cwd.clone(),
-    )));
+    let app_state = Arc::new(RwLock::new(initial_state));
 
     // 1. Carga inicial rápida de datos locales
     app::refresh_all(&app_state).await;
@@ -513,7 +533,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 MainMsg::QuotaTick => {
                     quota_tick = true;
-                    if is_auto_theme {
+                    let is_auto = {
+                        let s = app_state.read().await;
+                        s.is_auto_theme()
+                    };
+                    if is_auto {
                         let resolved = hudr2::theme::resolve_adaptive_theme();
                         if resolved.id != hudr2::theme::active_theme().id {
                             hudr2::theme::set_active_theme(resolved);
@@ -556,7 +580,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     state::ClickAction::ToggleGitFileDiff(_)
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
-                                    | state::ClickAction::ToggleCardVisibility(_) => {}
+                                    | state::ClickAction::ToggleCardVisibility(_)
+                                    | state::ClickAction::CycleTheme(_) => {}
                                 }
                             }
                         }
@@ -607,6 +632,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 KeyCode::Char('9') => state.toggle_card(8), // MCP
                                 KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
                                 KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Tarjetas
+                                KeyCode::Char('m') => {
+                                    state.cycle_theme();
+                                }
                                 KeyCode::Char('s') => {
                                     let state_ref = app_state.clone();
                                     let tx_done = tx.clone();

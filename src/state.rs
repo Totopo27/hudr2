@@ -26,20 +26,26 @@ pub const DEFAULT_COLLAPSED: [bool; 11] = [
 pub struct ConfigData {
     pub collapsed: [bool; 11],
     pub hidden: HashSet<String>,
+    pub theme: Option<String>,
+    pub sidebar_name: Option<String>,
 }
 
-/// Carga la configuración (tarjetas colapsadas y ocultas) desde un archivo JSON.
+/// Carga la configuración (tarjetas colapsadas y ocultas, tema y nombre de sidebar) desde un archivo JSON.
 pub fn load_config(path: &Path) -> ConfigData {
     let Ok(bytes) = std::fs::read(path) else {
         return ConfigData {
             collapsed: DEFAULT_COLLAPSED,
             hidden: HashSet::new(),
+            theme: None,
+            sidebar_name: None,
         };
     };
     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
         return ConfigData {
             collapsed: DEFAULT_COLLAPSED,
             hidden: HashSet::new(),
+            theme: None,
+            sidebar_name: None,
         };
     };
 
@@ -62,14 +68,35 @@ pub fn load_config(path: &Path) -> ConfigData {
         }
     }
 
-    ConfigData { collapsed, hidden }
+    let theme = v
+        .get("theme")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let sidebar_name = v
+        .get("sidebar_name")
+        .or_else(|| v.get("name"))
+        .or_else(|| v.get("title"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    ConfigData {
+        collapsed,
+        hidden,
+        theme,
+        sidebar_name,
+    }
 }
 
-/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas y ocultas.
+/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema y nombre.
 pub fn save_config(
     path: &Path,
     collapsed: &[bool; 11],
     hidden: &HashSet<String>,
+    theme: Option<&str>,
+    sidebar_name: Option<&str>,
 ) -> Result<(), String> {
     let collapsed_names: Vec<&str> = CARD_KEYS
         .iter()
@@ -81,10 +108,16 @@ pub fn save_config(
         .copied()
         .filter(|&k| k != "tarjetas" && hidden.contains(k))
         .collect();
-    let payload = json!({
+    let mut payload = json!({
         "collapsed": collapsed_names,
         "hidden": hidden_names,
     });
+    if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
+        payload["theme"] = json!(t);
+    }
+    if let Some(n) = sidebar_name.filter(|s| !s.trim().is_empty()) {
+        payload["sidebar_name"] = json!(n);
+    }
     let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
     crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
 }
@@ -110,6 +143,8 @@ pub struct AppState {
     pub selected_diff_file: Option<String>,
     pub selected_diff_lines: Vec<String>,
     pub quick_peek: Option<QuickPeekState>,
+    pub theme: Option<String>,
+    pub sidebar_name: Option<String>,
 }
 
 impl AppState {
@@ -136,6 +171,8 @@ impl AppState {
             selected_diff_file: None,
             selected_diff_lines: Vec::new(),
             quick_peek: None,
+            theme: None,
+            sidebar_name: None,
         }
     }
 
@@ -148,6 +185,10 @@ impl AppState {
             let cfg = load_config(p);
             s.collapsed_cards = cfg.collapsed;
             s.hidden_cards = cfg.hidden;
+            s.theme = cfg.theme.clone();
+            s.sidebar_name = cfg.sidebar_name.clone();
+            s.snapshot.theme_name = cfg.theme;
+            s.snapshot.sidebar_name = cfg.sidebar_name;
         }
         s.config_path = config_path;
         s
@@ -155,8 +196,48 @@ impl AppState {
 
     fn persist_config_if_configured(&self) {
         if let Some(ref path) = self.config_path {
-            let _ = save_config(path, &self.collapsed_cards, &self.hidden_cards);
+            let _ = save_config(
+                path,
+                &self.collapsed_cards,
+                &self.hidden_cards,
+                self.theme.as_deref(),
+                self.sidebar_name.as_deref(),
+            );
         }
+    }
+
+    pub fn is_auto_theme(&self) -> bool {
+        matches!(self.theme.as_deref(), None | Some("auto") | Some("herdr"))
+    }
+
+    pub fn cycle_theme(&mut self) -> String {
+        let next_key = crate::theme::next_theme_in_cycle(self.theme.as_deref());
+        self.theme = Some(next_key.to_string());
+        self.snapshot.theme_name = Some(next_key.to_string());
+
+        if next_key == "auto" {
+            let resolved = crate::theme::resolve_adaptive_theme();
+            crate::theme::set_active_theme(resolved);
+            self.set_flash_notice(
+                Some(format!("+ Tema: Auto (Herdr \u{00b7} {})", resolved.id)),
+                2500,
+            );
+        } else if let Some(th) = crate::theme::find_theme(next_key) {
+            crate::theme::set_active_theme(th);
+            self.set_flash_notice(Some(format!("+ Tema: {}", th.name)), 2500);
+        }
+
+        self.needs_redraw = true;
+        self.persist_config_if_configured();
+        next_key.to_string()
+    }
+
+    pub fn set_sidebar_name(&mut self, name: Option<String>) {
+        let clean = name.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        self.sidebar_name = clean.clone();
+        self.snapshot.sidebar_name = clean;
+        self.needs_redraw = true;
+        self.persist_config_if_configured();
     }
 
     pub fn set_flash_notice(&mut self, notice: Option<String>, duration_ms: u64) {
@@ -329,6 +410,9 @@ impl AppState {
             {
                 self.toggle_card_visibility(&p);
                 return Some(ClickAction::ToggleCardVisibility(p));
+            } else if action == "cycle_theme" {
+                let next_th = self.cycle_theme();
+                return Some(ClickAction::CycleTheme(next_th));
             }
         }
 
@@ -373,4 +457,5 @@ pub enum ClickAction {
     OpenQuickPeek(String),
     CloseQuickPeek,
     ToggleCardVisibility(String),
+    CycleTheme(String),
 }

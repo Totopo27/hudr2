@@ -82,8 +82,11 @@
 ## 10. `Tarjetas` (`id: "tarjetas"`, index `10`, key `0` / `t`)
 - **Header:** `Tarjetas` (collapsed by default).
 - **Rows:**
-  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Stack · Ecosistema`, `Herramientas & MCP`).
+  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
   - `[✓] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`).
   - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
-  - Fixed row: `[✓] Tarjetas` (`fija`), ensuring the user can never hide the settings card or lock themselves out.
-  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...]}`).
+  - Redundant fixed row `[✓] Tarjetas fija` was eliminated to prevent vertical waste.
+  - **Divider & Settings section:**
+    - `Nombre  <nombre>` with `[defecto]` or `[personalizado]` (`MINT`), customizing the top banner `:: <nombre> ::` (pattern adopted from `gs3-sidebar`). Configurable via `hudr2.json` or CLI `--name` / `--title`.
+    - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
+  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "..."}`).

@@ -441,6 +441,59 @@ pub static ALL_THEMES: [&Theme; 19] = [
     &HERDR_GENTLEMAN,
 ];
 
+/// Catálogo secuencial de selección interactiva (Auto + 5 Nativos + 14 Herdr).
+pub const THEME_CYCLE_KEYS: [&str; 20] = [
+    "auto",
+    "linear",
+    "cyber",
+    "bauhaus",
+    "synthwave",
+    "editorial",
+    "catppuccin",
+    "catppuccin-latte",
+    "terminal",
+    "tokyo-night",
+    "tokyo-night-day",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "gruvbox-light",
+    "one-dark",
+    "one-light",
+    "solarized",
+    "solarized-light",
+    "gentleman",
+];
+
+/// Devuelve la siguiente clave en el ciclo de temas a partir de la clave actual.
+pub fn next_theme_in_cycle(current_key: Option<&str>) -> &'static str {
+    let cur = current_key.unwrap_or("auto");
+    let pos = THEME_CYCLE_KEYS
+        .iter()
+        .position(|&k| k.eq_ignore_ascii_case(cur))
+        .unwrap_or(0);
+    THEME_CYCLE_KEYS[(pos + 1) % THEME_CYCLE_KEYS.len()]
+}
+
+/// Genera la etiqueta visual limpia para la fila de tema en la card de configuración.
+pub fn theme_display_label(theme_key: Option<&str>) -> String {
+    match theme_key.unwrap_or("auto") {
+        "auto" | "herdr" => {
+            let active = active_theme();
+            format!("Auto ({})", active.id)
+        }
+        other => {
+            if let Some(th) = find_theme(other) {
+                // Nombre legible abreviado si contiene paréntesis
+                let clean_name = th.name.split_once(" (").map(|(w, _)| w).unwrap_or(th.name);
+                clean_name.to_string()
+            } else {
+                other.to_string()
+            }
+        }
+    }
+}
+
 /// Adopta directamente la especificación cromática de Herdr por su nombre oficial.
 pub fn adopt_herdr_theme(herdr_name: &str) -> &'static Theme {
     let lower = herdr_name.trim().to_lowercase().replace([' ', '_'], "-");

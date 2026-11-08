@@ -332,9 +332,20 @@ pub fn render_screen_with_diff_and_theme(
     );
 
     // 1. Header Linear (Línea 0 fija siempre)
-    let banner_raw = ":: HUDR2 ::";
-    let banner_pad = width.saturating_sub(string_width(banner_raw)) / 2;
-    lines.push(format!("{}{accent_primary}:: HUDR2 ::{RESET}", " ".repeat(banner_pad)));
+    let raw_name = snap
+        .sidebar_name
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("HUDR2");
+    let banner_text = format!(":: {raw_name} ::");
+    let banner_w = string_width(&banner_text);
+    let banner_pad = width.saturating_sub(banner_w) / 2;
+    let safe_banner = if banner_w > width {
+        truncate_to_width(&banner_text, width)
+    } else {
+        banner_text
+    };
+    lines.push(format!("{}{accent_primary}{safe_banner}{RESET}", " ".repeat(banner_pad)));
 
     // 2. Estado Card (0)
     if !hidden_cards.contains("estado") {
@@ -1221,10 +1232,39 @@ pub fn render_screen_with_diff_and_theme(
             });
         }
 
-        // Fila fija para la card de Tarjetas misma (no puede ocultarse)
-        let fija_left = format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}Tarjetas{RESET}");
-        let fija_right = format!("{TEXT_DIM}fija{RESET}");
-        lines.push(draw_row(&fija_left, &fija_right, width));
+        // Divisor para opciones de personalización (Nombre + Tema)
+        lines.push(draw_divider(width));
+
+        // 1. Fila de Nombre personalizado del Sidebar (patrón gs3-sidebar)
+        let (name_left, name_badge) = match snap
+            .sidebar_name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            Some(n) => (
+                format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{n}{RESET}"),
+                format!("{MINT}[personalizado]{RESET}"),
+            ),
+            None => (
+                format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}HUDR2{RESET}"),
+                format!("{TEXT_DIM}[defecto]{RESET}"),
+            ),
+        };
+        lines.push(draw_row(&name_left, &name_badge, width));
+
+        // 2. Fila interactiva para ciclar temas visuales
+        let theme_label = crate::theme::theme_display_label(snap.theme_name.as_deref());
+        let theme_left = format!("{label_color}Tema{RESET}    {TEXT_PRIMARY}{theme_label}{RESET}");
+        let theme_right = format!("{accent_primary}[cambiar >]{RESET}");
+        let theme_row_idx = lines.len();
+        lines.push(draw_row(&theme_left, &theme_right, width));
+        bounds.push(CardBounds {
+            id: "cycle_theme",
+            start_line: theme_row_idx,
+            end_line: theme_row_idx,
+            action_type: Some("cycle_theme"),
+            action_path: None,
+        });
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
@@ -1238,7 +1278,7 @@ pub fn render_screen_with_diff_and_theme(
     // Footer de atajos
     lines.push(truncate_to_width(
         &format!(
-            "{TEXT_DIM} 0-9: colap \u{00b7} t: tarjetas \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
+            "{TEXT_DIM} 0-9: colap \u{00b7} t: tarjetas \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
         ),
         width,
     ));

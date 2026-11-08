@@ -177,4 +177,6 @@ pub struct TelemetrySnapshot {
     pub ecosystem: EcosystemTelemetry,
     pub my_pane_id: Option<String>,
     pub my_tab_id: Option<String>,
+    pub sidebar_name: Option<String>,
+    pub theme_name: Option<String>,
 }

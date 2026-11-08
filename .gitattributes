@@ -2,5 +2,6 @@
 *.cmd text eol=crlf
 *.bat text eol=crlf
 
-# Forzar LF para scripts shell Unix/Linux
+# Forzar LF para scripts shell Unix/Linux y código fuente Rust
 *.sh text eol=lf
+*.rs text eol=lf
