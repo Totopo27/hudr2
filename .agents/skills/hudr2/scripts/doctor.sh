@@ -15,7 +15,7 @@ warn(){ printf 'WARN  %s\n' "$*"; }
 [ -f "$REPO/Cargo.toml" ] || { fail "Cargo.toml not found at $REPO"; exit 1; }
 
 if [ "${1:-}" != "--quick" ]; then
-  if cargo test >/dev/null 2>&1; then
+  if cargo test -- --test-threads=1 >/dev/null 2>&1; then
     pass "cargo test passed"
   else
     fail "cargo test failed"
@@ -46,6 +46,12 @@ grep -q 'evaluate_account_for_model' "$REPO/src/ui.rs" && pass "dynamic multi-mo
 BIN="$REPO/target/release/hudr2"
 [ -f "$BIN.exe" ] && BIN="$BIN.exe"
 if [ -x "$BIN" ] || [ -f "$BIN" ]; then
+  ver="$("$BIN" --version 2>/dev/null || true)"
+  if echo "$ver" | grep -qE '^hudr2 [0-9]+\.[0-9]+\.[0-9]+'; then
+    pass "--version CLI flag ($ver)"
+  else
+    fail "--version CLI flag failed: $ver"
+  fi
   snap="$("$BIN" --once --cwd "$REPO" 2>/dev/null)"
   if [ -n "$snap" ]; then
     missing=""

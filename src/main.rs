@@ -35,6 +35,7 @@ Opciones:
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
   --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 13 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
   --name, --title    Nombre personalizado del sidebar (por defecto: HUDR2)
+  -v, --version      Muestra la versión de hudr2
   -h, --help         Muestra esta ayuda";
 
 struct CliArgs {
@@ -46,6 +47,7 @@ struct CliArgs {
     theme: Option<String>,
     sidebar_name: Option<String>,
     show_help: bool,
+    show_version: bool,
 }
 
 fn parse_cli_args() -> CliArgs {
@@ -58,11 +60,13 @@ fn parse_cli_args() -> CliArgs {
     let mut theme = None;
     let mut sidebar_name = None;
     let mut show_help = false;
+    let mut show_version = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--once" => once = true,
             "--attach" => attach = true,
+            "-v" | "--version" | "version" => show_version = true,
             "-h" | "--help" => show_help = true,
             "--pane" => {
                 if let Some(v) = args.next().filter(|s| !s.trim().is_empty()) {
@@ -102,6 +106,7 @@ fn parse_cli_args() -> CliArgs {
         theme,
         sidebar_name,
         show_help,
+        show_version,
     }
 }
 
@@ -132,6 +137,10 @@ enum MainMsg {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let cli = parse_cli_args();
+    if cli.show_version {
+        println!("hudr2 {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if cli.show_help {
         println!("{HELP_TEXT}");
         return Ok(());
@@ -235,6 +244,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             )
             .await;
             let _ = tx_quota.send(MainMsg::DataChanged { git_touched: false });
+        });
+    }
+
+    // Sondeo de versiones de ecosistema en segundo plano (si está activado y la caché de 3h expiró)
+    {
+        let eco_state = app_state.clone();
+        let tx_eco = tx.clone();
+        tokio::spawn(async move {
+            let (check_updates, cfg_path) = {
+                let st = eco_state.read().await;
+                (st.check_updates, st.config_path.clone())
+            };
+            if check_updates && hudr2::ecosystem::is_upstream_cache_expired(cfg_path.as_deref()) {
+                let cache = hudr2::ecosystem::fetch_upstream_versions_with_cache(cfg_path.as_deref()).await;
+                let mut st = eco_state.write().await;
+                hudr2::ecosystem::apply_upstream_cache_to_ecosystem(&mut st.snapshot.ecosystem, &cache);
+                st.needs_redraw = true;
+                drop(st);
+                let _ = tx_eco.send(MainMsg::Redraw);
+            }
         });
     }
 
@@ -577,6 +606,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             refresh_needed = true;
                                         }
                                     }
+                                    state::ClickAction::ToggleCheckUpdates(now_enabled) => {
+                                        if now_enabled {
+                                            let eco_state = app_state.clone();
+                                            let wake_tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let cfg_path = eco_state.read().await.config_path.clone();
+                                                let cache = hudr2::ecosystem::fetch_upstream_versions_with_cache(cfg_path.as_deref()).await;
+                                                let mut st = eco_state.write().await;
+                                                hudr2::ecosystem::apply_upstream_cache_to_ecosystem(&mut st.snapshot.ecosystem, &cache);
+                                                st.needs_redraw = true;
+                                                drop(st);
+                                                let _ = wake_tx.send(MainMsg::Redraw);
+                                            });
+                                        }
+                                    }
                                     state::ClickAction::ToggleGitFileDiff(_)
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
@@ -659,6 +703,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Personalizar
                                     KeyCode::Char('n') => {
                                         state.start_edit_sidebar_name();
+                                    }
+                                    KeyCode::Char('u') => {
+                                        let now_enabled = state.toggle_check_updates();
+                                        let msg = if now_enabled {
+                                            "+ Updates: Chequeo online activado (3h)".to_string()
+                                        } else {
+                                            "+ Updates: Chequeo online apagado".to_string()
+                                        };
+                                        state.set_flash_notice(Some(msg), 2500);
+                                        if now_enabled {
+                                            let eco_state = app_state.clone();
+                                            let wake_tx = tx.clone();
+                                            tokio::spawn(async move {
+                                                let cfg_path = eco_state.read().await.config_path.clone();
+                                                let cache = hudr2::ecosystem::fetch_upstream_versions_with_cache(cfg_path.as_deref()).await;
+                                                let mut st = eco_state.write().await;
+                                                hudr2::ecosystem::apply_upstream_cache_to_ecosystem(&mut st.snapshot.ecosystem, &cache);
+                                                st.needs_redraw = true;
+                                                drop(st);
+                                                let _ = wake_tx.send(MainMsg::Redraw);
+                                            });
+                                        }
                                     }
                                 KeyCode::Char('m') => {
                                     state.cycle_theme();

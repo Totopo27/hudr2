@@ -71,8 +71,12 @@
   - Optional `Handoff #<id> (<updated_at>)` block showing extracted lines from the latest `session_summary` observation.
 
 ## 7. `Stack · Ecosistema` (`id: "ecosystem"`, index `7`)
-- **Header:** `Stack · Ecosistema`.
-- **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`) showing `● <name> <version>` (`MINT`) or `○ <name> no detectado`.
+- **Header:** `Stack · Ecosistema` (or `Stack · Ecosistema ↑<N>` in `AMBER` when updates are available).
+- **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
+  - Up-to-date: `● <name> <version>` (`MINT`).
+  - Update available: `● <name> <version> ↑ <upstream>` (`AMBER`).
+  - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
+- **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 
 ## 8. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `8`)
 - Both cards share collapse slot `collapsed[8]` (key `9`).
@@ -89,4 +93,5 @@
   - **Divider & Settings section:**
     - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
     - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
-  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "..."}`).
+    - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`), controlling online version checks.
+  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "...", "check_updates": true}`).

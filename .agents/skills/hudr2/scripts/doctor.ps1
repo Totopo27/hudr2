@@ -19,7 +19,7 @@ if (-not (Test-Path (Join-Path $RepoRoot "Cargo.toml"))) {
 
 if (-not $Quick) {
     $ErrorActionPreference = "Continue"
-    $testOut = (& cargo test 2>&1) | Out-String
+    $testOut = (& cargo test -- --test-threads=1 2>&1) | Out-String
     if ($LASTEXITCODE -eq 0 -and $testOut -match "test result: ok") {
         Pass "cargo test passed"
     } else {
@@ -80,6 +80,13 @@ if (-not (Test-Path $binPath)) {
 
 if (Test-Path $binPath) {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $verOut = (& $binPath --version 2>&1) | Out-String
+    if ($LASTEXITCODE -eq 0 -and $verOut -match "hudr2 \d+\.\d+\.\d+") {
+        Pass "--version CLI flag ($($verOut.Trim()))"
+    } else {
+        Fail "--version CLI flag failed: $verOut"
+    }
+
     $snapLines = & $binPath --once --cwd $RepoRoot 2>$null
     if ($LASTEXITCODE -eq 0 -and $snapLines.Count -gt 10) {
         $snapText = $snapLines -join "`n"

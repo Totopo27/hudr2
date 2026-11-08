@@ -116,7 +116,8 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         if let Ok(m) = mcps_res {
             state.snapshot.mcps = m;
         }
-        if let Ok(eco) = eco_res {
+        if let Ok(mut eco) = eco_res {
+            crate::ecosystem::hydrate_ecosystem_upstream(&mut eco, state.config_path.as_deref());
             state.snapshot.ecosystem = eco;
         }
 

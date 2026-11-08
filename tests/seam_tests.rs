@@ -1620,16 +1620,19 @@ mod tests {
                     name: "pi".to_string(),
                     version: Some("v1.5.0".to_string()),
                     is_installed: true,
+                    ..Default::default()
                 },
                 ToolVersionInfo {
                     name: "hudr2".to_string(),
                     version: Some("v0.1.0".to_string()),
                     is_installed: true,
+                    ..Default::default()
                 },
                 ToolVersionInfo {
                     name: "gentle-ai".to_string(),
                     version: None,
                     is_installed: false,
+                    ..Default::default()
                 },
             ],
         };
@@ -4065,5 +4068,172 @@ mod tests {
                 "El aviso residual de cuotas debe limpiarse al finalizar el barrido silencioso"
             );
         }
+    }
+
+    #[test]
+    fn test_ecosystem_hudr2_version_system_no_gs3_hud() {
+        use hudr2::ecosystem::collect_ecosystem_telemetry;
+
+        let tele = collect_ecosystem_telemetry();
+        // Jamás debe existir gs3-hud en las herramientas del Stack
+        assert!(
+            !tele.tools.iter().any(|t| t.name == "gs3-hud"),
+            "gs3-hud no debe buscarse ni listarse en el Stack"
+        );
+
+        // Debe existir hudr2 con versión compilada/global
+        let hud = tele
+            .tools
+            .iter()
+            .find(|t| t.name == "hudr2")
+            .expect("hudr2 debe existir en la lista de herramientas de Stack");
+        assert!(hud.is_installed);
+        let ver = hud.version.as_deref().unwrap_or("");
+        assert!(
+            ver.starts_with('v'),
+            "La versión de hudr2 debe comenzar con 'v', obtenido: {}",
+            ver
+        );
+        let expected_min_ver = format!("v{}", env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            ver, expected_min_ver,
+            "La versión de hudr2 debe coincidir con CARGO_PKG_VERSION o la global detectada"
+        );
+    }
+
+    #[test]
+    fn test_hudr2_cli_version_flag_and_help() {
+        let exe = env!("CARGO_BIN_EXE_hudr2");
+
+        // 1. hudr2 --version
+        let out_long = std::process::Command::new(exe)
+            .arg("--version")
+            .output()
+            .expect("falló ejecución de hudr2 --version");
+        assert!(out_long.status.success());
+        let stdout_long = String::from_utf8_lossy(&out_long.stdout);
+        let expected_ver = format!("hudr2 {}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            stdout_long.contains(&expected_ver),
+            "hudr2 --version debe imprimir '{}', obtenido: '{}'",
+            expected_ver,
+            stdout_long
+        );
+
+        // 2. hudr2 -v
+        let out_short = std::process::Command::new(exe)
+            .arg("-v")
+            .output()
+            .expect("falló ejecución de hudr2 -v");
+        assert!(out_short.status.success());
+        let stdout_short = String::from_utf8_lossy(&out_short.stdout);
+        assert!(
+            stdout_short.contains(&expected_ver),
+            "hudr2 -v debe imprimir '{}', obtenido: '{}'",
+            expected_ver,
+            stdout_short
+        );
+
+        // 3. hudr2 --help incluye --version
+        let out_help = std::process::Command::new(exe)
+            .arg("--help")
+            .output()
+            .expect("falló ejecución de hudr2 --help");
+        assert!(out_help.status.success());
+        let stdout_help = String::from_utf8_lossy(&out_help.stdout);
+        assert!(
+            stdout_help.contains("-v, --version"),
+            "hudr2 --help debe listar -v, --version"
+        );
+    }
+
+    #[test]
+    fn test_ecosystem_upstream_version_indicator_and_badge() {
+        use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
+
+        let mut state = AppState::new();
+        state.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "engram".to_string(),
+                    version: Some("v3.6.2".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v3.7.0".to_string()),
+                    update_available: true,
+                },
+                ToolVersionInfo {
+                    name: "herdr".to_string(),
+                    version: Some("v0.9.5".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v0.9.5".to_string()),
+                    update_available: false,
+                },
+            ],
+        };
+
+        // 1. Con check_updates activado: muestra badge ↑1 en el header y ↑v3.7.0 en la fila
+        let render_on = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let text_on = render_on.lines.join("\n");
+        assert!(text_on.contains("Stack"));
+        assert!(text_on.contains("\u{2191}1"), "Header debe contener aviso ↑1");
+        assert!(text_on.contains("\u{2191}v3.7.0"), "Fila de engram debe mostrar ↑v3.7.0");
+        assert!(!text_on.contains("\u{2191}v0.9.5"), "Fila de herdr no debe mostrar flecha");
+
+        // 2. Con check_updates desactivado: se ocultan los avisos de actualización
+        state.toggle_check_updates();
+        assert!(!state.check_updates);
+        let render_off = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let text_off = render_off.lines.join("\n");
+        assert!(!text_off.contains("\u{2191}1"), "Header no debe mostrar ↑1 cuando check_updates está apagado");
+        assert!(!text_off.contains("\u{2191}v3.7.0"), "Fila no debe mostrar ↑v3.7.0 cuando check_updates está apagado");
+    }
+
+    #[test]
+    fn test_check_updates_config_persistence_and_mouse_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        let mut st = AppState::with_config(Some(cfg_path.clone()), None);
+        assert!(st.check_updates); // default true
+
+        // Expandir tarjeta personalizar (idx 10) y renderizar
+        st.toggle_card(10);
+        let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
+        st.card_bounds = render_out.bounds;
+
+        let bound = st
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "toggle_check_updates")
+            .expect("bound para toggle_check_updates debe existir");
+
+        // Simular clic en la fila de toggle_check_updates
+        let action = st.handle_mouse_click(bound.start_line, 0);
+        assert!(matches!(action, Some(ClickAction::ToggleCheckUpdates(false))));
+        assert!(!st.check_updates);
+
+        // Recargar en un nuevo AppState desde disco para verificar persistencia atómica
+        let st2 = AppState::with_config(Some(cfg_path.clone()), None);
+        assert!(!st2.check_updates, "El estado apagado de check_updates debe persistir en hudr2.json");
+
+        // Volver a activar con clic
+        let mut st3 = AppState::with_config(Some(cfg_path.clone()), None);
+        if st3.collapsed_cards[10] {
+            st3.toggle_card(10);
+        }
+        let render_out2 = ui::render_screen(&st3.snapshot, &st3.collapsed_cards, None, 48);
+        st3.card_bounds = render_out2.bounds;
+        let bound2 = st3
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "toggle_check_updates")
+            .expect("bound para toggle_check_updates debe existir");
+
+        let action2 = st3.handle_mouse_click(bound2.start_line, 0);
+        assert!(matches!(action2, Some(ClickAction::ToggleCheckUpdates(true))));
+        assert!(st3.check_updates);
+
+        let st4 = AppState::with_config(Some(cfg_path), None);
+        assert!(st4.check_updates, "El estado reactivado debe persistir en disco");
     }
 }

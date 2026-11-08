@@ -158,6 +158,8 @@ pub struct ToolVersionInfo {
     pub name: String,
     pub version: Option<String>,
     pub is_installed: bool,
+    pub upstream_version: Option<String>,
+    pub update_available: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -181,4 +183,5 @@ pub struct TelemetrySnapshot {
     pub theme_name: Option<String>,
     pub is_editing_name: bool,
     pub name_input_buffer: String,
+    pub check_updates: bool,
 }

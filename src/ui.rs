@@ -1198,8 +1198,22 @@ pub fn render_screen_with_diff_and_theme(
     // 10. Stack · Ecosistema Card (idx 9, tecla 'e')
     if !hidden_cards.contains("ecosystem") {
         let eco_start = lines.len();
-        let eco_title =
-            format!("{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET}");
+        let update_count = if snap.check_updates {
+            snap.ecosystem
+                .tools
+                .iter()
+                .filter(|t| t.update_available)
+                .count()
+        } else {
+            0
+        };
+        let eco_title = if update_count > 0 {
+            format!(
+                "{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET} {AMBER}\u{2191}{update_count}{RESET}"
+            )
+        } else {
+            format!("{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET}")
+        };
         lines.push(draw_top(&eco_title, collapsed[9], width));
         if !collapsed[9] {
             if snap.ecosystem.tools.is_empty() {
@@ -1212,10 +1226,19 @@ pub fn render_screen_with_diff_and_theme(
                 for tool in &snap.ecosystem.tools {
                     let left = if tool.is_installed {
                         let ver_str = tool.version.as_deref().unwrap_or("");
-                        format!(
-                            "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
-                            tool.name, ver_str
-                        )
+                        if snap.check_updates && tool.update_available && let Some(ref up_ver) = tool.upstream_version {
+                            format!(
+                                "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET} {AMBER}\u{2191}{}{RESET}",
+                                tool.name, ver_str, up_ver
+                            )
+                        } else {
+                            format!(
+                                "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
+                                tool.name, ver_str
+                            )
+                        }
+                    } else if snap.check_updates && let Some(ref up_ver) = tool.upstream_version {
+                        format!("{TEXT_DIM}\u{25cb} {} - (disp {}){RESET}", tool.name, up_ver)
                     } else {
                         format!("{TEXT_DIM}\u{25cb} {} -{RESET}", tool.name)
                     };
@@ -1324,6 +1347,24 @@ pub fn render_screen_with_diff_and_theme(
             start_line: theme_row_idx,
             end_line: theme_row_idx,
             action_type: Some("cycle_theme"),
+            action_path: None,
+        });
+
+        // 3. Fila interactiva para activar/desactivar chequeo online de versiones del stack
+        let updates_left = format!("{label_color}Updates{RESET} {TEXT_PRIMARY}Check online{RESET}");
+        let (updates_badge, updates_color) = if snap.check_updates {
+            ("[x] activo (3h)", MINT)
+        } else {
+            ("[ ] apagado", TEXT_DIM)
+        };
+        let updates_right = format!("{updates_color}{updates_badge}{RESET}");
+        let updates_row_idx = lines.len();
+        lines.push(draw_row(&updates_left, &updates_right, width));
+        bounds.push(CardBounds {
+            id: "toggle_check_updates",
+            start_line: updates_row_idx,
+            end_line: updates_row_idx,
+            action_type: Some("toggle_check_updates"),
             action_path: None,
         });
     }

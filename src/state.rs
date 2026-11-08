@@ -28,6 +28,7 @@ pub struct ConfigData {
     pub hidden: HashSet<String>,
     pub theme: Option<String>,
     pub sidebar_name: Option<String>,
+    pub check_updates: bool,
 }
 
 /// Carga la configuración (tarjetas colapsadas y ocultas, tema y nombre de sidebar) desde un archivo JSON.
@@ -38,6 +39,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             hidden: HashSet::new(),
             theme: None,
             sidebar_name: None,
+            check_updates: true,
         };
     };
     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
@@ -46,6 +48,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             hidden: HashSet::new(),
             theme: None,
             sidebar_name: None,
+            check_updates: true,
         };
     };
 
@@ -84,21 +87,28 @@ pub fn load_config(path: &Path) -> ConfigData {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let check_updates = v
+        .get("check_updates")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     ConfigData {
         collapsed,
         hidden,
         theme,
         sidebar_name,
+        check_updates,
     }
 }
 
-/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema y nombre.
+/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre y updates.
 pub fn save_config(
     path: &Path,
     collapsed: &[bool; 11],
     hidden: &HashSet<String>,
     theme: Option<&str>,
     sidebar_name: Option<&str>,
+    check_updates: bool,
 ) -> Result<(), String> {
     let collapsed_names: Vec<&str> = CARD_KEYS
         .iter()
@@ -113,6 +123,7 @@ pub fn save_config(
     let mut payload = json!({
         "collapsed": collapsed_names,
         "hidden": hidden_names,
+        "check_updates": check_updates,
     });
     if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
         payload["theme"] = json!(t);
@@ -149,6 +160,7 @@ pub struct AppState {
     pub sidebar_name: Option<String>,
     pub is_editing_sidebar_name: bool,
     pub name_input_buffer: String,
+    pub check_updates: bool,
     pub last_click_instant: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
 }
@@ -162,6 +174,7 @@ impl AppState {
         Self {
             snapshot: TelemetrySnapshot {
                 project_dir: cwd,
+                check_updates: true,
                 ..Default::default()
             },
             // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem, personalizar]
@@ -181,6 +194,7 @@ impl AppState {
             sidebar_name: None,
             is_editing_sidebar_name: false,
             name_input_buffer: String::new(),
+            check_updates: true,
             last_click_instant: None,
             last_click_row: None,
         }
@@ -197,8 +211,10 @@ impl AppState {
             s.hidden_cards = cfg.hidden;
             s.theme = cfg.theme.clone();
             s.sidebar_name = cfg.sidebar_name.clone();
+            s.check_updates = cfg.check_updates;
             s.snapshot.theme_name = cfg.theme;
             s.snapshot.sidebar_name = cfg.sidebar_name;
+            s.snapshot.check_updates = cfg.check_updates;
         }
         s.config_path = config_path;
         s
@@ -212,8 +228,17 @@ impl AppState {
                 &self.hidden_cards,
                 self.theme.as_deref(),
                 self.sidebar_name.as_deref(),
+                self.check_updates,
             );
         }
+    }
+
+    pub fn toggle_check_updates(&mut self) -> bool {
+        self.check_updates = !self.check_updates;
+        self.snapshot.check_updates = self.check_updates;
+        self.needs_redraw = true;
+        self.persist_config_if_configured();
+        self.check_updates
     }
 
     pub fn is_auto_theme(&self) -> bool {
@@ -505,6 +530,15 @@ impl AppState {
             } else if action == "cycle_theme" {
                 let next_th = self.cycle_theme();
                 return Some(ClickAction::CycleTheme(next_th));
+            } else if action == "toggle_check_updates" {
+                let now_enabled = self.toggle_check_updates();
+                let msg = if now_enabled {
+                    "+ Updates: Chequeo online activado (3h)".to_string()
+                } else {
+                    "+ Updates: Chequeo online apagado".to_string()
+                };
+                self.set_flash_notice(Some(msg), 2500);
+                return Some(ClickAction::ToggleCheckUpdates(now_enabled));
             }
         }
 
@@ -553,4 +587,5 @@ pub enum ClickAction {
     ToggleCardVisibility(String),
     CycleTheme(String),
     StartEditSidebarName,
+    ToggleCheckUpdates(bool),
 }
