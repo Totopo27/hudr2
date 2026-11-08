@@ -267,15 +267,6 @@ pub fn collect_ecosystem_telemetry() -> EcosystemTelemetry {
     EcosystemTelemetry { tools }
 }
 
-pub const TOOL_REPOS: [(&str, &str); 6] = [
-    ("pi", "earendil-works/pi"),
-    ("hudr2", "Totopo27/hudr2"),
-    ("gentle-shell", "Gentleman-Programming/gentle-shell"),
-    ("gentle-ai", "Gentleman-Programming/gentle-ai"),
-    ("engram", "Gentleman-Programming/engram"),
-    ("herdr", "herdrdev/herdr"),
-];
-
 pub fn repo_for_tool(name: &str) -> Option<&'static str> {
     match name {
         "pi" => Some("earendil-works/pi"),
@@ -405,12 +396,12 @@ pub async fn fetch_upstream_versions_with_cache(
     }
 
     let (t0, t1, t2, t3, t4, t5) = tokio::join!(
-        fetch_single_upstream("pi", "earendil-works/pi"),
-        fetch_single_upstream("hudr2", "Totopo27/hudr2"),
-        fetch_single_upstream("gentle-shell", "Gentleman-Programming/gentle-shell"),
-        fetch_single_upstream("gentle-ai", "Gentleman-Programming/gentle-ai"),
-        fetch_single_upstream("engram", "Gentleman-Programming/engram"),
-        fetch_single_upstream("herdr", "herdrdev/herdr"),
+        fetch_single_upstream("pi", repo_for_tool("pi").unwrap()),
+        fetch_single_upstream("hudr2", repo_for_tool("hudr2").unwrap()),
+        fetch_single_upstream("gentle-shell", repo_for_tool("gentle-shell").unwrap()),
+        fetch_single_upstream("gentle-ai", repo_for_tool("gentle-ai").unwrap()),
+        fetch_single_upstream("engram", repo_for_tool("engram").unwrap()),
+        fetch_single_upstream("herdr", repo_for_tool("herdr").unwrap()),
     );
 
     let now = std::time::SystemTime::now()

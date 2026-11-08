@@ -312,6 +312,11 @@ pub fn render_screen_with_diff_and_theme(
     let label_color = theme.label_color;
     let accent_primary = theme.accent_primary;
     let accent_secondary = theme.accent_secondary;
+    let mint = theme.mint;
+    let amber = theme.amber;
+    let text_primary = theme.text_primary;
+    let text_muted = theme.text_muted;
+    let text_dim = theme.text_dim;
 
     let draw_top = |title: &str, col: bool, w: usize| draw_top_theme(title, col, w, theme);
     let draw_bottom = |w: usize| draw_bottom_theme(w, theme);
@@ -1209,16 +1214,16 @@ pub fn render_screen_with_diff_and_theme(
         };
         let eco_title = if update_count > 0 {
             format!(
-                "{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET} {AMBER}\u{2191}{update_count}{RESET}"
+                "{BOLD}{title_color}Stack{RESET} {text_dim}\u{00b7}{RESET} {title_color}Ecosistema{RESET} {amber}\u{2191}{update_count}{RESET}"
             )
         } else {
-            format!("{BOLD}{title_color}Stack{RESET} {TEXT_DIM}\u{00b7}{RESET} {title_color}Ecosistema{RESET}")
+            format!("{BOLD}{title_color}Stack{RESET} {text_dim}\u{00b7}{RESET} {title_color}Ecosistema{RESET}")
         };
         lines.push(draw_top(&eco_title, collapsed[9], width));
         if !collapsed[9] {
             if snap.ecosystem.tools.is_empty() {
                 lines.push(draw_row(
-                    &format!("{TEXT_DIM}escaneando ecosistema...{RESET}"),
+                    &format!("{text_dim}escaneando ecosistema...{RESET}"),
                     "",
                     width,
                 ));
@@ -1228,19 +1233,19 @@ pub fn render_screen_with_diff_and_theme(
                         let ver_str = tool.version.as_deref().unwrap_or("");
                         if snap.check_updates && tool.update_available && let Some(ref up_ver) = tool.upstream_version {
                             format!(
-                                "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET} {AMBER}\u{2191}{}{RESET}",
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET} {amber}\u{2191}{}{RESET}",
                                 tool.name, ver_str, up_ver
                             )
                         } else {
                             format!(
-                                "{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_MUTED}{}{RESET}",
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
                                 tool.name, ver_str
                             )
                         }
                     } else if snap.check_updates && let Some(ref up_ver) = tool.upstream_version {
-                        format!("{TEXT_DIM}\u{25cb} {} - (disp {}){RESET}", tool.name, up_ver)
+                        format!("{text_dim}\u{25cb} {} - (disp {}){RESET}", tool.name, up_ver)
                     } else {
-                        format!("{TEXT_DIM}\u{25cb} {} -{RESET}", tool.name)
+                        format!("{text_dim}\u{25cb} {} -{RESET}", tool.name)
                     };
                     lines.push(draw_row(&left, "", width));
                 }
@@ -1351,11 +1356,11 @@ pub fn render_screen_with_diff_and_theme(
         });
 
         // 3. Fila interactiva para activar/desactivar chequeo online de versiones del stack
-        let updates_left = format!("{label_color}Updates{RESET} {TEXT_PRIMARY}Check online{RESET}");
+        let updates_left = format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}");
         let (updates_badge, updates_color) = if snap.check_updates {
-            ("[x] activo (3h)", MINT)
+            ("[x] activo (3h)", mint)
         } else {
-            ("[ ] apagado", TEXT_DIM)
+            ("[ ] apagado", text_dim)
         };
         let updates_right = format!("{updates_color}{updates_badge}{RESET}");
         let updates_row_idx = lines.len();
