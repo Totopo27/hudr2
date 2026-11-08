@@ -25,18 +25,18 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 
 ## Muestra visual
 
-### 1. Colección Cromática (5 Temas Definitivos)
+### 1. Colección Cromática
 
 <p align="center">
   <img src="hudr2_themes.png" width="100%" alt="HUDR2 · Colección Cromática Definitiva de 5 Temas" />
 </p>
 
-*Suite cromática contemporánea de 5 identidades visuales para terminal (de izquierda a derecha):*
-1. **Linear Studio (Moderno):** Identidad púrpura Linear con títulos en Periwinkle (`#7B8AFF`), marco violeta calibrado (`#583F78`), etiquetas Slate Plata (`#94A3B8`) y cursor rosa (`#F095C8`).
-2. **Electric Cyber:** Alta energía Cyberpunk con títulos y salud en Electric Lime (`#A3E635`), fondo Midnight Navy (`#111827`) y cursor Cyan Neón (`#38BDF8`).
-3. **Bauhaus Minimal:** Estética arquitectónica Mies van der Rohe con títulos Naranja (`#F97316`), marcos Teal (`#0F766E`) y tipografía marfil cálido (`#FFFBEB`).
-4. **Synthwave Sunset:** Contraste retro sunset con títulos Coral Pink (`#FB7185`), marcos Ocean Teal (`#0E7490`) y tipografía Ice Blue (`#ECFEFF`).
-5. **Editorial Velvet:** Sofisticación tipográfica suiza con títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
+*5 identidades visuales para terminal:*
+1. **Linear Studio:** títulos en Periwinkle (`#7B8AFF`), marco violeta calibrado (`#583F78`), etiquetas Slate Plata (`#94A3B8`) y cursor rosa (`#F095C8`).
+2. **Electric Cyber:** títulos y salud en Electric Lime (`#A3E635`), fondo Midnight Navy (`#111827`) y cursor Cyan Neón (`#38BDF8`).
+3. **Bauhaus Minimal:** títulos Naranja (`#F97316`), marcos Teal (`#0F766E`) y tipografía marfil cálido (`#FFFBEB`).
+4. **Synthwave Sunset:** títulos Coral Pink (`#FB7185`), marcos Ocean Teal (`#0E7490`) y tipografía Ice Blue (`#ECFEFF`).
+5. **Editorial Velvet:**  títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
 
 ### 2. Escenarios Operativos en Vivo
 
