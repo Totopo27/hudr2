@@ -33,7 +33,7 @@ Opciones:
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
-  --theme <name>     Tema visual (auto [adaptativo de Herdr], linear, cyber, bauhaus, synthwave, editorial)
+  --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 13 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
   -h, --help         Muestra esta ayuda";
 
 struct CliArgs {
@@ -142,9 +142,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // Inicializar tema visual: adaptativo desde Herdr o forzado por CLI
-    let is_auto_theme = cli.theme.as_deref().unwrap_or("auto") == "auto";
+    let is_auto_theme = matches!(cli.theme.as_deref(), None | Some("auto") | Some("herdr"));
     let active_theme = match cli.theme.as_deref() {
-        Some("auto") | None => hudr2::theme::resolve_adaptive_theme(),
+        Some("auto") | Some("herdr") | None => hudr2::theme::resolve_adaptive_theme(),
         Some(name) => hudr2::theme::find_theme(name).unwrap_or_else(|| {
             hudr2::theme::resolve_adaptive_theme()
         }),

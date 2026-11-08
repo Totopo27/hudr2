@@ -3678,53 +3678,54 @@ mod tests {
     #[test]
     fn test_adaptive_theming_and_herdr_config_sync() {
         use hudr2::theme::{
-            BAUHAUS_MINIMAL, ELECTRIC_CYBER, EDITORIAL_VELVET, LINEAR_STUDIO, SYNTHWAVE_SUNSET,
-            active_theme, find_theme, map_herdr_theme, parse_herdr_theme_name, set_active_theme,
+            HERDR_CATPPUCCIN, HERDR_DRACULA, LINEAR_STUDIO, active_theme, adopt_herdr_theme,
+            find_theme, parse_herdr_theme_name, set_active_theme,
         };
 
-        // 1. Simulación de config.toml de Herdr con diferentes temas
-        let toml_cyber = "[theme]\nname = \"cyberdream\"\n";
-        assert_eq!(parse_herdr_theme_name(toml_cyber).as_deref(), Some("cyberdream"));
-        assert_eq!(map_herdr_theme("cyberdream").id, "cyber");
-
-        let toml_gruvbox = "[theme]\nname = 'gruvbox'\n";
-        assert_eq!(parse_herdr_theme_name(toml_gruvbox).as_deref(), Some("gruvbox"));
-        assert_eq!(map_herdr_theme("gruvbox").id, "bauhaus");
+        // 1. Simulación de config.toml de Herdr con diferentes temas adoptados directamente
+        let toml_dracula = "[theme]\nname = \"dracula\"\n";
+        assert_eq!(parse_herdr_theme_name(toml_dracula).as_deref(), Some("dracula"));
+        assert_eq!(adopt_herdr_theme("dracula").id, "dracula");
 
         let toml_nord = "[theme]\nname = \"nord\"\n";
         assert_eq!(parse_herdr_theme_name(toml_nord).as_deref(), Some("nord"));
-        assert_eq!(map_herdr_theme("nord").id, "synthwave");
-        assert_eq!(SYNTHWAVE_SUNSET.id, "synthwave");
+        assert_eq!(adopt_herdr_theme("nord").id, "nord");
 
-        let toml_oxocarbon = "[theme]\nname = \"oxocarbon\"\n";
-        assert_eq!(parse_herdr_theme_name(toml_oxocarbon).as_deref(), Some("oxocarbon"));
-        assert_eq!(map_herdr_theme("oxocarbon").id, "editorial");
-        assert_eq!(EDITORIAL_VELVET.id, "editorial");
+        let toml_gruvbox_light = "[theme]\nname = 'gruvbox-light'\n";
+        assert_eq!(parse_herdr_theme_name(toml_gruvbox_light).as_deref(), Some("gruvbox-light"));
+        assert_eq!(adopt_herdr_theme("gruvbox-light").id, "gruvbox-light");
 
-        // 2. Comprobar que find_theme resuelve alias correctamente
+        let toml_catppuccin = "[theme]\nname = \"catppuccin\"\n";
+        assert_eq!(parse_herdr_theme_name(toml_catppuccin).as_deref(), Some("catppuccin"));
+        assert_eq!(adopt_herdr_theme("catppuccin").id, "catppuccin");
+
+        // 2. Comprobar que find_theme resuelve los 5 nativos de HUDR2 y los 14 de Herdr
+        // Nativos HUDR2:
         assert_eq!(find_theme("linear").unwrap().id, "linear");
         assert_eq!(find_theme("cyber").unwrap().id, "cyber");
         assert_eq!(find_theme("bauhaus").unwrap().id, "bauhaus");
         assert_eq!(find_theme("synthwave").unwrap().id, "synthwave");
         assert_eq!(find_theme("editorial").unwrap().id, "editorial");
 
-        // 3. Renderizado con tema específico
-        let state = hudr2::state::AppState::new();
-        let out_linear = ui::render_screen_with_diff_and_theme(
-            &state.snapshot,
-            &state.collapsed_cards,
-            None,
-            None,
-            &[],
-            &state.hidden_cards,
-            48,
-            &LINEAR_STUDIO,
-        );
-        let linear_raw = out_linear.lines.join("\n");
-        assert!(linear_raw.contains(LINEAR_STUDIO.border));
-        assert!(linear_raw.contains(LINEAR_STUDIO.title_color));
+        // Adoptados de Herdr:
+        assert_eq!(find_theme("catppuccin").unwrap().id, "catppuccin");
+        assert_eq!(find_theme("catppuccin-latte").unwrap().id, "catppuccin-latte");
+        assert_eq!(find_theme("terminal").unwrap().id, "terminal");
+        assert_eq!(find_theme("tokyo-night").unwrap().id, "tokyo-night");
+        assert_eq!(find_theme("tokyo-night-day").unwrap().id, "tokyo-night-day");
+        assert_eq!(find_theme("dracula").unwrap().id, "dracula");
+        assert_eq!(find_theme("nord").unwrap().id, "nord");
+        assert_eq!(find_theme("gruvbox").unwrap().id, "gruvbox");
+        assert_eq!(find_theme("gruvbox-light").unwrap().id, "gruvbox-light");
+        assert_eq!(find_theme("one-dark").unwrap().id, "one-dark");
+        assert_eq!(find_theme("one-light").unwrap().id, "one-light");
+        assert_eq!(find_theme("solarized").unwrap().id, "solarized");
+        assert_eq!(find_theme("solarized-light").unwrap().id, "solarized-light");
+        assert_eq!(find_theme("gentleman").unwrap().id, "gentleman");
 
-        let out_cyber = ui::render_screen_with_diff_and_theme(
+        // 3. Renderizado con tema adoptado de Herdr (Dracula)
+        let state = hudr2::state::AppState::new();
+        let out_dracula = ui::render_screen_with_diff_and_theme(
             &state.snapshot,
             &state.collapsed_cards,
             None,
@@ -3732,15 +3733,31 @@ mod tests {
             &[],
             &state.hidden_cards,
             48,
-            &ELECTRIC_CYBER,
+            &HERDR_DRACULA,
         );
-        let cyber_raw = out_cyber.lines.join("\n");
-        assert!(cyber_raw.contains(ELECTRIC_CYBER.border));
-        assert!(cyber_raw.contains(ELECTRIC_CYBER.title_color));
+        let dracula_raw = out_dracula.lines.join("\n");
+        assert!(dracula_raw.contains(HERDR_DRACULA.border));
+        assert!(dracula_raw.contains(HERDR_DRACULA.title_color));
+
+        let out_catppuccin = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            &HERDR_CATPPUCCIN,
+        );
+        let catppuccin_raw = out_catppuccin.lines.join("\n");
+        assert!(catppuccin_raw.contains(HERDR_CATPPUCCIN.border));
+        assert!(catppuccin_raw.contains(HERDR_CATPPUCCIN.title_color));
 
         // 4. Conmutación dinámica del tema activo
-        set_active_theme(&BAUHAUS_MINIMAL);
-        assert_eq!(active_theme().id, "bauhaus");
+        set_active_theme(&HERDR_DRACULA);
+        assert_eq!(active_theme().id, "dracula");
+        set_active_theme(&HERDR_CATPPUCCIN);
+        assert_eq!(active_theme().id, "catppuccin");
         set_active_theme(&LINEAR_STUDIO);
         assert_eq!(active_theme().id, "linear");
     }

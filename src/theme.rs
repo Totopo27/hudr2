@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
-/// Representa una especificación cromática de HUD2 para terminal 24-bit Truecolor.
+/// Representa una especificación cromática de HUDR2 para terminal 24-bit Truecolor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub id: &'static str,
@@ -22,6 +22,10 @@ pub struct Theme {
     pub coral: &'static str,
     pub cyan: &'static str,
 }
+
+// ==============================================================================
+// 1. TEMAS NATIVOS PROPIOS DE HUDR2 (5 Creaciones Autorales)
+// ==============================================================================
 
 // 0. Linear Studio (Moderno) — Calibrado
 pub const LINEAR_STUDIO: Theme = Theme {
@@ -118,7 +122,7 @@ pub const EDITORIAL_VELVET: Theme = Theme {
     cyan: "\x1b[38;2;56;189;248m",            // #38BDF8
 };
 
-pub static ALL_THEMES: [&Theme; 5] = [
+pub static HUDR2_NATIVE_THEMES: [&Theme; 5] = [
     &LINEAR_STUDIO,
     &ELECTRIC_CYBER,
     &BAUHAUS_MINIMAL,
@@ -126,15 +130,369 @@ pub static ALL_THEMES: [&Theme; 5] = [
     &EDITORIAL_VELVET,
 ];
 
-/// Busca un tema por ID o alias amigable.
+// ==============================================================================
+// 2. TEMAS ADOPTADOS DE HERDR (13 Opciones Oficiales de Ajustes + Gentleman)
+// ==============================================================================
+
+// H1. Catppuccin (Mocha) — Tema por defecto en Herdr
+pub const HERDR_CATPPUCCIN: Theme = Theme {
+    id: "catppuccin",
+    name: "Catppuccin (Mocha)",
+    border: "\x1b[38;2;69;71;90m",            // #45475A (surface1)
+    border_muted: "\x1b[38;2;49;50;68m",      // #313244 (surface0)
+    accent_primary: "\x1b[38;2;137;180;250m", // #89B4FA (blue)
+    accent_secondary: "\x1b[38;2;203;166;247m", // #CBA6F7 (mauve)
+    title_color: "\x1b[38;2;137;180;250m",    // #89B4FA
+    label_color: "\x1b[38;2;166;173;200m",    // #A6ADC8 (subtext0)
+    text_primary: "\x1b[38;2;205;214;244m",   // #CDD6F4 (text)
+    text_muted: "\x1b[38;2;108;112;134m",     // #6C7086 (overlay0)
+    text_dim: "\x1b[38;2;69;71;90m",          // #45475A (surface1)
+    mint: "\x1b[38;2;166;227;161m",           // #A6E3A1 (green)
+    amber: "\x1b[38;2;249;226;175m",          // #F9E2AF (yellow)
+    coral: "\x1b[38;2;243;139;168m",          // #F38BA8 (red)
+    cyan: "\x1b[38;2;148;226;213m",           // #94E2D5 (teal)
+};
+
+// H2. Catppuccin Latte (Claro)
+pub const HERDR_CATPPUCCIN_LATTE: Theme = Theme {
+    id: "catppuccin-latte",
+    name: "Catppuccin Latte",
+    border: "\x1b[38;2;188;192;204m",         // #BCC0CC (surface1)
+    border_muted: "\x1b[38;2;204;208;218m",   // #CCD0DA (surface0)
+    accent_primary: "\x1b[38;2;30;102;245m",  // #1E66F5 (blue)
+    accent_secondary: "\x1b[38;2;136;57;239m", // #8839EF (mauve)
+    title_color: "\x1b[38;2;30;102;245m",
+    label_color: "\x1b[38;2;108;111;133m",    // #6C6F85 (subtext0)
+    text_primary: "\x1b[38;2;76;79;105m",     // #4C4F69 (text)
+    text_muted: "\x1b[38;2;156;160;176m",     // #9CA0B0 (overlay0)
+    text_dim: "\x1b[38;2;188;192;204m",
+    mint: "\x1b[38;2;64;160;43m",             // #40A02B (green)
+    amber: "\x1b[38;2;223;142;29m",           // #DF8E1D (yellow)
+    coral: "\x1b[38;2;210;15;57m",            // #D20F39 (red)
+    cyan: "\x1b[38;2;23;146;153m",            // #179299 (teal)
+};
+
+// H3. Terminal (ANSI 16 colores estándar)
+pub const HERDR_TERMINAL: Theme = Theme {
+    id: "terminal",
+    name: "Terminal (16-Color)",
+    border: "\x1b[38;5;8m",                   // DarkGray
+    border_muted: "\x1b[38;5;8m",
+    accent_primary: "\x1b[38;5;4m",           // Blue
+    accent_secondary: "\x1b[38;5;5m",         // Magenta
+    title_color: "\x1b[38;5;4m",
+    label_color: "\x1b[38;5;7m",              // Gray
+    text_primary: "\x1b[38;5;15m",            // White
+    text_muted: "\x1b[38;5;8m",
+    text_dim: "\x1b[38;5;8m",
+    mint: "\x1b[38;5;2m",                     // Green
+    amber: "\x1b[38;5;3m",                    // Yellow
+    coral: "\x1b[38;5;1m",                    // Red
+    cyan: "\x1b[38;5;6m",                     // Cyan
+};
+
+// H4. Tokyo Night
+pub const HERDR_TOKYO_NIGHT: Theme = Theme {
+    id: "tokyo-night",
+    name: "Tokyo Night",
+    border: "\x1b[38;2;65;72;104m",           // #414868 (surface1)
+    border_muted: "\x1b[38;2;41;46;66m",      // #292E42 (surface_dim)
+    accent_primary: "\x1b[38;2;122;162;247m", // #7AA2F7 (blue)
+    accent_secondary: "\x1b[38;2;187;154;247m", // #BB9AF7 (mauve)
+    title_color: "\x1b[38;2;122;162;247m",
+    label_color: "\x1b[38;2;169;177;214m",    // #A9B1D6 (subtext0)
+    text_primary: "\x1b[38;2;192;202;245m",   // #C0CAF5 (text)
+    text_muted: "\x1b[38;2;86;95;137m",       // #565F89 (overlay0)
+    text_dim: "\x1b[38;2;65;72;104m",
+    mint: "\x1b[38;2;158;206;106m",           // #9ECE6A (green)
+    amber: "\x1b[38;2;224;175;104m",          // #E0AF68 (yellow)
+    coral: "\x1b[38;2;247;118;142m",          // #F7768E (red)
+    cyan: "\x1b[38;2;125;207;255m",           // #7DCFFF (teal)
+};
+
+// H5. Tokyo Night Day (Claro)
+pub const HERDR_TOKYO_NIGHT_DAY: Theme = Theme {
+    id: "tokyo-night-day",
+    name: "Tokyo Night Day",
+    border: "\x1b[38;2;168;174;203m",         // #A8AECB (surface1)
+    border_muted: "\x1b[38;2;210;211;218m",   // #D2D3DA (surface_dim)
+    accent_primary: "\x1b[38;2;46;125;233m",  // #2E7DE9 (blue)
+    accent_secondary: "\x1b[38;2;120;71;189m", // #7847BD (mauve)
+    title_color: "\x1b[38;2;46;125;233m",
+    label_color: "\x1b[38;2;97;114;176m",     // #6172B0 (subtext0)
+    text_primary: "\x1b[38;2;55;96;191m",     // #3760BF (text)
+    text_muted: "\x1b[38;2;137;144;179m",     // #8990B3 (overlay0)
+    text_dim: "\x1b[38;2;168;174;203m",
+    mint: "\x1b[38;2;88;117;57m",             // #587539 (green)
+    amber: "\x1b[38;2;140;108;62m",           // #8C6C3E (yellow)
+    coral: "\x1b[38;2;245;42;101m",           // #F52A65 (red)
+    cyan: "\x1b[38;2;17;140;116m",            // #118C74 (teal)
+};
+
+// H6. Dracula
+pub const HERDR_DRACULA: Theme = Theme {
+    id: "dracula",
+    name: "Dracula",
+    border: "\x1b[38;2;98;114;164m",          // #6272A4 (surface1 / overlay0)
+    border_muted: "\x1b[38;2;58;62;80m",      // #3A3E50 (surface_dim)
+    accent_primary: "\x1b[38;2;189;147;249m", // #BD93F9 (purple)
+    accent_secondary: "\x1b[38;2;255;121;198m", // #FF79C6 (mauve pink)
+    title_color: "\x1b[38;2;189;147;249m",
+    label_color: "\x1b[38;2;210;210;220m",    // #D2D2DC (subtext0)
+    text_primary: "\x1b[38;2;248;248;242m",   // #F8F8F2 (text)
+    text_muted: "\x1b[38;2;98;114;164m",      // #6272A4 (overlay0)
+    text_dim: "\x1b[38;2;68;71;90m",          // #44475A (surface0)
+    mint: "\x1b[38;2;80;250;123m",            // #50FA7B (green)
+    amber: "\x1b[38;2;241;250;140m",          // #F1FA8C (yellow)
+    coral: "\x1b[38;2;255;85;85m",            // #FF5555 (red)
+    cyan: "\x1b[38;2;139;233;253m",           // #8BE9FD (cyan)
+};
+
+// H7. Nord
+pub const HERDR_NORD: Theme = Theme {
+    id: "nord",
+    name: "Nord",
+    border: "\x1b[38;2;67;76;94m",            // #434C5E (surface1)
+    border_muted: "\x1b[38;2;59;66;82m",      // #3B4252 (surface_dim)
+    accent_primary: "\x1b[38;2;136;192;208m", // #88C0D0 (frost blue)
+    accent_secondary: "\x1b[38;2;180;142;173m", // #B48EAD (mauve)
+    title_color: "\x1b[38;2;136;192;208m",
+    label_color: "\x1b[38;2;216;222;233m",    // #D8DEE9 (subtext0)
+    text_primary: "\x1b[38;2;236;239;244m",   // #ECEFF4 (text)
+    text_muted: "\x1b[38;2;76;86;106m",       // #4C566A (overlay0)
+    text_dim: "\x1b[38;2;67;76;94m",
+    mint: "\x1b[38;2;163;190;140m",           // #A3BE8C (green)
+    amber: "\x1b[38;2;235;203;139m",          // #EBCB8B (yellow)
+    coral: "\x1b[38;2;191;97;106m",           // #BF616A (red)
+    cyan: "\x1b[38;2;143;188;187m",           // #8FBCBB (teal)
+};
+
+// H8. Gruvbox (Dark)
+pub const HERDR_GRUVBOX: Theme = Theme {
+    id: "gruvbox",
+    name: "Gruvbox (Dark)",
+    border: "\x1b[38;2;80;73;69m",            // #504945 (surface1)
+    border_muted: "\x1b[38;2;60;56;54m",      // #3C3836 (surface_dim)
+    accent_primary: "\x1b[38;2;215;153;33m",  // #D79921 (yellow)
+    accent_secondary: "\x1b[38;2;254;128;25m", // #FE8019 (peach orange)
+    title_color: "\x1b[38;2;215;153;33m",
+    label_color: "\x1b[38;2;213;196;161m",    // #D5C4A1 (subtext0)
+    text_primary: "\x1b[38;2;235;219;178m",   // #EBDBB2 (text)
+    text_muted: "\x1b[38;2;146;131;116m",     // #928374 (overlay0)
+    text_dim: "\x1b[38;2;80;73;69m",
+    mint: "\x1b[38;2;184;187;38m",            // #B8BB26 (green)
+    amber: "\x1b[38;2;250;189;47m",           // #FABD2F (yellow)
+    coral: "\x1b[38;2;251;73;52m",            // #FB4934 (red)
+    cyan: "\x1b[38;2;142;192;124m",           // #8EC07C (teal / aqua)
+};
+
+// H9. Gruvbox Light
+pub const HERDR_GRUVBOX_LIGHT: Theme = Theme {
+    id: "gruvbox-light",
+    name: "Gruvbox Light",
+    border: "\x1b[38;2;213;196;161m",         // #D5C4A1 (surface1)
+    border_muted: "\x1b[38;2;235;219;178m",   // #EBDBB2 (surface_dim)
+    accent_primary: "\x1b[38;2;181;118;20m",  // #B57614 (yellow)
+    accent_secondary: "\x1b[38;2;143;63;113m", // #8F3F71 (mauve)
+    title_color: "\x1b[38;2;181;118;20m",
+    label_color: "\x1b[38;2;80;73;69m",       // #504945 (subtext0)
+    text_primary: "\x1b[38;2;60;56;54m",      // #3C3836 (text)
+    text_muted: "\x1b[38;2;168;153;132m",     // #A89984 (overlay0)
+    text_dim: "\x1b[38;2;213;196;161m",
+    mint: "\x1b[38;2;121;116;14m",            // #79740E (green)
+    amber: "\x1b[38;2;181;118;20m",           // #B57614 (yellow)
+    coral: "\x1b[38;2;157;0;6m",              // #9D0006 (red)
+    cyan: "\x1b[38;2;66;123;88m",             // #427B58 (teal)
+};
+
+// H10. One Dark
+pub const HERDR_ONE_DARK: Theme = Theme {
+    id: "one-dark",
+    name: "One Dark",
+    border: "\x1b[38;2;62;68;81m",            // #3E4451 (surface1)
+    border_muted: "\x1b[38;2;53;59;69m",      // #353B45 (surface_dim)
+    accent_primary: "\x1b[38;2;97;175;239m",  // #61AFEF (blue)
+    accent_secondary: "\x1b[38;2;198;120;221m", // #C678DD (mauve)
+    title_color: "\x1b[38;2;97;175;239m",
+    label_color: "\x1b[38;2;150;156;168m",    // #969CA8 (subtext0)
+    text_primary: "\x1b[38;2;171;178;191m",   // #ABB2BF (text)
+    text_muted: "\x1b[38;2;92;99;112m",       // #5C6370 (overlay0)
+    text_dim: "\x1b[38;2;62;68;81m",
+    mint: "\x1b[38;2;152;195;121m",           // #98C379 (green)
+    amber: "\x1b[38;2;229;192;123m",          // #E5C07B (yellow)
+    coral: "\x1b[38;2;224;108;117m",          // #E06C75 (red)
+    cyan: "\x1b[38;2;86;182;194m",            // #56B6C2 (teal)
+};
+
+// H11. One Light
+pub const HERDR_ONE_LIGHT: Theme = Theme {
+    id: "one-light",
+    name: "One Light",
+    border: "\x1b[38;2;229;229;230m",         // #E5E5E6 (surface1)
+    border_muted: "\x1b[38;2;234;234;235m",   // #EAEAEB (surface_dim)
+    accent_primary: "\x1b[38;2;64;120;242m",  // #4078F2 (blue)
+    accent_secondary: "\x1b[38;2;166;38;164m", // #A626A4 (mauve)
+    title_color: "\x1b[38;2;64;120;242m",
+    label_color: "\x1b[38;2;79;82;93m",       // #4F525D (subtext0)
+    text_primary: "\x1b[38;2;56;58;66m",      // #383A42 (text)
+    text_muted: "\x1b[38;2;160;161;167m",     // #A0A1A7 (overlay0)
+    text_dim: "\x1b[38;2;229;229;230m",
+    mint: "\x1b[38;2;80;161;79m",             // #50A14F (green)
+    amber: "\x1b[38;2;193;132;1m",            // #C18401 (yellow)
+    coral: "\x1b[38;2;228;86;73m",            // #E45649 (red)
+    cyan: "\x1b[38;2;1;132;188m",             // #0184BC (teal)
+};
+
+// H12. Solarized (Dark)
+pub const HERDR_SOLARIZED: Theme = Theme {
+    id: "solarized",
+    name: "Solarized (Dark)",
+    border: "\x1b[38;2;88;110;117m",          // #586E75 (base01)
+    border_muted: "\x1b[38;2;7;54;66m",       // #073642 (base02)
+    accent_primary: "\x1b[38;2;38;139;210m",  // #268BD2 (blue)
+    accent_secondary: "\x1b[38;2;211;54;130m", // #D33682 (magenta)
+    title_color: "\x1b[38;2;38;139;210m",
+    label_color: "\x1b[38;2;131;148;150m",    // #839496 (base0)
+    text_primary: "\x1b[38;2;147;161;161m",   // #93A1A1 (base1)
+    text_muted: "\x1b[38;2;88;110;117m",      // #586E75 (base01)
+    text_dim: "\x1b[38;2;7;54;66m",
+    mint: "\x1b[38;2;133;153;0m",             // #859900 (green)
+    amber: "\x1b[38;2;181;137;0m",            // #B58900 (yellow)
+    coral: "\x1b[38;2;220;50;47m",            // #DC322F (red)
+    cyan: "\x1b[38;2;42;161;152m",            // #2AA198 (teal)
+};
+
+// H13. Solarized Light
+pub const HERDR_SOLARIZED_LIGHT: Theme = Theme {
+    id: "solarized-light",
+    name: "Solarized Light",
+    border: "\x1b[38;2;147;161;161m",         // #93A1A1 (surface1)
+    border_muted: "\x1b[38;2;238;232;213m",   // #EEE8D5 (surface_dim)
+    accent_primary: "\x1b[38;2;38;139;210m",  // #268BD2 (blue)
+    accent_secondary: "\x1b[38;2;211;54;130m", // #D33682 (magenta)
+    title_color: "\x1b[38;2;38;139;210m",
+    label_color: "\x1b[38;2;131;148;150m",    // #839496 (subtext0)
+    text_primary: "\x1b[38;2;101;123;131m",   // #657B83 (text)
+    text_muted: "\x1b[38;2;147;161;161m",     // #93A1A1 (overlay0)
+    text_dim: "\x1b[38;2;238;232;213m",
+    mint: "\x1b[38;2;133;153;0m",             // #859900 (green)
+    amber: "\x1b[38;2;181;137;0m",            // #B58900 (yellow)
+    coral: "\x1b[38;2;220;50;47m",            // #DC322F (red)
+    cyan: "\x1b[38;2;42;161;152m",            // #2AA198 (teal)
+};
+
+// H14. Gentleman (Signature Gentle-Shell)
+pub const HERDR_GENTLEMAN: Theme = Theme {
+    id: "gentleman",
+    name: "Gentleman (Signature)",
+    border: "\x1b[38;2;85;52;72m",            // #553448 (surface1)
+    border_muted: "\x1b[38;2;65;42;58m",      // #412A3A (surface_dim)
+    accent_primary: "\x1b[38;2;240;149;200m", // #F095C8 (blush rose)
+    accent_secondary: "\x1b[38;2;224;194;122m", // #E0C27A (champagne gold)
+    title_color: "\x1b[38;2;240;149;200m",
+    label_color: "\x1b[38;2;210;165;185m",    // #D2A5B9 (rose labels)
+    text_primary: "\x1b[38;2;246;239;243m",   // #F6EFF3 (pearl soft white)
+    text_muted: "\x1b[38;2;141;119;131m",     // #8D7783 (overlay0)
+    text_dim: "\x1b[38;2;65;42;58m",
+    mint: "\x1b[38;2;180;231;199m",           // #B4E7C7 (mint green)
+    amber: "\x1b[38;2;242;184;109m",          // #F2B86D (warm amber)
+    coral: "\x1b[38;2;255;113;143m",          // #FF718F (coral)
+    cyan: "\x1b[38;2;0;229;255m",             // #00E5FF (electric cyan)
+};
+
+pub static HERDR_ADOPTED_THEMES: [&Theme; 14] = [
+    &HERDR_CATPPUCCIN,
+    &HERDR_CATPPUCCIN_LATTE,
+    &HERDR_TERMINAL,
+    &HERDR_TOKYO_NIGHT,
+    &HERDR_TOKYO_NIGHT_DAY,
+    &HERDR_DRACULA,
+    &HERDR_NORD,
+    &HERDR_GRUVBOX,
+    &HERDR_GRUVBOX_LIGHT,
+    &HERDR_ONE_DARK,
+    &HERDR_ONE_LIGHT,
+    &HERDR_SOLARIZED,
+    &HERDR_SOLARIZED_LIGHT,
+    &HERDR_GENTLEMAN,
+];
+
+pub static ALL_THEMES: [&Theme; 19] = [
+    // 5 Nativos
+    &LINEAR_STUDIO,
+    &ELECTRIC_CYBER,
+    &BAUHAUS_MINIMAL,
+    &SYNTHWAVE_SUNSET,
+    &EDITORIAL_VELVET,
+    // 14 Adoptados de Herdr
+    &HERDR_CATPPUCCIN,
+    &HERDR_CATPPUCCIN_LATTE,
+    &HERDR_TERMINAL,
+    &HERDR_TOKYO_NIGHT,
+    &HERDR_TOKYO_NIGHT_DAY,
+    &HERDR_DRACULA,
+    &HERDR_NORD,
+    &HERDR_GRUVBOX,
+    &HERDR_GRUVBOX_LIGHT,
+    &HERDR_ONE_DARK,
+    &HERDR_ONE_LIGHT,
+    &HERDR_SOLARIZED,
+    &HERDR_SOLARIZED_LIGHT,
+    &HERDR_GENTLEMAN,
+];
+
+/// Adopta directamente la especificación cromática de Herdr por su nombre oficial.
+pub fn adopt_herdr_theme(herdr_name: &str) -> &'static Theme {
+    let lower = herdr_name.trim().to_lowercase().replace([' ', '_'], "-");
+    match lower.as_str() {
+        "catppuccin" | "catppuccin-mocha" | "mocha" => &HERDR_CATPPUCCIN,
+        "catppuccin-latte" | "latte" => &HERDR_CATPPUCCIN_LATTE,
+        "terminal" => &HERDR_TERMINAL,
+        "tokyo-night" | "tokyonight" => &HERDR_TOKYO_NIGHT,
+        "tokyo-night-day" | "tokyo-day" => &HERDR_TOKYO_NIGHT_DAY,
+        "dracula" => &HERDR_DRACULA,
+        "nord" => &HERDR_NORD,
+        "gruvbox" | "gruvbox-dark" => &HERDR_GRUVBOX,
+        "gruvbox-light" => &HERDR_GRUVBOX_LIGHT,
+        "one-dark" | "onedark" => &HERDR_ONE_DARK,
+        "one-light" | "onelight" => &HERDR_ONE_LIGHT,
+        "solarized" | "solarized-dark" => &HERDR_SOLARIZED,
+        "solarized-light" => &HERDR_SOLARIZED_LIGHT,
+        "gentleman" | "gentle" | "gentle-shell" => &HERDR_GENTLEMAN,
+        _ => &HERDR_CATPPUCCIN, // Default de Herdr
+    }
+}
+
+/// Busca un tema por ID o alias amigable entre los 5 de HUDR2 y los 14 de Herdr.
 pub fn find_theme(name: &str) -> Option<&'static Theme> {
     let lower = name.trim().to_lowercase().replace([' ', '_'], "-");
     match lower.as_str() {
+        // Modo adaptativo
+        "herdr" | "auto" | "adopt" => Some(resolve_adaptive_theme()),
+
+        // 5 Temas Nativos de HUDR2
         "linear" | "studio" | "linear-studio" | "default" | "base" => Some(&LINEAR_STUDIO),
         "cyber" | "electric" | "electric-cyber" | "cyberpunk" => Some(&ELECTRIC_CYBER),
         "bauhaus" | "minimal" | "bauhaus-minimal" => Some(&BAUHAUS_MINIMAL),
         "synthwave" | "sunset" | "synthwave-sunset" | "retrowave" => Some(&SYNTHWAVE_SUNSET),
         "editorial" | "velvet" | "editorial-velvet" | "luxe" => Some(&EDITORIAL_VELVET),
+
+        // 14 Temas Adoptados de Herdr
+        "catppuccin" | "mocha" | "catppuccin-mocha" => Some(&HERDR_CATPPUCCIN),
+        "catppuccin-latte" | "latte" => Some(&HERDR_CATPPUCCIN_LATTE),
+        "terminal" => Some(&HERDR_TERMINAL),
+        "tokyo-night" | "tokyonight" => Some(&HERDR_TOKYO_NIGHT),
+        "tokyo-night-day" | "tokyo-day" => Some(&HERDR_TOKYO_NIGHT_DAY),
+        "dracula" => Some(&HERDR_DRACULA),
+        "nord" => Some(&HERDR_NORD),
+        "gruvbox" | "gruvbox-dark" => Some(&HERDR_GRUVBOX),
+        "gruvbox-light" => Some(&HERDR_GRUVBOX_LIGHT),
+        "one-dark" | "onedark" => Some(&HERDR_ONE_DARK),
+        "one-light" | "onelight" => Some(&HERDR_ONE_LIGHT),
+        "solarized" | "solarized-dark" => Some(&HERDR_SOLARIZED),
+        "solarized-light" => Some(&HERDR_SOLARIZED_LIGHT),
+        "gentleman" | "gentle" | "gentle-shell" => Some(&HERDR_GENTLEMAN),
+
         _ => None,
     }
 }
@@ -162,31 +520,6 @@ pub fn parse_herdr_theme_name(content: &str) -> Option<String> {
         }
     }
     None
-}
-
-/// Mapea el tema configurado en Herdr / Telar a una de las identidades nativas calibradas de HUDR2.
-pub fn map_herdr_theme(herdr_name: &str) -> &'static Theme {
-    let normalized = herdr_name.trim().to_lowercase().replace([' ', '_'], "-");
-    match normalized.as_str() {
-        // Familia Cyberpunk / High-Tech
-        "cyberdream" | "tokyo-night" | "tokyonight" | "nightfly" | "gentleman" | "cyber" => {
-            &ELECTRIC_CYBER
-        }
-        // Familia Arquitectura / Industrial / Cálido
-        "gruvbox" | "gruvbox-dark" | "gruvbox-light" | "everforest" | "everforest-dark"
-        | "everforest-light" | "solarized" | "solarized-dark" | "solarized-light" => {
-            &BAUHAUS_MINIMAL
-        }
-        // Familia Retro / Gélido / Vaporwave
-        "nord" | "poimandres" | "ayu-mirage" | "ayu" | "tokyo-night-day" | "tokyo-day" => {
-            &SYNTHWAVE_SUNSET
-        }
-        // Familia Luxe / Tipografía / Suizo
-        "melange" | "oxocarbon" | "oxocarbon-dark" | "zenbones" | "monokai-pro-octagon"
-        | "kanagawa" | "kanagawa-lotus" => &EDITORIAL_VELVET,
-        // Familia Linear / Base / Default (Catppuccin, Dracula, Rose-Pine, One-Dark, etc.)
-        _ => &LINEAR_STUDIO,
-    }
 }
 
 /// Resuelve la ruta del archivo `config.toml` de Herdr según el sistema operativo.
@@ -245,11 +578,11 @@ static ADAPTIVE_CACHE: LazyLock<Mutex<AdaptiveCache>> = LazyLock::new(|| {
     Mutex::new(AdaptiveCache {
         path: None,
         last_mtime: None,
-        cached_theme: &LINEAR_STUDIO,
+        cached_theme: &HERDR_CATPPUCCIN,
     })
 });
 
-/// Resuelve el tema adaptativo de Herdr con caché por `mtime` (0% CPU, 0 subprocesos).
+/// Resuelve el tema adoptado directamente de Herdr con caché por `mtime` (0% CPU, 0 subprocesos).
 pub fn resolve_adaptive_theme() -> &'static Theme {
     let mut cache = match ADAPTIVE_CACHE.lock() {
         Ok(g) => g,
@@ -261,7 +594,7 @@ pub fn resolve_adaptive_theme() -> &'static Theme {
     }
 
     let Some(path) = cache.path.clone() else {
-        return &LINEAR_STUDIO;
+        return &HERDR_CATPPUCCIN;
     };
 
     let current_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -274,19 +607,20 @@ pub fn resolve_adaptive_theme() -> &'static Theme {
 
     if let Ok(content) = std::fs::read_to_string(&path) {
         if let Some(herdr_name) = parse_herdr_theme_name(&content) {
-            let mapped = map_herdr_theme(&herdr_name);
-            cache.cached_theme = mapped;
-            return mapped;
+            let adopted = adopt_herdr_theme(&herdr_name);
+            cache.cached_theme = adopted;
+            return adopted;
         }
     }
 
-    cache.cached_theme = &LINEAR_STUDIO;
-    &LINEAR_STUDIO
+    // Si existe archivo de Herdr pero no especifica tema, Herdr usa Catppuccin por defecto
+    cache.cached_theme = &HERDR_CATPPUCCIN;
+    &HERDR_CATPPUCCIN
 }
 
 // Puntero atómico para el tema activo en tiempo de ejecución
 static ACTIVE_THEME_PTR: AtomicPtr<Theme> =
-    AtomicPtr::new(&LINEAR_STUDIO as *const Theme as *mut Theme);
+    AtomicPtr::new(&HERDR_CATPPUCCIN as *const Theme as *mut Theme);
 
 /// Obtiene el tema activo globalmente en HUDR2.
 pub fn active_theme() -> &'static Theme {
@@ -309,12 +643,12 @@ mod tests {
             onboarding = false
 
             [theme]
-            name = "cyberdream"
+            name = "dracula"
             auto_switch = false
         "#;
         assert_eq!(
             parse_herdr_theme_name(toml).as_deref(),
-            Some("cyberdream")
+            Some("dracula")
         );
     }
 
@@ -325,57 +659,65 @@ mod tests {
             resume = true
 
             [theme] # configuración de tema
-            name = 'gruvbox-dark' # tema retro
+            name = 'gruvbox-light' # tema retro claro
 
             [other]
             name = "ignore_this"
         "#;
         assert_eq!(
             parse_herdr_theme_name(toml).as_deref(),
-            Some("gruvbox-dark")
+            Some("gruvbox-light")
         );
     }
 
     #[test]
-    fn test_parse_herdr_theme_name_missing() {
-        let toml = r#"
-            onboarding = false
-            [session]
-            resume = true
-        "#;
-        assert_eq!(parse_herdr_theme_name(toml), None);
+    fn test_adopt_all_13_herdr_themes() {
+        assert_eq!(adopt_herdr_theme("catppuccin").id, "catppuccin");
+        assert_eq!(adopt_herdr_theme("catppuccin-latte").id, "catppuccin-latte");
+        assert_eq!(adopt_herdr_theme("terminal").id, "terminal");
+        assert_eq!(adopt_herdr_theme("tokyo-night").id, "tokyo-night");
+        assert_eq!(adopt_herdr_theme("tokyo-night-day").id, "tokyo-night-day");
+        assert_eq!(adopt_herdr_theme("dracula").id, "dracula");
+        assert_eq!(adopt_herdr_theme("nord").id, "nord");
+        assert_eq!(adopt_herdr_theme("gruvbox").id, "gruvbox");
+        assert_eq!(adopt_herdr_theme("gruvbox-light").id, "gruvbox-light");
+        assert_eq!(adopt_herdr_theme("one-dark").id, "one-dark");
+        assert_eq!(adopt_herdr_theme("one-light").id, "one-light");
+        assert_eq!(adopt_herdr_theme("solarized").id, "solarized");
+        assert_eq!(adopt_herdr_theme("solarized-light").id, "solarized-light");
+        assert_eq!(adopt_herdr_theme("gentleman").id, "gentleman");
+        // Unknown defaults to Herdr default (Catppuccin)
+        assert_eq!(adopt_herdr_theme("unknown-flavor").id, "catppuccin");
     }
 
     #[test]
-    fn test_map_herdr_theme_categories() {
-        assert_eq!(map_herdr_theme("cyberdream").id, "cyber");
-        assert_eq!(map_herdr_theme("tokyo-night").id, "cyber");
-        assert_eq!(map_herdr_theme("gruvbox").id, "bauhaus");
-        assert_eq!(map_herdr_theme("everforest").id, "bauhaus");
-        assert_eq!(map_herdr_theme("nord").id, "synthwave");
-        assert_eq!(map_herdr_theme("poimandres").id, "synthwave");
-        assert_eq!(map_herdr_theme("oxocarbon").id, "editorial");
-        assert_eq!(map_herdr_theme("melange").id, "editorial");
-        assert_eq!(map_herdr_theme("catppuccin").id, "linear");
-        assert_eq!(map_herdr_theme("dracula").id, "linear");
-        assert_eq!(map_herdr_theme("unknown-theme").id, "linear");
-    }
-
-    #[test]
-    fn test_find_theme_by_alias() {
+    fn test_find_theme_by_alias_hudr2_and_herdr() {
+        // Hudr2 nativos
+        assert_eq!(find_theme("linear").unwrap().id, "linear");
         assert_eq!(find_theme("cyber").unwrap().id, "cyber");
         assert_eq!(find_theme("bauhaus").unwrap().id, "bauhaus");
         assert_eq!(find_theme("synthwave").unwrap().id, "synthwave");
         assert_eq!(find_theme("editorial").unwrap().id, "editorial");
-        assert_eq!(find_theme("linear").unwrap().id, "linear");
-        assert_eq!(find_theme("studio").unwrap().id, "linear");
+
+        // Herdr adoptados
+        assert_eq!(find_theme("nord").unwrap().id, "nord");
+        assert_eq!(find_theme("dracula").unwrap().id, "dracula");
+        assert_eq!(find_theme("tokyo-night").unwrap().id, "tokyo-night");
+        assert_eq!(find_theme("gruvbox-light").unwrap().id, "gruvbox-light");
+        assert_eq!(find_theme("one-dark").unwrap().id, "one-dark");
+        assert_eq!(find_theme("solarized-light").unwrap().id, "solarized-light");
+        assert_eq!(find_theme("gentleman").unwrap().id, "gentleman");
+        assert_eq!(find_theme("catppuccin-latte").unwrap().id, "catppuccin-latte");
+
         assert!(find_theme("nonexistent").is_none());
     }
 
     #[test]
     fn test_set_active_theme_threadsafe() {
-        set_active_theme(&BAUHAUS_MINIMAL);
-        assert_eq!(active_theme().id, "bauhaus");
+        set_active_theme(&HERDR_DRACULA);
+        assert_eq!(active_theme().id, "dracula");
+        set_active_theme(&HERDR_CATPPUCCIN);
+        assert_eq!(active_theme().id, "catppuccin");
         set_active_theme(&LINEAR_STUDIO);
         assert_eq!(active_theme().id, "linear");
     }
