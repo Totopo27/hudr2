@@ -25,29 +25,28 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 
 ## Muestra visual
 
-### 1. Colección Cromática
+### Temas nativos
 
 <p align="center">
-  <img src="hudr2_themes.png" width="100%" alt="HUDR2 · Colección Cromática Definitiva de 5 Temas" />
+  <img src="hudr2_themes.png" width="100%" alt="Temas nativos de HUDR2" />
 </p>
 
 *5 identidades visuales para terminal:*
 1. **Linear Studio:** títulos en Periwinkle (`#7B8AFF`), marco violeta calibrado (`#583F78`), etiquetas Slate Plata (`#94A3B8`) y cursor rosa (`#F095C8`).
-2. **Electric Cyber:** títulos y salud en Electric Lime (`#A3E635`), fondo Midnight Navy (`#111827`) y cursor Cyan Neón (`#38BDF8`).
+2. **Electric Cyber:** títulos y salud en Electric Lime (`#A3E635`), marco (`#1E293B`) y cursor Cyan Neón (`#38BDF8`).
 3. **Bauhaus Minimal:** títulos Naranja (`#F97316`), marcos Teal (`#0F766E`) y tipografía marfil cálido (`#FFFBEB`).
 4. **Synthwave Sunset:** títulos Coral Pink (`#FB7185`), marcos Ocean Teal (`#0E7490`) y tipografía Ice Blue (`#ECFEFF`).
-5. **Editorial Velvet:**  títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
+5. **Editorial Velvet:** títulos Peach Orange (`#FDBA74`), marcos Crimson Red (`#BE123C`) y lectura Warm Cream (`#FFF7ED`).
 
-### 2. Escenarios Operativos en Vivo
+### Escenarios operativos
 
 <p align="center">
-  <img src="hudr2_operativo.png" width="100%" alt="HUDR2 · Escenarios Operativos con Nuevos Temas" />
+  <img src="hudr2_operativo.png" width="100%" alt="Escenarios operativos" />
 </p>
 
-*Comportamiento reactivo en acción (de izquierda a derecha):*
-1. **Gestión de Visibilidad (`Tarjetas`):** Selector interactivo desplegado con atajo `t` o `0`. Permite activar `[✓]` u ocultar `[ ]` cualquier módulo del HUD con un simple clic de ratón. *(Demostrado en Linear Studio)*.
-2. **Modo Ultra-Compacto:** Terminal reducida a ~28 líneas esenciales reteniendo únicamente métricas críticas de sesión para espacios de trabajo reducidos. *(Demostrado en Bauhaus Minimal "Less is More")*.
-3. **Telemetría Crítica y Migración en Caliente:** Detección en tiempo real de cuentas agotadas (`! [AGOTÁNDOSE]`), desgaste progresivo en ámbar y activación automática del atajo `x: migrar (agy)` para transferir el agente sin interrumpir la tarea. *(Demostrado en Electric Cyber)*.
+1. **Selector de tarjetas:** Activa `[✓]` u oculta `[ ]` módulos con clic de ratón o tecla `t` / `0`.
+2. **Modo compacto:** Oculta tarjetas prescindibles para paneles de ~28 líneas.
+3. **Alerta y migración:** Marca cuentas agotadas (`!`) y permite migrar el agente en caliente con la tecla `x`.
 
 ---
 
@@ -65,19 +64,19 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 | **Stack · Ecosistema**| CLI probes | Versiones instaladas de `pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram` y `herdr`. |
 | **Herramientas** | SQLite / IPC | Llamadas a herramientas en el turno (lecturas, escrituras, comandos bash, engram). |
 | **MCP** | IPC / configs | Servidores MCP activos y conectados al entorno. |
-| **Tarjetas** | `hudr2.json` | Selector de visibilidad: activa, oculta o fija tarjetas según tus necesidades de espacio. |
+| **Tarjetas** | `hudr2.json` | Panel de ajustes: visibilidad de módulos, tema activo y nombre personalizado del sidebar. |
 
 ---
 
-## Sistema de visibilidad de tarjetas (`Tarjetas`)
+## Ajustes del HUD (`Tarjetas`)
 
-Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 incluye gestión interactiva de tarjetas:
+Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 incluye gestión interactiva:
 
-- Presiona `0` o `t` para desplegar la tarjeta **Tarjetas**.
-- Cada fila muestra su estado: `[✓] visible` o `[ ] oculta`.
-- Haz clic con el ratón sobre cualquier fila para alternar su visibilidad. Las tarjetas desactivadas desaparecen por completo del flujo de renderizado, permitiendo un HUD ultra-compacto de apenas 30 líneas.
-- La tarjeta `Tarjetas` permanece siempre fija (`fija`), evitando cualquier escenario de bloqueo accidental.
-- Tus preferencias de visibilidad y colapso se guardan de forma atómica en `hudr2.json`.
+- Presiona `0` o `t` para abrir la tarjeta **Tarjetas**.
+- **Visibilidad:** Cada fila muestra su estado `[✓] visible` o `[ ] oculta`. Un clic alterna su visibilidad para reducir el HUD a ~28 líneas.
+- **Nombre:** Permite personalizar el encabezado del sidebar mediante `hudr2.json` o flag `--name`.
+- **Tema:** Muestra el tema activo y permite cambiarlo con un clic en `[cambiar >]` o pulsando `m`.
+- Las preferencias se guardan de forma atómica en `hudr2.json`.
 
 ---
 
@@ -86,7 +85,8 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 | Tecla / Acción | Efecto |
 |---|---|
 | `1` – `9` | Plegar o desplegar tarjetas individuales (1: Estado, 2: Contexto, 3: Proyecto, 4: Integraciones, 5: Cuotas, 6: Git, 7: Engram, 8: Herramientas, 9: MCP). |
-| `0` o `t` | Plegar o desplegar la tarjeta de **Tarjetas** (selector de visibilidad). |
+| `0` o `t` | Plegar o desplegar la tarjeta de **Tarjetas** (panel de ajustes). |
+| `m` | **Ciclar tema visual**: Alterna entre Auto (Herdr), 5 temas nativos y 14 de Herdr. |
 | `c` | Colapsar o abrir todas las tarjetas a la vez. |
 | `x` | **Migración en caliente**: Reasigna sesiones activas con cuota crítica (>85%) hacia la cuenta más saludable disponible. |
 | `s` | **Sincronización**: Regenera modelos y templates de Cliproxy en `opencode.json`. |
@@ -102,13 +102,15 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 ## Opciones de ejecución
 
 ```bash
-hudr2 [--once] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
+hudr2 [--once] [--theme <name>] [--name <title>] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
 ```
 
-- `--once`: Imprime un snapshot único de las tarjetas activas directamente en stdout y termina de inmediato (ideal para diagnósticos o scripts).
-- `--pane <id>`: Vincula el ciclo de vida del HUD a un pane específico de Herdr (se cierra al morir el pane padre).
+- `--once`: Imprime un snapshot único de las tarjetas activas directamente en stdout y termina de inmediato.
+- `--theme <name>`: Selecciona el tema visual (`auto`, `linear`, `cyber`, `dracula`, etc.).
+- `--name <title>`: Asigna un nombre personalizado al encabezado del sidebar.
+- `--pane <id>`: Vincula el ciclo de vida del HUD a un pane específico de Herdr.
 - `--cwd <dir>`: Ruta del proyecto que se desea monitorear (por defecto toma el directorio actual).
-- `--config <file>`: Archivo de configuración alternativo para persistencia de tarjetas.
+- `--config <file>`: Archivo de configuración alternativo para persistencia de ajustes.
 
 ---
 
