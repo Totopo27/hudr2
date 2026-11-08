@@ -1551,13 +1551,13 @@ mod tests {
 
         let mut acc = AccountQuota::default();
 
-        // 1. 401 -> token expirado
+        // 1. 401 -> expirado (acortado para no desbordar en terminales compactas)
         let err_401 = serde_json::json!({
             "error": { "code": 401, "status": "UNAUTHENTICATED", "message": "Token expired" }
         });
         apply_quota_error(&mut acc, 401, &err_401);
         assert!(acc.has_error);
-        assert_eq!(acc.error_msg, "token expirado");
+        assert_eq!(acc.error_msg, "expirado");
 
         // 2. 403 TOS_VIOLATION -> tos suspendida
         let err_tos = serde_json::json!({
@@ -2291,7 +2291,7 @@ mod tests {
     #[test]
     fn test_tarjetas_card_renders_and_toggles_visibility() {
         let mut state = AppState::new();
-        // Expandir card de Tarjetas (idx 10)
+        // Expandir card de Personalizar (idx 10)
         state.collapsed_cards[10] = false;
 
         let render_out = ui::render_screen_with_diff(
@@ -2305,16 +2305,16 @@ mod tests {
         );
         let clean = ui::strip_ansi(&render_out.lines.join("\n"));
 
-        // Comprobar que aparecen los items con sus casillas activas y sin fila fija redundante
-        assert!(clean.contains("Tarjetas"), "debe mostrar el título Tarjetas");
-        assert!(clean.contains("[✓] Estado"));
-        assert!(clean.contains("[✓] Contexto"));
-        assert!(clean.contains("[✓] Proyecto"));
+        // Comprobar que aparecen los items con sus casillas universales [x] sin símbolos rotos [?]
+        assert!(clean.contains("Personalizar"), "debe mostrar el título Personalizar");
+        assert!(clean.contains("[x] Estado"));
+        assert!(clean.contains("[x] Contexto"));
+        assert!(clean.contains("[x] Proyecto"));
         assert!(!clean.contains("fija"), "la fila fija redundante fue removida");
-        assert!(!clean.contains("[✓] Tarjetas"), "no debe listar Tarjetas dentro de Tarjetas");
+        assert!(!clean.contains("[x] Personalizar"), "no debe listar Personalizar dentro de Personalizar");
         assert!(clean.contains("Nombre"), "debe incluir sección de Nombre");
         assert!(clean.contains("HUDR2"), "debe indicar nombre por defecto");
-        assert!(clean.contains("[defecto]"));
+        assert!(clean.contains("[editar >]"), "debe mostrar botón interactivo de editar nombre");
         assert!(clean.contains("Tema"), "debe incluir sección interactiva de Tema");
         assert!(clean.contains("[cambiar >]"));
 
@@ -2335,7 +2335,7 @@ mod tests {
 
         // La tarjeta Proyecto NO debe renderizarse en absoluto
         assert!(!clean_hidden.contains("~ Proyecto ·"));
-        // Pero en la card Tarjetas debe figurar como [ ] Proyecto oculta
+        // Pero en la card Personalizar debe figurar como [ ] Proyecto oculta
         assert!(clean_hidden.contains("[ ] Proyecto"));
         assert!(clean_hidden.contains("oculta"));
 
@@ -2353,15 +2353,18 @@ mod tests {
             48,
         );
         let clean_restored = ui::strip_ansi(&render_out_restored.lines.join("\n"));
-        assert!(clean_restored.contains("[✓] Proyecto"));
+        assert!(clean_restored.contains("[x] Proyecto"));
         assert!(clean_restored.contains("~ Proyecto ·"));
     }
 
     #[test]
     fn test_tarjetas_cannot_hide_itself() {
         let mut state = AppState::new();
+        state.toggle_card_visibility("personalizar");
+        assert!(!state.is_card_hidden("personalizar"), "Personalizar no puede ocultarse a sí misma");
+        // Compatibilidad hacia atrás con id legado
         state.toggle_card_visibility("tarjetas");
-        assert!(!state.is_card_hidden("tarjetas"), "Tarjetas no puede ocultarse a sí misma");
+        assert!(!state.is_card_hidden("tarjetas"), "id legado tarjetas no puede ocultarse");
     }
 
     #[test]
@@ -2440,19 +2443,138 @@ mod tests {
         let header_custom = ui::strip_ansi(&out_custom.lines[0]);
         assert!(header_custom.contains(":: Gentle Shell ::"));
 
-        // 3. Tarjetas card muestra el nombre y la insignia [personalizado]
+        // 3. Personalizar card muestra el nombre y el botón interactivo de edición
         let mut collapsed_open = [true; 11];
         collapsed_open[10] = false;
         let out_card = ui::render_screen(&snap, &collapsed_open, None, 48);
         let clean_card = ui::strip_ansi(&out_card.lines.join("\n"));
         assert!(clean_card.contains("Nombre  Gentle Shell"));
-        assert!(clean_card.contains("[personalizado]"));
+        assert!(clean_card.contains("[editar >]"));
 
         // 4. Protección contra desbordamiento en anchos reducidos (ancho 20)
         snap.sidebar_name = Some("Nombre Extremadamente Largo Que Desborda El Panel".to_string());
         let out_narrow = ui::render_screen(&snap, &collapsed, None, 20);
         let narrow_header = &out_narrow.lines[0];
         assert!(ui::string_width(narrow_header) <= 20, "el header nunca debe exceder el ancho");
+    }
+
+    #[test]
+    fn test_personalizar_name_inline_editing_lifecycle() {
+        let mut state = AppState::new();
+        state.collapsed_cards[10] = false; // Expandir Personalizar
+
+        // 1. Estado inicial
+        assert!(!state.is_editing_sidebar_name);
+        assert_eq!(state.name_input_buffer, "");
+        assert_eq!(state.sidebar_name, None);
+
+        // 2. Iniciar edición (tecla 'n' o clic en [editar >])
+        state.start_edit_sidebar_name();
+        assert!(state.is_editing_sidebar_name);
+        assert_eq!(state.name_input_buffer, "HUDR2");
+        assert!(state.snapshot.is_editing_name);
+
+        // 3. Verificar renderizado en modo edición
+        let render_edit = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let clean_edit = ui::strip_ansi(&render_edit.lines.join("\n"));
+        assert!(clean_edit.contains("Nombre  > HUDR2_"));
+        assert!(clean_edit.contains("[Enter|Esc]"));
+        assert!(clean_edit.contains("Enter: guardar"));
+
+        // 4. Modificar buffer y guardar
+        state.update_name_input_buffer("Gentle Shell 3".to_string());
+        state.commit_sidebar_name();
+
+        assert!(!state.is_editing_sidebar_name);
+        assert_eq!(state.sidebar_name.as_deref(), Some("Gentle Shell 3"));
+        assert_eq!(state.snapshot.sidebar_name.as_deref(), Some("Gentle Shell 3"));
+        assert!(state.flash_notice.as_ref().unwrap().contains("Gentle Shell 3"));
+
+        // 5. Verificar que el header superior refleja el nuevo nombre
+        let render_saved = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        let header_line = ui::strip_ansi(&render_saved.lines[0]);
+        assert!(header_line.contains(":: Gentle Shell 3 ::"));
+
+        // 6. Iniciar edición de nuevo y cancelar con Esc
+        state.start_edit_sidebar_name();
+        assert_eq!(state.name_input_buffer, "Gentle Shell 3");
+        state.update_name_input_buffer("Algo No Guardado".to_string());
+        state.cancel_edit_sidebar_name();
+
+        assert!(!state.is_editing_sidebar_name);
+        assert_eq!(state.sidebar_name.as_deref(), Some("Gentle Shell 3"));
+
+        // 7. Restablecer al nombre por defecto escribiendo vacío o HUDR2
+        state.start_edit_sidebar_name();
+        state.update_name_input_buffer("".to_string());
+        state.commit_sidebar_name();
+
+        assert_eq!(state.sidebar_name, None);
+        assert!(state.flash_notice.as_ref().unwrap().contains("defecto"));
+    }
+
+    #[test]
+    fn test_personalizar_mouse_interaction_and_double_click() {
+        let mut state = AppState::new();
+        state.collapsed_cards[10] = false;
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+        );
+        state.card_bounds = render_out.bounds;
+
+        // 1. Clic simple en la fila Nombre ([editar >]) activa la edición
+        let edit_row = state
+            .card_bounds
+            .iter()
+            .find(|b| b.action_type == Some("edit_sidebar_name"))
+            .expect("debe existir bound interactivo para editar nombre")
+            .start_line;
+
+        let click_action = state.handle_mouse_click(edit_row, 0);
+        assert_eq!(click_action, Some(ClickAction::StartEditSidebarName));
+        assert!(state.is_editing_sidebar_name);
+
+        // Cancelar para probar doble clic
+        state.cancel_edit_sidebar_name();
+        assert!(!state.is_editing_sidebar_name);
+
+        // 2. Doble clic en la tarjeta Personalizar activa la edición
+        let card_header = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "personalizar" && b.action_type.is_none())
+            .expect("debe existir bound de la card personalizar")
+            .start_line;
+
+        // Primer clic (colapsa la card)
+        let _ = state.handle_mouse_click(card_header, 0);
+        // Segundo clic rápido en la misma fila (dentro de 500ms) -> detectado como doble clic
+        let dbl_click = state.handle_mouse_click(card_header, 0);
+        assert_eq!(dbl_click, Some(ClickAction::StartEditSidebarName));
+        assert!(state.is_editing_sidebar_name);
     }
 
     #[test]
@@ -2498,6 +2620,73 @@ mod tests {
         );
         assert_eq!(state.theme.as_deref(), Some("cyber"));
         assert_eq!(hudr2::theme::active_theme().id, "cyber");
+    }
+
+    #[test]
+    fn test_responsive_compact_layout_and_shortened_labels() {
+        let mut state = AppState::new();
+        // Expandir tarjetas clave para comprobar el layout compacto
+        state.collapsed_cards[3] = false; // Integraciones
+        state.collapsed_cards[4] = false; // Cuota de Modelos
+        state.collapsed_cards[6] = false; // Engram
+        state.collapsed_cards[10] = false; // Personalizar
+
+        // Configurar cuentas con error de expirado
+        let mut acc = hudr2::models::AccountQuota {
+            prefix: "agy".to_string(),
+            has_error: true,
+            error_msg: "expirado".to_string(),
+            ..Default::default()
+        };
+        acc.pools.push(hudr2::models::QuotaPool {
+            label: "Gemini Wk".to_string(),
+            percent: 100,
+            reset: "4d 23h".to_string(),
+            pace: "~0%".to_string(),
+        });
+        state.snapshot.accounts = vec![acc];
+        state.snapshot.engram.online = true;
+        state.snapshot.engram.obs_count = 12;
+
+        for w in [32usize, 34usize, 36usize, 38usize, 42usize, 48usize] {
+            let render_out = ui::render_screen_with_diff(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                w,
+            );
+            for line in &render_out.lines {
+                let lw = ui::string_width(line);
+                assert!(
+                    lw <= w,
+                    "En ancho {w}, línea excede con ancho {lw}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let clean = ui::strip_ansi(&render_out.lines.join("\n"));
+            if w >= 34 {
+                assert!(
+                    clean.contains("[expirado]"),
+                    "Debe mostrar [expirado] conciso en ancho {w}"
+                );
+            } else {
+                assert!(
+                    clean.contains("[exp]"),
+                    "Debe mostrar [exp] ultra-compacto en ancho ultra-estrecho {w}"
+                );
+            }
+            assert!(
+                !clean.contains("[token expirado]"),
+                "No debe usar la frase larga [token expirado] que desborda el panel"
+            );
+            assert!(
+                clean.contains("Personalizar"),
+                "Debe mostrar card Personalizar en ancho {w}"
+            );
+        }
     }
 
     #[test]

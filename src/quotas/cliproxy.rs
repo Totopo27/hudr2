@@ -580,7 +580,7 @@ pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_js
     };
 
     if status == 401 || msg.contains("expired") || err_status == "UNAUTHENTICATED" {
-        acc.error_msg = "token expirado".to_string();
+        acc.error_msg = "expirado".to_string();
     } else if has_reason("TOS_VIOLATION") || msg.contains("Terms of Service") {
         acc.error_msg = "tos suspendida".to_string();
     } else if has_reason("VALIDATION_REQUIRED") || msg.contains("Verify your account") {

@@ -433,8 +433,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // 1b. Renderizado condicional bajo demanda (solo cuando needs_redraw == true)
         let should_render = app_state.read().await.needs_redraw;
         if should_render {
-            let (cols, rows) = size().unwrap_or((48, 36));
-            let width = (cols as usize).clamp(36, 50);
+            let (cols, rows) = size().unwrap_or((42, 36));
+            let width = (cols as usize).clamp(32, 48);
             let max_visible = (rows as usize).max(10);
 
             let mut render_out = {
@@ -581,7 +581,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
                                     | state::ClickAction::ToggleCardVisibility(_)
-                                    | state::ClickAction::CycleTheme(_) => {}
+                                    | state::ClickAction::CycleTheme(_)
+                                    | state::ClickAction::StartEditSidebarName => {}
                                 }
                             }
                         }
@@ -604,34 +605,61 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             should_quit = true;
                         } else {
                             let mut state = app_state.write().await;
-                            match norm_code {
-                                KeyCode::Char('q') => should_quit = true,
-                                KeyCode::Char('c') => {
-                                    state.toggle_all_collapse();
-                                    if !state.collapsed_cards[2]
-                                        && state.snapshot.tree.root_path.is_empty()
-                                    {
-                                        refresh_needed = true;
+                            if state.is_editing_sidebar_name {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        state.commit_sidebar_name();
                                     }
-                                }
-                                KeyCode::Char('1') => state.toggle_card(0), // Estado
-                                KeyCode::Char('2') => state.toggle_card(1), // Contexto
-                                KeyCode::Char('3') => {
-                                    state.toggle_card(2); // Proyecto
-                                    if !state.collapsed_cards[2]
-                                        && state.snapshot.tree.root_path.is_empty()
-                                    {
-                                        refresh_needed = true;
+                                    KeyCode::Esc => {
+                                        state.cancel_edit_sidebar_name();
                                     }
+                                    KeyCode::Backspace => {
+                                        let mut buf = state.name_input_buffer.clone();
+                                        buf.pop();
+                                        state.update_name_input_buffer(buf);
+                                    }
+                                    KeyCode::Char(c)
+                                        if state.name_input_buffer.chars().count() < 24
+                                            && !c.is_control() =>
+                                    {
+                                        let mut buf = state.name_input_buffer.clone();
+                                        buf.push(c);
+                                        state.update_name_input_buffer(buf);
+                                    }
+                                    _ => {}
                                 }
-                                KeyCode::Char('4') => state.toggle_card(3), // Integraciones
-                                KeyCode::Char('5') => state.toggle_card(4), // Cuotas de Modelos
-                                KeyCode::Char('6') => state.toggle_card(5), // Cambios
-                                KeyCode::Char('7') => state.toggle_card(6), // Engram
-                                KeyCode::Char('8') => state.toggle_card(7), // Herramientas
-                                KeyCode::Char('9') => state.toggle_card(8), // MCP
-                                KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
-                                KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Tarjetas
+                            } else {
+                                match norm_code {
+                                    KeyCode::Char('q') => should_quit = true,
+                                    KeyCode::Char('c') => {
+                                        state.toggle_all_collapse();
+                                        if !state.collapsed_cards[2]
+                                            && state.snapshot.tree.root_path.is_empty()
+                                        {
+                                            refresh_needed = true;
+                                        }
+                                    }
+                                    KeyCode::Char('1') => state.toggle_card(0), // Estado
+                                    KeyCode::Char('2') => state.toggle_card(1), // Contexto
+                                    KeyCode::Char('3') => {
+                                        state.toggle_card(2); // Proyecto
+                                        if !state.collapsed_cards[2]
+                                            && state.snapshot.tree.root_path.is_empty()
+                                        {
+                                            refresh_needed = true;
+                                        }
+                                    }
+                                    KeyCode::Char('4') => state.toggle_card(3), // Integraciones
+                                    KeyCode::Char('5') => state.toggle_card(4), // Cuotas de Modelos
+                                    KeyCode::Char('6') => state.toggle_card(5), // Cambios
+                                    KeyCode::Char('7') => state.toggle_card(6), // Engram
+                                    KeyCode::Char('8') => state.toggle_card(7), // Herramientas
+                                    KeyCode::Char('9') => state.toggle_card(8), // MCP
+                                    KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
+                                    KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Personalizar
+                                    KeyCode::Char('n') => {
+                                        state.start_edit_sidebar_name();
+                                    }
                                 KeyCode::Char('m') => {
                                     state.cycle_theme();
                                 }
@@ -735,6 +763,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
                                 KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
                                 _ => {}
+                            }
                             }
                         }
                     }

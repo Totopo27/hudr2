@@ -15,7 +15,7 @@ pub const CARD_KEYS: [&str; 11] = [
     "tools",
     "mcp",
     "ecosystem",
-    "tarjetas",
+    "personalizar",
 ];
 
 pub const DEFAULT_COLLAPSED: [bool; 11] = [
@@ -53,7 +53,8 @@ pub fn load_config(path: &Path) -> ConfigData {
     if let Some(arr) = v.get("collapsed").and_then(Value::as_array) {
         collapsed = [false; 11];
         for item in arr.iter().filter_map(Value::as_str) {
-            if let Some(idx) = CARD_KEYS.iter().position(|&k| k == item) {
+            let normalized = if item == "tarjetas" { "personalizar" } else { item };
+            if let Some(idx) = CARD_KEYS.iter().position(|&k| k == normalized) {
                 collapsed[idx] = true;
             }
         }
@@ -62,8 +63,9 @@ pub fn load_config(path: &Path) -> ConfigData {
     let mut hidden = HashSet::new();
     if let Some(arr) = v.get("hidden").and_then(Value::as_array) {
         for item in arr.iter().filter_map(Value::as_str) {
-            if item != "tarjetas" && CARD_KEYS.contains(&item) {
-                hidden.insert(item.to_string());
+            let normalized = if item == "tarjetas" { "personalizar" } else { item };
+            if normalized != "personalizar" && CARD_KEYS.contains(&normalized) {
+                hidden.insert(normalized.to_string());
             }
         }
     }
@@ -145,6 +147,10 @@ pub struct AppState {
     pub quick_peek: Option<QuickPeekState>,
     pub theme: Option<String>,
     pub sidebar_name: Option<String>,
+    pub is_editing_sidebar_name: bool,
+    pub name_input_buffer: String,
+    pub last_click_instant: Option<std::time::Instant>,
+    pub last_click_row: Option<usize>,
 }
 
 impl AppState {
@@ -158,8 +164,8 @@ impl AppState {
                 project_dir: cwd,
                 ..Default::default()
             },
-            // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem]
-            // proyecto (idx 2) viene colapsado por defecto como en hudr original
+            // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem, personalizar]
+            // proyecto (idx 2) y personalizar (idx 10) vienen colapsados por defecto
             collapsed_cards: DEFAULT_COLLAPSED,
             hidden_cards: HashSet::new(),
             scroll_offset: 0,
@@ -173,6 +179,10 @@ impl AppState {
             quick_peek: None,
             theme: None,
             sidebar_name: None,
+            is_editing_sidebar_name: false,
+            name_input_buffer: String::new(),
+            last_click_instant: None,
+            last_click_row: None,
         }
     }
 
@@ -240,6 +250,58 @@ impl AppState {
         self.persist_config_if_configured();
     }
 
+    pub fn start_edit_sidebar_name(&mut self) {
+        self.is_editing_sidebar_name = true;
+        let current = self
+            .sidebar_name
+            .clone()
+            .unwrap_or_else(|| "HUDR2".to_string());
+        self.name_input_buffer = current;
+        self.snapshot.is_editing_name = true;
+        self.snapshot.name_input_buffer = self.name_input_buffer.clone();
+        self.needs_redraw = true;
+    }
+
+    pub fn update_name_input_buffer(&mut self, new_buffer: String) {
+        self.name_input_buffer = new_buffer;
+        self.snapshot.name_input_buffer = self.name_input_buffer.clone();
+        self.needs_redraw = true;
+    }
+
+    pub fn commit_sidebar_name(&mut self) {
+        let trimmed = self.name_input_buffer.trim().to_string();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("HUDR2")
+            || trimmed.eq_ignore_ascii_case("defecto")
+        {
+            self.set_sidebar_name(None);
+            self.set_flash_notice(
+                Some("Nombre restablecido a HUDR2 (defecto)".to_string()),
+                3000,
+            );
+        } else {
+            self.set_sidebar_name(Some(trimmed.clone()));
+            self.set_flash_notice(
+                Some(format!("Nombre actualizado: {trimmed}")),
+                3000,
+            );
+        }
+        self.is_editing_sidebar_name = false;
+        self.name_input_buffer.clear();
+        self.snapshot.is_editing_name = false;
+        self.snapshot.name_input_buffer.clear();
+        self.needs_redraw = true;
+    }
+
+    pub fn cancel_edit_sidebar_name(&mut self) {
+        self.is_editing_sidebar_name = false;
+        self.name_input_buffer.clear();
+        self.snapshot.is_editing_name = false;
+        self.snapshot.name_input_buffer.clear();
+        self.set_flash_notice(Some("Edición de nombre cancelada".to_string()), 2000);
+        self.needs_redraw = true;
+    }
+
     pub fn set_flash_notice(&mut self, notice: Option<String>, duration_ms: u64) {
         if let Some(msg) = notice {
             self.flash_notice = Some(msg);
@@ -280,8 +342,8 @@ impl AppState {
     }
 
     pub fn toggle_card_visibility(&mut self, card_key: &str) {
-        if card_key == "tarjetas" {
-            return; // Tarjetas es fija
+        if card_key == "personalizar" || card_key == "tarjetas" {
+            return; // Personalizar es fija
         }
         if self.hidden_cards.contains(card_key) {
             self.hidden_cards.remove(card_key);
@@ -293,7 +355,7 @@ impl AppState {
     }
 
     pub fn is_card_hidden(&self, card_key: &str) -> bool {
-        if card_key == "tarjetas" {
+        if card_key == "personalizar" || card_key == "tarjetas" {
             false
         } else {
             self.hidden_cards.contains(card_key)
@@ -375,8 +437,35 @@ impl AppState {
         actual_scroll_offset: usize,
     ) -> Option<ClickAction> {
         let absolute_line = clicked_row + actual_scroll_offset;
+        let now = std::time::Instant::now();
+        let is_double_click = if let (Some(last_time), Some(last_r)) =
+            (self.last_click_instant, self.last_click_row)
+        {
+            last_r == clicked_row && now.duration_since(last_time).as_millis() <= 500
+        } else {
+            false
+        };
+        self.last_click_instant = Some(now);
+        self.last_click_row = Some(clicked_row);
 
-        // 1. Prioridad: Acciones especiales exactas (abrir carpeta, diff, quick peek o visibilidad)
+        // Doble clic en el encabezado de Personalizar o en la fila de Nombre inicia edición
+        if is_double_click {
+            for bound in &self.card_bounds {
+                let is_header = (bound.id == "personalizar" || bound.id == "tarjetas")
+                    && bound.action_type.is_none()
+                    && absolute_line == bound.start_line;
+                let is_name_row = (bound.id == "edit_sidebar_name"
+                    || bound.action_type == Some("edit_sidebar_name"))
+                    && absolute_line >= bound.start_line
+                    && absolute_line <= bound.end_line;
+                if is_header || is_name_row {
+                    self.start_edit_sidebar_name();
+                    return Some(ClickAction::StartEditSidebarName);
+                }
+            }
+        }
+
+        // 1. Prioridad: Acciones especiales exactas (abrir carpeta, diff, quick peek, visibilidad, tema o nombre)
         let mut matched_special: Option<(&'static str, Option<String>)> = None;
         for bound in &self.card_bounds {
             if let Some(action) = bound.action_type
@@ -388,7 +477,10 @@ impl AppState {
             }
         }
         if let Some((action, action_path)) = matched_special {
-            if action == "open_folder"
+            if action == "edit_sidebar_name" {
+                self.start_edit_sidebar_name();
+                return Some(ClickAction::StartEditSidebarName);
+            } else if action == "open_folder"
                 && let Some(p) = action_path
             {
                 return Some(ClickAction::OpenFolder(p));
@@ -423,7 +515,9 @@ impl AppState {
         //   tarjeta abierta (como Contexto) y el encabezado de la tarjeta siguiente (como Proyecto).
         for bound in &self.card_bounds {
             if bound.action_type.is_none()
-                && let Some(idx) = CARD_KEYS.iter().position(|&k| k == bound.id)
+                && let Some(idx) = CARD_KEYS.iter().position(|&k| {
+                    k == bound.id || (k == "personalizar" && bound.id == "tarjetas")
+                })
             {
                 let is_collapsed = self.collapsed_cards[idx];
                 let hit = if is_collapsed {
@@ -458,4 +552,5 @@ pub enum ClickAction {
     CloseQuickPeek,
     ToggleCardVisibility(String),
     CycleTheme(String),
+    StartEditSidebarName,
 }

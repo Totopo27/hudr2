@@ -179,4 +179,6 @@ pub struct TelemetrySnapshot {
     pub my_tab_id: Option<String>,
     pub sidebar_name: Option<String>,
     pub theme_name: Option<String>,
+    pub is_editing_name: bool,
+    pub name_input_buffer: String,
 }

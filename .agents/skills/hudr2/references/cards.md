@@ -14,7 +14,7 @@
 | `7` | `8` | `tools` | `Herramientas` | Expanded |
 | `8` | `9` | `mcp` | `MCP` | Expanded |
 | `9` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
-| `10` | `0` / `t` | `tarjetas` | `Tarjetas` | **Collapsed** |
+| `10` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
 
 ---
 
@@ -79,14 +79,14 @@
 - **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
 - **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
 
-## 10. `Tarjetas` (`id: "tarjetas"`, index `10`, key `0` / `t`)
-- **Header:** `Tarjetas` (collapsed by default).
+## 10. `Personalizar` (`id: "personalizar"`, index `10`, key `0` / `t`)
+- **Header:** `Personalizar` (collapsed by default).
 - **Rows:**
   - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
-  - `[✓] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`).
+  - `[x] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`). Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
   - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
-  - Redundant fixed row `[✓] Tarjetas fija` was eliminated to prevent vertical waste.
+  - Redundant fixed row was eliminated to prevent vertical waste (`personalizar` can never hide itself).
   - **Divider & Settings section:**
-    - `Nombre  <nombre>` with `[defecto]` or `[personalizado]` (`MINT`), customizing the top banner `:: <nombre> ::` (pattern adopted from `gs3-sidebar`). Configurable via `hudr2.json` or CLI `--name` / `--title`.
+    - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
     - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
   - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "..."}`).

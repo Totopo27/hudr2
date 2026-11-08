@@ -64,17 +64,17 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 | **Stack · Ecosistema**| CLI probes | Versiones instaladas de `pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram` y `herdr`. |
 | **Herramientas** | SQLite / IPC | Llamadas a herramientas en el turno (lecturas, escrituras, comandos bash, engram). |
 | **MCP** | IPC / configs | Servidores MCP activos y conectados al entorno. |
-| **Tarjetas** | `hudr2.json` | Panel de ajustes: visibilidad de módulos, tema activo y nombre personalizado del sidebar. |
+| **Personalizar** | `hudr2.json` | Panel de ajustes: visibilidad de módulos, tema activo y nombre personalizado del sidebar. |
 
 ---
 
-## Ajustes del HUD (`Tarjetas`)
+## Ajustes del HUD (`Personalizar`)
 
-Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 incluye gestión interactiva:
+Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 incluye gestión interactiva en tiempo real:
 
-- Presiona `0` o `t` para abrir la tarjeta **Tarjetas**.
-- **Visibilidad:** Cada fila muestra su estado `[✓] visible` o `[ ] oculta`. Un clic alterna su visibilidad para reducir el HUD a ~28 líneas.
-- **Nombre:** Permite personalizar el encabezado del sidebar mediante `hudr2.json` o flag `--name`.
+- Presiona `0` o `t` para abrir la tarjeta **Personalizar**.
+- **Visibilidad:** Cada fila muestra su estado `[x] visible` o `[ ] oculta` con casillas universales ASCII sin fuentes rotas. Un clic alterna su visibilidad para reducir el HUD a ~28 líneas.
+- **Nombre:** Permite editar interactivamente el encabezado del sidebar (`:: <Nombre> ::`) haciendo clic en `[editar >]`, doble clic en la tarjeta o pulsando `n` (con `Enter` para guardar, `Esc` para cancelar y persistencia atómica en `hudr2.json`). Escribir vacío o `HUDR2` restablece el nombre por defecto.
 - **Tema:** Muestra el tema activo y permite cambiarlo con un clic en `[cambiar >]` o pulsando `m`.
 - Las preferencias se guardan de forma atómica en `hudr2.json`.
 
@@ -85,14 +85,16 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 | Tecla / Acción | Efecto |
 |---|---|
 | `1` – `9` | Plegar o desplegar tarjetas individuales (1: Estado, 2: Contexto, 3: Proyecto, 4: Integraciones, 5: Cuotas, 6: Git, 7: Engram, 8: Herramientas, 9: MCP). |
-| `0` o `t` | Plegar o desplegar la tarjeta de **Tarjetas** (panel de ajustes). |
-| `m` | **Ciclar tema visual**: Alterna entre Auto (Herdr), 5 temas nativos y 14 de Herdr. |
+| `0` o `t` | Plegar o desplegar la tarjeta **Personalizar** (panel de ajustes). |
+| `n` o `[editar >]` | **Editar nombre**: Modifica en línea el título del sidebar (guardar con `Enter`, cancelar con `Esc`). |
+| `m` o `[cambiar >]` | **Ciclar tema visual**: Alterna entre Auto (Herdr), 5 temas nativos y 14 de Herdr. |
 | `c` | Colapsar o abrir todas las tarjetas a la vez. |
 | `x` | **Migración en caliente**: Reasigna sesiones activas con cuota crítica (>85%) hacia la cuenta más saludable disponible. |
 | `s` | **Sincronización**: Regenera modelos y templates de Cliproxy en `opencode.json`. |
 | `d` | **Liberar**: Cierra sesiones inactivas y limpia retenciones de cuentas en SQLite. |
 | `r` | Forzar refresco inmediato de telemetría y cuotas de red. |
 | `o` | Abrir la carpeta del proyecto en el explorador de archivos del sistema. |
+| `Doble clic en Personalizar` | Abre directamente el editor de nombre personalizado. |
 | `Clic en archivo Git` | Despliega u oculta el diff inline (bloqueando automáticamente claves `.env`, pem y secretos). |
 | `k` / `j` o `↑` / `↓` | Desplazar la vista verticalmente. |
 | `q` o `Ctrl+C` | Salir de HUDR2. |

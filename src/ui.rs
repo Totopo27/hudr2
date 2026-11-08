@@ -668,10 +668,23 @@ pub fn render_screen_with_diff_and_theme(
                     .contains(&acc.prefix.to_lowercase());
 
                 let (status_glyph, pct_color, right_text) = if acc.has_error {
+                    let err_display = if acc.error_msg.to_lowercase().contains("expirado") {
+                        if width < 34 {
+                            "exp".to_string()
+                        } else {
+                            "expirado".to_string()
+                        }
+                    } else if width < 34 {
+                        truncate_to_width(&acc.error_msg, 6)
+                    } else if acc.error_msg.len() > 10 {
+                        truncate_to_width(&acc.error_msg, 10)
+                    } else {
+                        acc.error_msg.clone()
+                    };
                     (
                         format!("{AMBER}?{RESET}"),
                         AMBER,
-                        format!("{AMBER}[{}]{RESET}", acc.error_msg),
+                        format!("{AMBER}[{err_display}]{RESET}"),
                     )
                 } else if eff.is_critical {
                     (
@@ -705,7 +718,14 @@ pub fn render_screen_with_diff_and_theme(
                     )
                 };
 
-                let pfx_clean = format!("{:<7}", acc.prefix);
+                let pfx_w = if width < 38 {
+                    4
+                } else if width < 42 {
+                    5
+                } else {
+                    7
+                };
+                let pfx_clean = format!("{:<width$}", acc.prefix, width = pfx_w);
                 let pfx_disp = if is_local {
                     format!("{BOLD}{TEXT_PRIMARY}{pfx_clean}{RESET}")
                 } else if is_any_active {
@@ -713,7 +733,8 @@ pub fn render_screen_with_diff_and_theme(
                 } else {
                     format!("{TEXT_MUTED}{pfx_clean}{RESET}")
                 };
-                let bar = render_gauge_inline(eff.rem_5h, 3, pct_color);
+                let bar_len = if width < 38 { 2 } else { 3 };
+                let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
                 let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
                 let wk_color = if eff.is_critical {
                     CORAL
@@ -722,12 +743,17 @@ pub fn render_screen_with_diff_and_theme(
                 } else {
                     MINT
                 };
-                let pct_wk = format!(
-                    "{TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
-                    eff.rem_wk
-                );
+                let wk_str = if width < 36 {
+                    String::new()
+                } else {
+                    let wk_label = if width < 40 { "W:" } else { "Wk:" };
+                    format!(
+                        " {TEXT_DIM}{wk_label}{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                        eff.rem_wk
+                    )
+                };
 
-                let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h} {pct_wk}");
+                let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h}{wk_str}");
                 lines.push(draw_row(&left, &right_text, width));
             }
         }
@@ -820,16 +846,22 @@ pub fn render_screen_with_diff_and_theme(
                     MINT
                 };
 
-                let bar = render_gauge_inline(p.percent, 6, pool_color);
+                let bar_len = if width < 42 { 3 } else { 6 };
+                let bar = render_gauge_inline(p.percent, bar_len, pool_color);
                 let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
-                let p_label = format!("{:<9}", p.label);
+                let pfx_w = if width < 42 { 7 } else { 9 };
+                let p_label = format!("{:<width$}", p.label, width = pfx_w);
                 let left = format!(
                     "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
                 );
-                let right = format!(
-                    "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
-                    p.pace, p.reset
-                );
+                let right = if width < 40 {
+                    format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+                } else {
+                    format!(
+                        "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                        p.pace, p.reset
+                    )
+                };
                 lines.push(draw_row(&left, &right, width));
             }
         }
@@ -1032,8 +1064,13 @@ pub fn render_screen_with_diff_and_theme(
         };
         // El estado "en línea" se deriva de poder abrir engram.db (SQLite local),
         // no de un puerto HTTP, así que la etiqueta refleja la fuente real.
+        let local_label = if width < 40 {
+            "engram.db"
+        } else {
+            "Local (engram.db)"
+        };
         lines.push(draw_row(
-            "Local (engram.db)",
+            local_label,
             &format!(
                 "{online} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{} obs{RESET}",
                 snap.engram.obs_count
@@ -1041,7 +1078,13 @@ pub fn render_screen_with_diff_and_theme(
             width,
         ));
         let cloud_row = if snap.engram.enrolled {
-            "Cloud: proyecto inscrito para sync"
+            if width < 40 {
+                "Cloud: sync inscrito"
+            } else {
+                "Cloud: proyecto inscrito para sync"
+            }
+        } else if width < 40 {
+            "Cloud: solo local"
         } else {
             "Cloud: solo local o no configurado"
         };
@@ -1190,10 +1233,10 @@ pub fn render_screen_with_diff_and_theme(
         });
     }
 
-    // 11. Tarjetas Card (10) — Selector interactivo de visibilidad
-    let tarjetas_start = lines.len();
-    let tarjetas_title = format!("{BOLD}{title_color}Tarjetas{RESET}");
-    lines.push(draw_top(&tarjetas_title, collapsed[10], width));
+    // 11. Personalizar Card (10) — Selector interactivo de visibilidad, nombre y tema
+    let personalizar_start = lines.len();
+    let personalizar_title = format!("{BOLD}{title_color}Personalizar{RESET}");
+    lines.push(draw_top(&personalizar_title, collapsed[10], width));
     if !collapsed[10] {
         let cards_info: [(&str, &str); 10] = [
             ("estado", "Estado"),
@@ -1218,7 +1261,7 @@ pub fn render_screen_with_diff_and_theme(
                 )
             } else {
                 (
-                    format!("{MINT}[\u{2713}]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
+                    format!("{MINT}[x]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
                     format!("{MINT}visible{RESET}"),
                 )
             };
@@ -1235,22 +1278,40 @@ pub fn render_screen_with_diff_and_theme(
         // Divisor para opciones de personalización (Nombre + Tema)
         lines.push(draw_divider(width));
 
-        // 1. Fila de Nombre personalizado del Sidebar (patrón gs3-sidebar)
-        let (name_left, name_badge) = match snap
-            .sidebar_name
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-        {
-            Some(n) => (
-                format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{n}{RESET}"),
-                format!("{MINT}[personalizado]{RESET}"),
-            ),
-            None => (
-                format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}HUDR2{RESET}"),
-                format!("{TEXT_DIM}[defecto]{RESET}"),
-            ),
-        };
-        lines.push(draw_row(&name_left, &name_badge, width));
+        // 1. Fila de Nombre personalizado del Sidebar (patrón gs3-sidebar, editable)
+        let name_row_idx = lines.len();
+        if snap.is_editing_name {
+            let input_display = if snap.name_input_buffer.is_empty() {
+                format!("{TEXT_DIM}_ (escribe nombre){RESET}")
+            } else {
+                format!(
+                    "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
+                    snap.name_input_buffer
+                )
+            };
+            let name_left = format!("{label_color}Nombre{RESET}  > {input_display}");
+            let name_right = format!("{AMBER}[Enter|Esc]{RESET}");
+            lines.push(draw_row(&name_left, &name_right, width));
+        } else {
+            let (name_val, badge_text, badge_color) = match snap
+                .sidebar_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+            {
+                Some(n) => (n, "[editar >]", accent_primary),
+                None => ("HUDR2", "[editar >]", accent_primary),
+            };
+            let name_left = format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{name_val}{RESET}");
+            let name_right = format!("{badge_color}{badge_text}{RESET}");
+            lines.push(draw_row(&name_left, &name_right, width));
+        }
+        bounds.push(CardBounds {
+            id: "edit_sidebar_name",
+            start_line: name_row_idx,
+            end_line: name_row_idx,
+            action_type: Some("edit_sidebar_name"),
+            action_path: None,
+        });
 
         // 2. Fila interactiva para ciclar temas visuales
         let theme_label = crate::theme::theme_display_label(snap.theme_name.as_deref());
@@ -1268,20 +1329,29 @@ pub fn render_screen_with_diff_and_theme(
     }
     lines.push(draw_bottom(width));
     bounds.push(CardBounds {
-        id: "tarjetas",
-        start_line: tarjetas_start,
+        id: "personalizar",
+        start_line: personalizar_start,
         end_line: lines.len() - 1,
         action_type: None,
         action_path: None,
     });
 
     // Footer de atajos
-    lines.push(truncate_to_width(
-        &format!(
-            "{TEXT_DIM} 0-9: colap \u{00b7} t: tarjetas \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
-        ),
-        width,
-    ));
+    if snap.is_editing_name {
+        lines.push(truncate_to_width(
+            &format!(
+                "{AMBER} Enter: guardar \u{00b7} Esc: cancelar \u{00b7} Retroceso: borrar{RESET}"
+            ),
+            width,
+        ));
+    } else {
+        lines.push(truncate_to_width(
+            &format!(
+                "{TEXT_DIM} 0-9: colap \u{00b7} p: pers \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
+            ),
+            width,
+        ));
+    }
     let has_active_critical = snap.accounts.iter().any(|a| {
         let eff = crate::quotas::evaluate_account_for_model(a, active_model);
         (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))

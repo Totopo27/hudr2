@@ -323,7 +323,7 @@ impl HerdrClient {
             "--direction",
             "right",
             "--ratio",
-            "0.80",
+            "0.78",
             "--cwd",
             cwd,
             "--no-focus",
