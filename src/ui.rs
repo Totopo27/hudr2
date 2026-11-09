@@ -317,6 +317,7 @@ pub fn render_screen_with_diff_and_theme(
     let text_primary = theme.text_primary;
     let text_muted = theme.text_muted;
     let text_dim = theme.text_dim;
+    let cyan = theme.cyan;
 
     let draw_top = |title: &str, col: bool, w: usize| draw_top_theme(title, col, w, theme);
     let draw_bottom = |w: usize| draw_bottom_theme(w, theme);
@@ -1250,10 +1251,34 @@ pub fn render_screen_with_diff_and_theme(
                     };
 
                     let right = if tool.is_updating {
-                        let act_txt = if width >= 44 { "[actualizando...]" } else { "[act...]" };
-                        format!("{amber}{act_txt}{RESET}")
+                        const SPINNER_FRAMES: &[char] = &[
+                            '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}',
+                            '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}',
+                        ];
+                        let (spinner, pct_str) = if let Some(ref prog) = tool.update_progress {
+                            let sp = SPINNER_FRAMES[prog.spinner_idx % SPINNER_FRAMES.len()];
+                            let p = format!("{}%", prog.percent);
+                            (sp, p)
+                        } else {
+                            ('\u{280b}', "--%".to_string())
+                        };
+
+                        let monitor = format!("{cyan}[{spinner} {pct_str}]{RESET}");
+                        let btn_txt = if width >= 56 {
+                            format!("{amber}[actualizando]{RESET}")
+                        } else if width >= 40 {
+                            format!("{amber}[\u{2191}]{RESET}")
+                        } else {
+                            String::new()
+                        };
+
+                        if btn_txt.is_empty() {
+                            monitor
+                        } else {
+                            format!("{monitor} {btn_txt}")
+                        }
                     } else if snap.check_updates && tool.update_available {
-                        let btn_txt = if width >= 44 { "[actualizar]" } else { "[↑]" };
+                        let btn_txt = if width >= 44 { "[actualizar]" } else { "[\u{2191}]" };
                         format!("{amber}{btn_txt}{RESET}")
                     } else {
                         String::new()

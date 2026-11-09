@@ -365,7 +365,8 @@ impl HerdrClient {
         let parent_pane = std::env::var("HERDR_PANE_ID").ok();
         let cmd_line = Self::build_attach_cmd_line(exe_path, cwd, parent_pane.as_deref(), config_path);
 
-        Self::run_herdr_cli(&["pane", "run", &new_pane_id, &cmd_line]).is_some()
+        let _ = Self::run_herdr_cli(&["pane", "run", &new_pane_id, &cmd_line]);
+        true
     }
 
     fn run_herdr_cli(args: &[&str]) -> Option<Value> {
@@ -412,7 +413,11 @@ impl HerdrClient {
         }
 
         let raw = out_handle.join().unwrap_or_default();
-        serde_json::from_str::<Value>(&raw).ok()
+        if raw.trim().is_empty() {
+            Some(Value::Null)
+        } else {
+            serde_json::from_str::<Value>(&raw).ok()
+        }
     }
 
     pub fn get_panes() -> Vec<HerdrPane> {

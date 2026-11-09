@@ -4272,7 +4272,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v3.7.0".to_string()),
                     update_available: true,
-                    is_updating: false,
+                    ..Default::default()
                 },
                 ToolVersionInfo {
                     name: "herdr".to_string(),
@@ -4280,7 +4280,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v0.9.5".to_string()),
                     update_available: false,
-                    is_updating: false,
+                    ..Default::default()
                 },
             ],
         };
@@ -4375,6 +4375,25 @@ mod tests {
     }
 
     #[test]
+    fn test_herdr_split_pane_id_extraction_and_empty_output_handling() {
+        use hudr2::herdr::HerdrClient;
+        use serde_json::Value;
+
+        // 1. Extracción de split_pane_id desde varios formatos válidos de Herdr
+        let val1 = serde_json::json!({ "result": { "pane": { "pane_id": "w11:p2" } } });
+        assert_eq!(HerdrClient::extract_split_pane_id(&val1).as_deref(), Some("w11:p2"));
+
+        let val2 = serde_json::json!({ "pane": { "pane_id": "w11:p3" } });
+        assert_eq!(HerdrClient::extract_split_pane_id(&val2).as_deref(), Some("w11:p3"));
+
+        let val3 = serde_json::json!({ "pane_id": "w11:p4" });
+        assert_eq!(HerdrClient::extract_split_pane_id(&val3).as_deref(), Some("w11:p4"));
+
+        // 2. Value::Null no extrae id
+        assert_eq!(HerdrClient::extract_split_pane_id(&Value::Null), None);
+    }
+
+    #[test]
     fn test_ecosystem_individual_update_buttons_and_click() {
         use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
 
@@ -4387,7 +4406,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v1.5.0".to_string()),
                     update_available: true,
-                    is_updating: false,
+                    ..Default::default()
                 },
                 ToolVersionInfo {
                     name: "herdr".to_string(),
@@ -4395,7 +4414,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v0.9.5".to_string()),
                     update_available: false,
-                    is_updating: false,
+                    ..Default::default()
                 },
             ],
         };
@@ -4431,13 +4450,20 @@ mod tests {
             "herdr no debe tener bound de actualización porque está al día"
         );
 
-        // 2. Estado is_updating: debe mostrar [actualizando...] y no permitir clic
+        // 2. Estado is_updating con monitor de porcentaje en tiempo real
         state.snapshot.ecosystem.tools[0].is_updating = true;
+        state.snapshot.ecosystem.tools[0].update_progress = Some(hudr2::models::ToolUpdateProgress {
+            percent: 45,
+            stage: "descargando".to_string(),
+            spinner_idx: 0,
+            elapsed_secs: 2,
+        });
         let render_updating = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         state.card_bounds = render_updating.bounds;
 
         let updating_text = render_updating.lines.join("\n");
-        assert!(updating_text.contains("[actualizando...]"));
+        assert!(updating_text.contains("[⠋ 45%]"), "Debe mostrar el monitor con porcentaje a la izquierda del botón");
+        assert!(updating_text.contains("[\u{2191}]"), "En ancho 48 muestra botón compacto [↑] junto al monitor");
         assert!(
             !state
                 .card_bounds
@@ -4446,8 +4472,21 @@ mod tests {
             "pi no debe tener bound de actualización mientras se está actualizando"
         );
 
-        // 3. Ancho estrecho (36 columnas): botón adaptativo compacto [↑]
+        // 3. Ancho ancho (56 columnas): monitor [⠋ 45%] + [actualizando]
+        let render_updating_56 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
+        let text_56 = render_updating_56.lines.join("\n");
+        assert!(text_56.contains("[⠋ 45%]"));
+        assert!(text_56.contains("[actualizando]"));
+
+        // 4. Ancho adaptativo estrecho (42 columnas): monitor [⠋ 45%] + botón compacto [↑]
+        let render_updating_42 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
+        let text_42 = render_updating_42.lines.join("\n");
+        assert!(text_42.contains("[⠋ 45%]"));
+        assert!(text_42.contains("[\u{2191}]"));
+
+        // 5. Ancho estrecho estándar (36 columnas): botón adaptativo compacto [↑]
         state.snapshot.ecosystem.tools[0].is_updating = false;
+        state.snapshot.ecosystem.tools[0].update_progress = None;
         let render_narrow = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 36);
         let narrow_text = render_narrow.lines.join("\n");
         assert!(narrow_text.contains("[↑]"));

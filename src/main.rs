@@ -880,6 +880,12 @@ fn spawn_tool_update(
                     return;
                 }
                 tool.is_updating = true;
+                tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
+                    percent: 5,
+                    stage: "iniciando".to_string(),
+                    spinner_idx: 0,
+                    elapsed_secs: 0,
+                });
             }
             st.set_flash_notice(
                 Some(format!("+ Actualizando {} en segundo plano...", tool_name)),
@@ -889,10 +895,36 @@ fn spawn_tool_update(
         }
         let _ = wake_tx.send(MainMsg::Redraw);
 
-        // 2. Ejecutar comando en worker thread sin bloquear Tokio runtime
+        // 2. Ejecutar comando en worker thread reportando progreso continuo
         let tool_for_cmd = tool_name.clone();
+        let app_state_progress = app_state.clone();
+        let wake_tx_progress = wake_tx.clone();
+        let tool_name_for_cb = tool_name.clone();
+
         let res = tokio::task::spawn_blocking(move || {
-            hudr2::ecosystem::execute_tool_update(&tool_for_cmd)
+            hudr2::ecosystem::execute_tool_update_with_progress(
+                &tool_for_cmd,
+                move |pct, stage, sp_idx, elapsed| {
+                    let mut st = app_state_progress.blocking_write();
+                    if let Some(tool) = st
+                        .snapshot
+                        .ecosystem
+                        .tools
+                        .iter_mut()
+                        .find(|t| t.name == tool_name_for_cb)
+                    {
+                        tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
+                            percent: pct,
+                            stage: stage.to_string(),
+                            spinner_idx: sp_idx,
+                            elapsed_secs: elapsed,
+                        });
+                        st.needs_redraw = true;
+                    }
+                    drop(st);
+                    let _ = wake_tx_progress.send(MainMsg::Redraw);
+                },
+            )
         })
         .await
         .unwrap_or_else(|e| Err(format!("error en worker thread: {e}")));

@@ -154,6 +154,14 @@ pub struct ProjectTreeData {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolUpdateProgress {
+    pub percent: u8,
+    pub stage: String,
+    pub spinner_idx: usize,
+    pub elapsed_secs: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ToolVersionInfo {
     pub name: String,
     pub version: Option<String>,
@@ -161,6 +169,7 @@ pub struct ToolVersionInfo {
     pub upstream_version: Option<String>,
     pub update_available: bool,
     pub is_updating: bool,
+    pub update_progress: Option<ToolUpdateProgress>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

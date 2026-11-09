@@ -287,9 +287,64 @@ pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str
     }
 }
 
+/// Analiza líneas emitidas por instaladores (gentle-ai, npm, herdr, cargo) y aproxima el progreso y etapa.
+pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
+    let lower = line.to_ascii_lowercase();
+
+    // 1. Porcentaje numérico explícito si la herramienta lo emite (e.g. " 45%" o "45%")
+    if let Some(pos) = lower.find('%') {
+        let prefix = &lower[..pos];
+        let num_str: String = prefix
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if let Ok(pct) = num_str.parse::<u8>() {
+            return (pct.clamp(5, 99), "descargando".to_string());
+        }
+    }
+
+    // 2. Mapeo de etapas conocidas en el ecosistema
+    if lower.contains("checking") || lower.contains("comprobando") || lower.contains("buscando") {
+        (15.max(current_pct), "verificando".to_string())
+    } else if lower.contains("backup") || lower.contains("copia") {
+        (30.max(current_pct), "backup".to_string())
+    } else if lower.contains("download") || lower.contains("descarg") || lower.contains("fetch") {
+        (50.max(current_pct), "descargando".to_string())
+    } else if lower.contains("upgrading")
+        || lower.contains("install")
+        || lower.contains("go-install")
+        || lower.contains("reify")
+        || lower.contains("binary")
+    {
+        (75.max(current_pct), "instalando".to_string())
+    } else if lower.contains("extract") || lower.contains("unzip") || lower.contains("descompr") {
+        (85.max(current_pct), "extrayendo".to_string())
+    } else if lower.contains("verif") || lower.contains("clean") || lower.contains("limp") {
+        (92.max(current_pct), "limpiando".to_string())
+    } else if lower.contains("[ok]")
+        || lower.contains("success")
+        || lower.contains("succeeded")
+        || lower.contains("complet")
+    {
+        (100, "completado".to_string())
+    } else {
+        (current_pct, "procesando".to_string())
+    }
+}
+
 /// Ejecuta el comando de actualización para una herramienta específica en un subproceso
-/// seguro y no bloqueante con timeout de 120s.
-pub fn execute_tool_update(name: &str) -> Result<String, String> {
+/// seguro y no bloqueante con timeout de 120s, reportando progreso en tiempo real a `on_progress`.
+pub fn execute_tool_update_with_progress<F>(
+    name: &str,
+    mut on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(u8, &str, usize, u64) + Send,
+{
     let (bin, args) = update_cmd_for_tool(name)
         .ok_or_else(|| format!("no hay comando de actualización definido para '{name}'"))?;
 
@@ -322,27 +377,67 @@ pub fn execute_tool_update(name: &str) -> Result<String, String> {
         .spawn()
         .map_err(|e| format!("no se pudo iniciar el proceso '{bin}': {e}"))?;
 
+    let (tx_lines, rx_lines) = std::sync::mpsc::channel::<(String, bool)>();
+    let tx_out = tx_lines.clone();
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
     let out_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        if let Some(p) = stdout_pipe {
-            let _ = p.take(32 * 1024).read_to_string(&mut s);
+        let mut full = String::new();
+        if let Some(pipe) = stdout_pipe {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                full.push_str(&line);
+                full.push('\n');
+                let _ = tx_out.send((line, false));
+            }
         }
-        s
+        full
     });
 
+    let tx_err = tx_lines.clone();
     let err_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        if let Some(p) = stderr_pipe {
-            let _ = p.take(32 * 1024).read_to_string(&mut s);
+        let mut full = String::new();
+        if let Some(pipe) = stderr_pipe {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(pipe);
+            for line in reader.lines().map_while(Result::ok) {
+                full.push_str(&line);
+                full.push('\n');
+                let _ = tx_err.send((line, true));
+            }
         }
-        s
+        full
     });
+    drop(tx_lines);
 
     let deadline = Instant::now() + Duration::from_secs(120);
+    let start_time = Instant::now();
+    let mut pct: u8 = 10;
+    let mut stage = "iniciando".to_string();
+    let mut spinner_idx: usize = 0;
+    let mut last_progress_emit = Instant::now();
+
+    on_progress(pct, &stage, spinner_idx, 0);
+
     let status = loop {
+        match rx_lines.recv_timeout(Duration::from_millis(200)) {
+            Ok((line, _is_err)) => {
+                let (new_pct, new_stage) = parse_line_progress(&line, pct);
+                pct = new_pct;
+                stage = new_stage;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                spinner_idx = (spinner_idx + 1) % 10;
+                let elapsed = start_time.elapsed().as_secs();
+                if pct < 90 && elapsed >= 2 && pct < 15 + (elapsed as u8 * 4) {
+                    pct = (pct + 1).min(90);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+
         match child.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) => {
@@ -351,7 +446,11 @@ pub fn execute_tool_update(name: &str) -> Result<String, String> {
                     let _ = child.wait();
                     return Err(format!("tiempo límite de actualización agotado (120s) para '{name}'"));
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                if last_progress_emit.elapsed() >= Duration::from_millis(180) {
+                    spinner_idx = (spinner_idx + 1) % 10;
+                    on_progress(pct, &stage, spinner_idx, start_time.elapsed().as_secs());
+                    last_progress_emit = Instant::now();
+                }
             }
             Err(e) => return Err(format!("error esperando proceso: {e}")),
         }
@@ -361,6 +460,7 @@ pub fn execute_tool_update(name: &str) -> Result<String, String> {
     let stderr_str = err_handle.join().unwrap_or_default();
 
     if status.success() {
+        on_progress(100, "completado", 0, start_time.elapsed().as_secs());
         Ok(format!("{name} actualizado correctamente"))
     } else {
         let err_detail = stderr_str
@@ -371,6 +471,12 @@ pub fn execute_tool_update(name: &str) -> Result<String, String> {
             .unwrap_or("falló el comando de instalación");
         Err(format!("{name}: {err_detail}"))
     }
+}
+
+/// Ejecuta el comando de actualización para una herramienta específica en un subproceso
+/// seguro y no bloqueante con timeout de 120s.
+pub fn execute_tool_update(name: &str) -> Result<String, String> {
+    execute_tool_update_with_progress(name, |_, _, _, _| {})
 }
 
 /// Compara dos versiones semver normalizadas (`vX.Y.Z[-tag]`).
@@ -637,5 +743,28 @@ mod tests {
         let (bin_engram, args_engram) = update_cmd_for_tool("engram").unwrap();
         assert_eq!(bin_engram, "gentle-ai");
         assert_eq!(args_engram, vec!["upgrade", "engram"]);
+    }
+
+    #[test]
+    fn test_parse_line_progress() {
+        let (pct1, stage1) = parse_line_progress("Checking for updates...", 10);
+        assert_eq!(pct1, 15);
+        assert_eq!(stage1, "verificando");
+
+        let (pct2, stage2) = parse_line_progress("Creating pre-upgrade backup...", 15);
+        assert_eq!(pct2, 30);
+        assert_eq!(stage2, "backup");
+
+        let (pct3, stage3) = parse_line_progress("Upgrading engram via binary (3.6.2 -> 3.7.0)...", 30);
+        assert_eq!(pct3, 75);
+        assert_eq!(stage3, "instalando");
+
+        let (pct4, stage4) = parse_line_progress("Downloaded 65% of release assets", 30);
+        assert_eq!(pct4, 65);
+        assert_eq!(stage4, "descargando");
+
+        let (pct5, stage5) = parse_line_progress("[ok] engram 3.6.2 -> 3.7.0", 75);
+        assert_eq!(pct5, 100);
+        assert_eq!(stage5, "completado");
     }
 }
