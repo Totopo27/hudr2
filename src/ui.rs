@@ -1278,7 +1278,13 @@ pub fn render_screen_with_diff_and_theme(
                             format!("{monitor} {btn_txt}")
                         }
                     } else if snap.check_updates && tool.update_available {
-                        let btn_txt = if width >= 44 { "[actualizar]" } else { "[\u{2191}]" };
+                        let btn_txt = if tool.name == "hudr2" {
+                            if width >= 44 { "[asistido]" } else { "[\u{2191}]" }
+                        } else if width >= 44 {
+                            "[actualizar]"
+                        } else {
+                            "[\u{2191}]"
+                        };
                         format!("{amber}{btn_txt}{RESET}")
                     } else {
                         String::new()

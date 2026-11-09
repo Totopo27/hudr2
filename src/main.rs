@@ -866,6 +866,17 @@ fn spawn_tool_update(
     wake_tx: mpsc::UnboundedSender<MainMsg>,
 ) {
     tokio::spawn(async move {
+        // 0. Si la herramienta requiere actualización asistida fuera del HUD (e.g. hudr2 en Windows),
+        // notificar de inmediato con flash notice sin bloquear ni compilar en segundo plano.
+        if let Some(notice) = hudr2::ecosystem::assisted_update_notice(&tool_name) {
+            let mut st = app_state.write().await;
+            st.set_flash_notice(Some(notice.to_string()), 6000);
+            st.needs_redraw = true;
+            drop(st);
+            let _ = wake_tx.send(MainMsg::Redraw);
+            return;
+        }
+
         // 1. Marcar como actualizándose en el snapshot y avisar con flash notice
         {
             let mut st = app_state.write().await;

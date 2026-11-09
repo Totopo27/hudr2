@@ -275,6 +275,8 @@ pub fn repo_for_tool(name: &str) -> Option<&'static str> {
 }
 
 /// Define el comando oficial de actualización para cada herramienta del ecosistema.
+/// Nota: `hudr2` se actualiza de forma asistida fuera del HUD en ejecución para evitar bloqueos
+/// de archivo en Windows (`os error 5`) y saturación de CPU por compilación de Rust.
 pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
     match name {
         "pi" => Some(("npm", vec!["install", "-g", "@earendil-works/pi-coding-agent@latest"])),
@@ -282,7 +284,15 @@ pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str
         "gentle-ai" => Some(("gentle-ai", vec!["upgrade", "gentle-ai"])),
         "engram" => Some(("gentle-ai", vec!["upgrade", "engram"])),
         "herdr" => Some(("herdr", vec!["update"])),
-        "hudr2" => Some(("cargo", vec!["install", "--git", "https://github.com/Totopo27/hudr2"])),
+        _ => None,
+    }
+}
+
+/// Devuelve instrucciones asistidas para herramientas que deben actualizarse fuera
+/// del proceso activo (como hudr2, para evitar bloqueos de archivo en Windows y sobrecarga de CPU).
+pub fn assisted_update_notice(name: &str) -> Option<&'static str> {
+    match name {
+        "hudr2" => Some("hudr2: para actualizar, ejecute en otra terminal: cargo install --git https://github.com/Totopo27/hudr2"),
         _ => None,
     }
 }
@@ -729,7 +739,8 @@ mod tests {
         assert!(update_cmd_for_tool("gentle-ai").is_some());
         assert!(update_cmd_for_tool("engram").is_some());
         assert!(update_cmd_for_tool("herdr").is_some());
-        assert!(update_cmd_for_tool("hudr2").is_some());
+        assert!(update_cmd_for_tool("hudr2").is_none());
+        assert!(assisted_update_notice("hudr2").is_some());
         assert!(update_cmd_for_tool("nonexistent").is_none());
 
         let (bin_pi, args_pi) = update_cmd_for_tool("pi").unwrap();

@@ -4513,4 +4513,55 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_hudr2_assisted_update_notice_and_button() {
+        use hudr2::ecosystem::{assisted_update_notice, update_cmd_for_tool};
+        use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
+
+        // 1. Invariantes del ecosistema para hudr2:
+        // No tiene comando automático in-process (evita saturación y bloqueo os error 5 en Windows)
+        assert!(update_cmd_for_tool("hudr2").is_none());
+        let notice = assisted_update_notice("hudr2").expect("aviso asistido de hudr2 debe existir");
+        assert!(notice.contains("cargo install --git"));
+
+        // 2. Renderizado UI:
+        let mut state = AppState::new();
+        state.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![ToolVersionInfo {
+                name: "hudr2".to_string(),
+                version: Some("v0.1.0".to_string()),
+                is_installed: true,
+                upstream_version: Some("v0.2.0".to_string()),
+                update_available: true,
+                ..Default::default()
+            }],
+        };
+
+        // Ancho estándar (48 columnas): muestra [asistido]
+        let render_48 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let text_48 = render_48.lines.join("\n");
+        assert!(text_48.contains("[asistido]"));
+        assert!(!text_48.contains("[actualizar]"));
+
+        // Ancho estrecho (36 columnas): muestra [↑]
+        let render_36 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 36);
+        let text_36 = render_36.lines.join("\n");
+        assert!(text_36.contains("[↑]"));
+
+        // 3. Verificación de bound de clic y acción UpdateTool("hudr2")
+        state.card_bounds = render_48.bounds;
+        let hudr2_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "update_tool" && b.action_path.as_deref() == Some("hudr2"))
+            .expect("bound para update_tool(hudr2) debe existir");
+
+        let action = state.handle_mouse_click(hudr2_bound.start_line, 0);
+        assert_eq!(
+            action,
+            Some(ClickAction::UpdateTool("hudr2".to_string())),
+            "Clic en la fila de hudr2 debe emitir UpdateTool(\"hudr2\")"
+        );
+    }
 }
