@@ -281,7 +281,19 @@ pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str
     match name {
         "pi" => Some(("npm", vec!["install", "-g", "@earendil-works/pi-coding-agent@latest"])),
         "gentle-shell" => Some(("npm", vec!["install", "-g", "gentle-pi@latest"])),
-        "gentle-ai" => Some(("gentle-ai", vec!["upgrade", "gentle-ai"])),
+        "gentle-ai" => {
+            if cfg!(target_os = "windows") {
+                Some((
+                    "go",
+                    vec![
+                        "install",
+                        "github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@latest",
+                    ],
+                ))
+            } else {
+                Some(("gentle-ai", vec!["upgrade", "gentle-ai"]))
+            }
+        }
         "engram" => Some(("gentle-ai", vec!["upgrade", "engram"])),
         "herdr" => Some(("herdr", vec!["update"])),
         _ => None,
@@ -388,6 +400,30 @@ pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
     }
 }
 
+/// En Windows, sincroniza el binario recién instalado en GOPATH/bin con la ruta activa que resuelve PATH
+/// si ésta se encuentra en otra carpeta (ej. GOROOT/bin u otra instalación previa).
+#[cfg(target_os = "windows")]
+fn sync_active_windows_binary(bin_name: &str) {
+    let active_path = run_version_cmd("where.exe", &[bin_name])
+        .and_then(|out| out.lines().next().map(|l| l.trim().to_string()))
+        .map(std::path::PathBuf::from);
+
+    let gopath = run_version_cmd("go", &["env", "GOPATH"])
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join("go")));
+
+    if let (Some(gopath_dir), Some(dest)) = (gopath, active_path) {
+        let src = gopath_dir.join("bin").join(format!("{bin_name}.exe"));
+        if src.exists() && src != dest && std::fs::copy(&src, &dest).is_err() {
+            let old = dest.with_extension("old.exe");
+            let _ = std::fs::rename(&dest, &old);
+            let _ = std::fs::copy(&src, &dest);
+        }
+    }
+}
+
 /// Ejecuta el comando de actualización para una herramienta específica en un subproceso
 /// seguro y no bloqueante con timeout de 120s, reportando progreso en tiempo real a `on_progress`.
 pub fn execute_tool_update_with_progress<F>(
@@ -397,6 +433,15 @@ pub fn execute_tool_update_with_progress<F>(
 where
     F: FnMut(u8, &str, usize, u64) + Send,
 {
+    if cfg!(target_os = "windows")
+        && name == "gentle-ai"
+        && run_version_cmd("go", &["version"]).is_none()
+    {
+        return Err(
+            "gentle-ai en Windows requiere Go instalado (https://go.dev) para compilar".to_string(),
+        );
+    }
+
     let (bin, args) = update_cmd_for_tool(name)
         .ok_or_else(|| format!("no hay comando de actualización definido para '{name}'"))?;
 
@@ -508,6 +553,10 @@ where
                 .map(|l| l.trim())
                 .unwrap_or("requiere actualización manual");
             return Err(format!("{name}: {reason}"));
+        }
+        #[cfg(target_os = "windows")]
+        if name == "gentle-ai" {
+            sync_active_windows_binary("gentle-ai");
         }
         on_progress(100, "completado", 0, start_time.elapsed().as_secs());
         Ok(format!("{name} actualizado correctamente"))
@@ -793,6 +842,15 @@ mod tests {
         let (bin_engram, args_engram) = update_cmd_for_tool("engram").unwrap();
         assert_eq!(bin_engram, "gentle-ai");
         assert_eq!(args_engram, vec!["upgrade", "engram"]);
+
+        let (bin_gai, args_gai) = update_cmd_for_tool("gentle-ai").unwrap();
+        if cfg!(target_os = "windows") {
+            assert_eq!(bin_gai, "go");
+            assert!(args_gai.contains(&"install"));
+        } else {
+            assert_eq!(bin_gai, "gentle-ai");
+            assert_eq!(args_gai, vec!["upgrade", "gentle-ai"]);
+        }
     }
 
     #[test]
