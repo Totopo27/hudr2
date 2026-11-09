@@ -160,6 +160,7 @@ pub struct ToolVersionInfo {
     pub is_installed: bool,
     pub upstream_version: Option<String>,
     pub update_available: bool,
+    pub is_updating: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

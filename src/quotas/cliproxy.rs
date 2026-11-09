@@ -634,6 +634,8 @@ pub fn resolve_model_family(model_str: &str) -> Option<&'static str> {
         Some("GPT")
     } else if lower.contains("qwen") || lower.contains("qwq") {
         Some("Qwen")
+    } else if lower.contains("argon") {
+        Some("Argon")
     } else if lower.contains("gemini") || lower.contains("gemma") {
         Some("Gemini")
     } else {
@@ -642,28 +644,30 @@ pub fn resolve_model_family(model_str: &str) -> Option<&'static str> {
 }
 
 /// Evalúa la salud y los porcentajes `5h` / `Wk` de una cuenta según el modelo activo en la sesión.
-/// Si el usuario usa Claude, GPT, DeepSeek, Qwen o Gemini, toma los pools de esa familia;
+/// Si el usuario usa Claude, GPT, DeepSeek, Qwen, Argon o Gemini, toma los pools de esa familia;
 /// si no hay modelo específico o el pool no existe, usa las métricas base de la cuenta (Gemini / default).
 pub fn evaluate_account_for_model(
     acc: &AccountQuota,
     active_model: &str,
 ) -> EffectiveAccountHealth {
     if let Some(family) = resolve_model_family(active_model) {
-        let find_family_pools = |fam_prefix: &str| -> Option<(&QuotaPool, &QuotaPool)> {
-            let fam_lower = fam_prefix.to_lowercase();
-            let p_5h = acc.pools.iter().find(|p| {
-                let l = p.label.to_lowercase();
-                l.starts_with(&fam_lower) && l.contains("5h")
-            });
-            let p_wk = acc.pools.iter().find(|p| {
-                let l = p.label.to_lowercase();
-                l.starts_with(&fam_lower) && l.contains("wk")
-            });
-            match (p_5h, p_wk) {
-                (Some(h), Some(w)) => Some((h, w)),
-                _ => None,
-            }
-        };
+        let find_family_pools =
+            |fam_prefix: &str| -> Option<(Option<&QuotaPool>, Option<&QuotaPool>)> {
+                let fam_lower = fam_prefix.to_lowercase();
+                let p_5h = acc.pools.iter().find(|p| {
+                    let l = p.label.to_lowercase();
+                    l.starts_with(&fam_lower) && l.contains("5h")
+                });
+                let p_wk = acc.pools.iter().find(|p| {
+                    let l = p.label.to_lowercase();
+                    l.starts_with(&fam_lower) && l.contains("wk")
+                });
+                if p_5h.is_some() || p_wk.is_some() {
+                    Some((p_5h, p_wk))
+                } else {
+                    None
+                }
+            };
 
         // Para GPT, si el proveedor agrupa Claude/GPT bajo "Claude *", hacer fallback a Claude
         let matched = find_family_pools(family).or_else(|| {
@@ -675,17 +679,23 @@ pub fn evaluate_account_for_model(
         });
 
         if let Some((pool_5h, pool_wk)) = matched {
-            let rem_5h = pool_5h.percent;
-            let rem_wk = pool_wk.percent;
+            let rem_5h = pool_5h.map(|p| p.percent).unwrap_or(100);
+            let reset_5h = pool_5h
+                .map(|p| p.reset.clone())
+                .unwrap_or_else(|| acc.reset_5h.clone());
+            let rem_wk = pool_wk.map(|p| p.percent).unwrap_or(100);
+            let reset_wk = pool_wk
+                .map(|p| p.reset.clone())
+                .unwrap_or_else(|| acc.reset_wk.clone());
             let worst_used =
                 std::cmp::max(100u8.saturating_sub(rem_5h), 100u8.saturating_sub(rem_wk));
             let is_critical = !acc.has_error && worst_used >= 85;
             let is_warning = !acc.has_error && (70..85).contains(&worst_used);
             return EffectiveAccountHealth {
                 rem_5h,
-                reset_5h: pool_5h.reset.clone(),
+                reset_5h,
                 rem_wk,
-                reset_wk: pool_wk.reset.clone(),
+                reset_wk,
                 is_critical,
                 is_warning,
                 family,
@@ -736,12 +746,14 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         let mut cla_wk_iso: Option<String> = None;
         let mut has_explicit_claude = false;
 
-        // Pools adicionales dinámicos (GPT dedicado, DeepSeek, Qwen, etc.)
+        // Pools adicionales dinámicos (Argon, GPT dedicado, DeepSeek, Qwen, etc.)
         struct ExtraFamilyPool {
             family: &'static str,
+            has_5h: bool,
             rem_5h: u8,
             reset_5h: String,
             iso_5h: Option<String>,
+            has_wk: bool,
             rem_wk: u8,
             reset_wk: String,
             iso_wk: Option<String>,
@@ -767,7 +779,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                     let pct = (frac * 100.0).clamp(0.0, 100.0).round() as u8;
                     let reset_time = b.get("resetTime").and_then(|r| r.as_str());
 
-                    if name.contains("gemini") {
+                    if name.contains("gemini") && !name.contains("argon") {
                         if window == "5h" || window.contains('5') {
                             gem_5h = pct;
                             if let Some(rt) = reset_time {
@@ -797,7 +809,9 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                         }
                     }
 
-                    let extra_family = if name.contains("gpt") && !name.contains("claude") {
+                    let extra_family = if name.contains("argon") {
+                        Some("Argon")
+                    } else if name.contains("gpt") && !name.contains("claude") {
                         Some("GPT")
                     } else if name.contains("deepseek") {
                         Some("DeepSeek")
@@ -815,9 +829,11 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                         } else {
                             extra_families.push(ExtraFamilyPool {
                                 family: fam,
+                                has_5h: false,
                                 rem_5h: 100,
                                 reset_5h: "4h 59m".to_string(),
                                 iso_5h: None,
+                                has_wk: false,
                                 rem_wk: 100,
                                 reset_wk: "6d 23h".to_string(),
                                 iso_wk: None,
@@ -826,6 +842,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                         };
 
                         if window == "5h" || window.contains('5') {
+                            entry.has_5h = true;
                             entry.rem_5h = pct;
                             if let Some(rt) = reset_time {
                                 entry.reset_5h = format_relative_reset(rt);
@@ -837,6 +854,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
                                 cla_5h_iso = entry.iso_5h.clone();
                             }
                         } else if window == "weekly" || window.contains("week") {
+                            entry.has_wk = true;
                             entry.rem_wk = pct;
                             if let Some(rt) = reset_time {
                                 entry.reset_wk = format_relative_reset(rt);
@@ -899,20 +917,24 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         ];
 
         for extra in extra_families {
-            let wk_pace = calculate_quota_pace(extra.rem_wk, true, extra.iso_wk.as_deref());
-            let h5_pace = calculate_quota_pace(extra.rem_5h, false, extra.iso_5h.as_deref());
-            pools.push(QuotaPool {
-                label: format!("{} Wk", extra.family),
-                percent: extra.rem_wk,
-                reset: extra.reset_wk,
-                pace: wk_pace,
-            });
-            pools.push(QuotaPool {
-                label: format!("{} 5h", extra.family),
-                percent: extra.rem_5h,
-                reset: extra.reset_5h,
-                pace: h5_pace,
-            });
+            if extra.has_wk {
+                let wk_pace = calculate_quota_pace(extra.rem_wk, true, extra.iso_wk.as_deref());
+                pools.push(QuotaPool {
+                    label: format!("{} Wk", extra.family),
+                    percent: extra.rem_wk,
+                    reset: extra.reset_wk,
+                    pace: wk_pace,
+                });
+            }
+            if extra.has_5h {
+                let h5_pace = calculate_quota_pace(extra.rem_5h, false, extra.iso_5h.as_deref());
+                pools.push(QuotaPool {
+                    label: format!("{} 5h", extra.family),
+                    percent: extra.rem_5h,
+                    reset: extra.reset_5h,
+                    pace: h5_pace,
+                });
+            }
         }
 
         acc.pools = pools;

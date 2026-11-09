@@ -6,7 +6,7 @@
 [![Target: OpenCode | Gentle Shell](https://img.shields.io/badge/Target-OpenCode_%7C_Gentle_Shell-2E7D32.svg)]()
 [![Telemetry: 0% Idle CPU](https://img.shields.io/badge/Telemetry-0%25_Idle_CPU-00897B.svg)]()
 
-Sidebar de telemetría reactiva en Rust para agentes de código en terminal. Diseñado como panel complementario para **OpenCode**, **Pi / Gentle Shell** y multiplexores de terminal como **Herdr** y **Telar**.
+Sidebar de telemetría reactiva en Rust para agentes de código en terminal. Diseñado como panel complementario para **OpenCode**, **Pi / Gentle Shell** y el multiplexor de terminal **Herdr**.
 
 ---
 

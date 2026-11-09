@@ -1,4 +1,4 @@
-//! Adaptador de telemetría para Pi y Gentle Shell (`gs2`).
+//! Adaptador de telemetría para Pi y Gentle Shell.
 //!
 //! Lee de forma incremental (por byte-offset) los archivos de sesión `.jsonl`
 //! de Pi / Gentle Shell, resuelve límites de contexto desde `cpamc-models-cache.json`
@@ -351,7 +351,7 @@ pub fn read_pi_session_file(
     Some(result)
 }
 
-/// Sincroniza en caliente los `metadata_tokens` emitidos por `telar-agent-state.ts` (vía IPC de Herdr/TelarDev)
+/// Sincroniza en caliente los `metadata_tokens` emitidos vía IPC de Herdr
 /// sobre la sesión activa, permitiendo telemetría en memoria con 0 lecturas de disco cuando el agente los publica.
 pub fn apply_pane_metadata_tokens(
     session: &mut AgentSession,
@@ -551,7 +551,7 @@ pub fn try_read_pi_session(
             .agent_session_id
             .as_deref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("memory://telar-metadata-tokens"));
+            .unwrap_or_else(|| PathBuf::from("memory://herdr-metadata-tokens"));
         return Some((fallback_path, ses));
     }
 

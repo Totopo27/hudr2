@@ -176,7 +176,7 @@ fn rewrite_migrated_agent(
 ) -> String {
     let agent = current_agent.map(str::trim).unwrap_or("");
     if agent.is_empty() {
-        return format!("sdd-orchestrator-{target_prefix}");
+        return format!("orchestrator-{target_prefix}");
     }
     if agent.eq_ignore_ascii_case(from_prefix) {
         return target_prefix.to_string();
@@ -960,7 +960,7 @@ mod tests {
         );
         assert_eq!(
             rewrite_migrated_agent(None, "agy1", "agy2"),
-            "sdd-orchestrator-agy2"
+            "orchestrator-agy2"
         );
     }
 

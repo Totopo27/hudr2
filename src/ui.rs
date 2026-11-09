@@ -1229,6 +1229,7 @@ pub fn render_screen_with_diff_and_theme(
                 ));
             } else {
                 for tool in &snap.ecosystem.tools {
+                    let row_line_idx = lines.len();
                     let left = if tool.is_installed {
                         let ver_str = tool.version.as_deref().unwrap_or("");
                         if snap.check_updates && tool.update_available && let Some(ref up_ver) = tool.upstream_version {
@@ -1247,7 +1248,28 @@ pub fn render_screen_with_diff_and_theme(
                     } else {
                         format!("{text_dim}\u{25cb} {} -{RESET}", tool.name)
                     };
-                    lines.push(draw_row(&left, "", width));
+
+                    let right = if tool.is_updating {
+                        let act_txt = if width >= 44 { "[actualizando...]" } else { "[act...]" };
+                        format!("{amber}{act_txt}{RESET}")
+                    } else if snap.check_updates && tool.update_available {
+                        let btn_txt = if width >= 44 { "[actualizar]" } else { "[↑]" };
+                        format!("{amber}{btn_txt}{RESET}")
+                    } else {
+                        String::new()
+                    };
+
+                    lines.push(draw_row(&left, &right, width));
+
+                    if snap.check_updates && tool.update_available && !tool.is_updating {
+                        bounds.push(CardBounds {
+                            id: "update_tool",
+                            start_line: row_line_idx,
+                            end_line: row_line_idx,
+                            action_type: Some("update_tool"),
+                            action_path: Some(tool.name.clone()),
+                        });
+                    }
                 }
             }
         }
@@ -1306,7 +1328,7 @@ pub fn render_screen_with_diff_and_theme(
         // Divisor para opciones de personalización (Nombre + Tema)
         lines.push(draw_divider(width));
 
-        // 1. Fila de Nombre personalizado del Sidebar (patrón gs3-sidebar, editable)
+        // 1. Fila de Nombre personalizado del Sidebar (editable en línea)
         let name_row_idx = lines.len();
         if snap.is_editing_name {
             let input_display = if snap.name_input_buffer.is_empty() {

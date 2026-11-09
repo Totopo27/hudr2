@@ -50,7 +50,7 @@
 
 ## 4. `Cuota de Modelos` (`id: "pools"`, index `4`)
 - **Header:** `Cuota de Modelos · <active_acc_prefix> *` (scoped to `snap.agent_session.local_prefix`, fallback to first account).
-- **Pool rows:** Renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `GPT`, `DeepSeek`, `Qwen` pools when present).
+- **Pool rows:** Renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `Argon`, `GPT`, `DeepSeek`, `Qwen` pools when present).
 - **Traffic-light colors per pool:** `CORAL` (`<= 15%`), `AMBER` (`<= 50%`), `MINT` (`> 50%`).
 
 ## 5. `Cambios` (`id: "git"`, index `5`)

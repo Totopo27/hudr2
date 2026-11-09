@@ -237,7 +237,7 @@ pub fn detect_cross_session_conflicts(session_file_sets: &[Vec<String>]) -> Vec<
     conflicts.into_iter().collect()
 }
 
-/// Recolecta colisiones de archivos en caliente comparando el directorio actual con otros panes/worktrees activos en Herdr/Telar.
+/// Recolecta colisiones de archivos en caliente comparando el directorio actual con otros panes/worktrees activos en Herdr.
 pub fn collect_cross_session_conflicts(
     primary_dir: &str,
     primary_files: &[GitFileChange],

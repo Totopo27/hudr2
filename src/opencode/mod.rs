@@ -62,7 +62,7 @@ pub fn read_opencode_session(
     let default_limit = resolve_model_context_limit(&default_model);
     let mut session = AgentSession {
         provider_name: "opencode".to_string(),
-        agent: "sdd-orchestrator".to_string(),
+        agent: "orchestrator".to_string(),
         model: default_model,
         model_short: "gemini-3.8-flash-h".to_string(),
         context_limit: default_limit,

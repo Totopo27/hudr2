@@ -539,6 +539,10 @@ impl AppState {
                 };
                 self.set_flash_notice(Some(msg), 2500);
                 return Some(ClickAction::ToggleCheckUpdates(now_enabled));
+            } else if action == "update_tool"
+                && let Some(p) = action_path
+            {
+                return Some(ClickAction::UpdateTool(p));
             }
         }
 
@@ -588,4 +592,5 @@ pub enum ClickAction {
     CycleTheme(String),
     StartEditSidebarName,
     ToggleCheckUpdates(bool),
+    UpdateTool(String),
 }

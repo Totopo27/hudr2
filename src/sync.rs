@@ -83,13 +83,13 @@ fn resolve_sync_model_template(key: &str) -> ModelTemplate {
                 200_000
             } else if lower.contains("deepseek") || lower.contains("gpt-oss") {
                 131_072
-            } else if lower.contains("gemini") {
+            } else if lower.contains("gemini") || lower.contains("argon") {
                 1_048_576
             } else {
                 crate::opencode::resolve_model_context_limit(key)
             };
 
-            let output_limit = if lower.contains("gemini") {
+            let output_limit = if lower.contains("gemini") || lower.contains("argon") {
                 65_536
             } else if lower.contains("claude") || lower.contains("deepseek") {
                 64_000
@@ -103,6 +103,7 @@ fn resolve_sync_model_template(key: &str) -> ModelTemplate {
                 || lower.contains("reasoner")
                 || lower.contains("deepseek-r1")
                 || lower.contains("gemini")
+                || lower.contains("argon")
                 || lower.contains("gpt-oss")
             {
                 Some("reasoning_content")

@@ -25,11 +25,11 @@ const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 const HELP_TEXT: &str = "\
 hudr2 [--once] [--attach] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
 
-Sidebar de telemetría reactiva para Herdr/Telar, OpenCode y Pi / Gentle Shell.
+Sidebar de telemetría reactiva para Herdr, OpenCode y Pi / Gentle Shell.
 
 Opciones:
   --once             Imprime una captura completa en texto plano y termina de inmediato
-  --attach           Abre un split lateral derecho (20%) en Herdr/Telar y lanza hudr2 allí
+  --attach           Abre un split lateral derecho (20%) en Herdr y lanza hudr2 allí
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
@@ -594,6 +594,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             spawn_upstream_check(app_state.clone(), tx.clone());
                                         }
                                     }
+                                    state::ClickAction::UpdateTool(tool_name) => {
+                                        spawn_tool_update(tool_name, app_state.clone(), tx.clone());
+                                    }
                                     state::ClickAction::ToggleGitFileDiff(_)
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
@@ -854,5 +857,73 @@ fn spawn_upstream_check(
             drop(st);
             let _ = wake_tx.send(MainMsg::Redraw);
         }
+    });
+}
+
+fn spawn_tool_update(
+    tool_name: String,
+    app_state: Arc<RwLock<state::AppState>>,
+    wake_tx: mpsc::UnboundedSender<MainMsg>,
+) {
+    tokio::spawn(async move {
+        // 1. Marcar como actualizándose en el snapshot y avisar con flash notice
+        {
+            let mut st = app_state.write().await;
+            if let Some(tool) = st
+                .snapshot
+                .ecosystem
+                .tools
+                .iter_mut()
+                .find(|t| t.name == tool_name)
+            {
+                if tool.is_updating {
+                    return;
+                }
+                tool.is_updating = true;
+            }
+            st.set_flash_notice(
+                Some(format!("+ Actualizando {} en segundo plano...", tool_name)),
+                4000,
+            );
+            st.needs_redraw = true;
+        }
+        let _ = wake_tx.send(MainMsg::Redraw);
+
+        // 2. Ejecutar comando en worker thread sin bloquear Tokio runtime
+        let tool_for_cmd = tool_name.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            hudr2::ecosystem::execute_tool_update(&tool_for_cmd)
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("error en worker thread: {e}")));
+
+        // 3. Invalidar caché del ecosistema y recolectar versiones frescas
+        hudr2::ecosystem::clear_ecosystem_cache();
+        let mut fresh_eco =
+            tokio::task::spawn_blocking(hudr2::ecosystem::collect_ecosystem_telemetry)
+                .await
+                .unwrap_or_default();
+
+        let cfg_path = {
+            let st = app_state.read().await;
+            st.config_path.clone()
+        };
+        hudr2::ecosystem::hydrate_ecosystem_upstream(&mut fresh_eco, cfg_path.as_deref());
+
+        // 4. Actualizar estado y notificar resultado
+        {
+            let mut st = app_state.write().await;
+            st.snapshot.ecosystem = fresh_eco;
+            match res {
+                Ok(msg) => {
+                    st.set_flash_notice(Some(format!("✓ {msg}")), 4000);
+                }
+                Err(err) => {
+                    st.set_flash_notice(Some(format!("✗ Error: {err}")), 5000);
+                }
+            }
+            st.needs_redraw = true;
+        }
+        let _ = wake_tx.send(MainMsg::Redraw);
     });
 }

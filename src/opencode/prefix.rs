@@ -51,6 +51,24 @@ fn extract_pool_number(clean: &str) -> Option<u32> {
     None
 }
 
+fn matches_pool_num(pfx: &str, pool_num: u32) -> bool {
+    let p_low = pfx.to_ascii_lowercase();
+    let base = if let Some((head, _sub)) = p_low.split_once('_') {
+        head
+    } else {
+        &p_low
+    };
+    let base_trimmed = base.trim_end_matches(|c: char| c.is_ascii_digit());
+    let num_part = &base[base_trimmed.len()..];
+    if let Ok(n) = num_part.parse::<u32>() {
+        return n == pool_num;
+    }
+    if pool_num == 1 && num_part.is_empty() {
+        return true;
+    }
+    false
+}
+
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
     if model_str.is_empty() {
         return Vec::new();
@@ -59,6 +77,18 @@ pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String])
     let clean = normalize_model_str(&model_id).to_lowercase();
 
     if let Some(pool_num) = extract_pool_number(&clean) {
+        // 1. Detección dinámica: busca si alguna cuenta conocida coincide numéricamente con el pool
+        let mut dynamic_matches = Vec::new();
+        for pfx in known_prefixes {
+            if matches_pool_num(pfx, pool_num) {
+                dynamic_matches.push(pfx.to_ascii_lowercase());
+            }
+        }
+        if !dynamic_matches.is_empty() {
+            return dynamic_matches;
+        }
+
+        // 2. Fallback histórico a "agy" / "agyN" si no hay coincidencias dinámicas
         let base_prefix = if pool_num == 1 {
             "agy".to_string()
         } else {
@@ -128,7 +158,7 @@ fn extract_model_prefix_candidate(clean_model: &str) -> Option<String> {
 }
 
 pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> Option<String> {
-    // 1. Del agente (ej: sdd-orchestrator-xen1, sdd-apply-gianni, sdd-orchestrator-nina)
+    // 1. Del agente (ej: orchestrator-cuenta1, apply-dev, gentle-orchestrator-acc2)
     if !agent.is_empty() {
         if let Some(candidate) = extract_agent_candidate(agent)
             && (sorted_prefixes.is_empty()
@@ -157,7 +187,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
         }
     }
 
-    // 2. Del modelo (ej: "nina/gemini-3.8-flash-high", "cliproxy/nina/...", "cpamc/cuenta4/...", "gemini-3.8-flash-high (cuenta4)")
+    // 2. Del modelo (ej: "cuenta1/gemini-3.8-flash-high", "cliproxy/acc-dev/...", "cpamc/cuenta4/...", "gemini-3.8-flash-high (cuenta4)")
     if !model.is_empty() {
         let raw_model = if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(model) {
             let nested_model = parsed.get("model").and_then(|m| {
@@ -281,10 +311,17 @@ mod tests {
 
     #[test]
     fn resolve_pool_account_prefixes_without_regex() {
-        let known = vec!["agy1".to_string(), "agy2".to_string(), "agy2_1".to_string()];
+        let known = vec!["agy".to_string(), "agy2".to_string(), "agy2_1".to_string()];
         let p1 = resolve_pool_account_prefixes("pool-01/gemini-1.5", &known);
         assert_eq!(p1, vec!["agy"]);
         let p2 = resolve_pool_account_prefixes("models/pool-2/claude", &known);
         assert_eq!(p2, vec!["agy2", "agy2_1"]);
+
+        // Detección dinámica con prefijos no-agy
+        let non_agy = vec!["cuenta1".to_string(), "cuenta2".to_string(), "cuenta2_1".to_string()];
+        let np1 = resolve_pool_account_prefixes("pool-01/gemini-1.5", &non_agy);
+        assert_eq!(np1, vec!["cuenta1"]);
+        let np2 = resolve_pool_account_prefixes("models/pool-2/claude", &non_agy);
+        assert_eq!(np2, vec!["cuenta2", "cuenta2_1"]);
     }
 }

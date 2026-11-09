@@ -2068,6 +2068,118 @@ mod tests {
     }
 
     #[test]
+    fn test_gemini_argon_separate_pools_and_active_model_sovereignty() {
+        use hudr2::models::AccountQuota;
+        use hudr2::quotas::{apply_quota_data, evaluate_account_for_model};
+        use hudr2::state::AppState;
+
+        let mut acc = AccountQuota {
+            prefix: "agy3".to_string(),
+            auth_file: "auth_agy3.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 59m".to_string(),
+            rem_wk: 100,
+            reset_wk: "4d 23h".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![],
+        };
+
+        // Payload idéntico al de Google CLIProxyAPI con Gemini Models, Claude/GPT y Gemini 4 Argon
+        let payload = serde_json::json!({
+            "description": "Within each group, models share a weekly limit and a 5-hour limit.",
+            "groups": [
+                {
+                    "displayName": "Gemini Models",
+                    "description": "Models within this group: Gemini Flash, Gemini Pro",
+                    "buckets": [
+                        { "bucketId": "gemini-weekly", "window": "weekly", "remainingFraction": 0.4858, "resetTime": "2026-11-14T00:17:08Z" },
+                        { "bucketId": "gemini-5h", "window": "5h", "remainingFraction": 0.9899, "resetTime": "2026-11-09T18:26:03Z" }
+                    ]
+                },
+                {
+                    "displayName": "Claude and GPT models",
+                    "description": "Models within this group: Claude Opus, Claude Sonnet, GPT-OSS",
+                    "buckets": [
+                        { "bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.0003, "resetTime": "2026-11-12T13:37:58Z" },
+                        { "bucketId": "3p-5h", "window": "5h", "remainingFraction": 1.0, "resetTime": "2026-11-09T18:29:20Z" }
+                    ]
+                },
+                {
+                    "displayName": "Gemini 4 Argon",
+                    "description": "For paid Pro plans, Argon quota is separate.",
+                    "buckets": [
+                        { "bucketId": "gemini-argon-wtu-weekly", "window": "weekly", "remainingFraction": 0.0150, "resetTime": "2026-11-14T00:34:17Z" }
+                    ]
+                }
+            ]
+        });
+
+        apply_quota_data(&mut acc, &payload);
+
+        // 1. Verificar que Gemini base NO fue sobreescrito por Argon
+        assert_eq!(acc.rem_5h, 99, "Gemini 5h debe reflejar Gemini Models (99%)");
+        assert_eq!(acc.rem_wk, 49, "Gemini Wk debe reflejar Gemini Models (49%), no el 2% de Argon");
+        assert!(!acc.is_critical, "La cuenta base Gemini no debe ser crítica con 49% restante");
+
+        // 2. Verificar que los pools incluyen Gemini, Claude y Argon por separado
+        assert!(acc.pools.iter().any(|p| p.label == "Gemini Wk" && p.percent == 49));
+        assert!(acc.pools.iter().any(|p| p.label == "Gemini 5h" && p.percent == 99));
+        assert!(acc.pools.iter().any(|p| p.label == "Claude Wk" && p.percent == 0));
+        assert!(acc.pools.iter().any(|p| p.label == "Claude 5h" && p.percent == 100));
+        assert!(acc.pools.iter().any(|p| p.label == "Argon Wk" && p.percent == 2));
+        // Argon no tiene bucket 5h en Pro plan, no debe inventarse
+        assert!(!acc.pools.iter().any(|p| p.label == "Argon 5h"));
+
+        // 3. Con modelo activo Gemini 3.8 Flash (High): la sesión es saludable, NO crítica
+        let eff_gem = evaluate_account_for_model(&acc, "gemini-3.8-flash-high");
+        assert_eq!(eff_gem.family, "Gemini");
+        assert_eq!(eff_gem.rem_5h, 99);
+        assert_eq!(eff_gem.rem_wk, 49);
+        assert!(!eff_gem.is_critical, "Gemini Flash High no debe marcarse crítico por cuota de Argon");
+        assert!(!eff_gem.is_warning);
+
+        // 4. Con modelo activo Argon: la sesión SÍ es crítica (2% restante)
+        let eff_argon = evaluate_account_for_model(&acc, "gemini-4-argon");
+        assert_eq!(eff_argon.family, "Argon");
+        assert_eq!(eff_argon.rem_wk, 2);
+        assert!(eff_argon.is_critical, "Argon al 2% debe marcarse crítico cuando la sesión usa Argon");
+
+        // 5. Renderizado en UI:
+        // A) Cuando la sesión activa usa Gemini 3.8 Flash:
+        let mut state = AppState::new();
+        state.snapshot.accounts.push(acc.clone());
+        state.snapshot.agent_session.model = "gemini-3.8-flash-high".to_string();
+        state.snapshot.agent_session.local_prefix = Some("agy3".to_string());
+        state.snapshot.agent_session.all_active_prefixes.insert("agy3".to_string());
+
+        let render_gemini = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_gem = ui::strip_ansi(&render_gemini.lines.join("\n"));
+        assert!(
+            !screen_gem.contains("[AGOTÁNDOSE]"),
+            "No debe mostrar [AGOTÁNDOSE] cuando se usa Gemini Flash y su cuota es 49%"
+        );
+        assert!(
+            !screen_gem.contains("! 1 crític"),
+            "Integraciones no debe alertar '! 1 crític' cuando el modelo activo es Gemini Flash"
+        );
+        assert!(screen_gem.contains("Gemini Wk"));
+        assert!(screen_gem.contains("Argon Wk"));
+
+        // B) Cuando la sesión activa usa Argon:
+        state.snapshot.agent_session.model = "gemini-4-argon".to_string();
+        let render_argon = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_arg = ui::strip_ansi(&render_argon.lines.join("\n"));
+        assert!(
+            screen_arg.contains("[AGOTÁNDOSE]"),
+            "Debe mostrar [AGOTÁNDOSE] cuando la sesión usa activamente Argon y su pool está al 2%"
+        );
+        assert!(screen_arg.contains("! 1 crític"));
+    }
+
+    #[test]
     fn test_read_git_head_short_zero_subprocess_and_packed_refs() {
         use hudr2::git::{find_git_root_and_dir, read_git_head_short};
 
@@ -2431,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn test_custom_sidebar_name_gs3_style() {
+    fn test_sidebar_name_custom_style() {
         let mut snap = TelemetrySnapshot::default();
         let collapsed = [true; 11];
 
@@ -2440,7 +2552,7 @@ mod tests {
         let header_def = ui::strip_ansi(&out_default.lines[0]);
         assert!(header_def.contains(":: HUDR2 ::"));
 
-        // 2. Nombre personalizado estilo gs3-sidebar
+        // 2. Nombre personalizado del sidebar
         snap.sidebar_name = Some("Gentle Shell".to_string());
         let out_custom = ui::render_screen(&snap, &collapsed, None, 48);
         let header_custom = ui::strip_ansi(&out_custom.lines[0]);
@@ -4160,6 +4272,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v3.7.0".to_string()),
                     update_available: true,
+                    is_updating: false,
                 },
                 ToolVersionInfo {
                     name: "herdr".to_string(),
@@ -4167,6 +4280,7 @@ mod tests {
                     is_installed: true,
                     upstream_version: Some("v0.9.5".to_string()),
                     update_available: false,
+                    is_updating: false,
                 },
             ],
         };
@@ -4235,5 +4349,118 @@ mod tests {
 
         let st4 = AppState::with_config(Some(cfg_path), None);
         assert!(st4.check_updates, "El estado reactivado debe persistir en disco");
+    }
+
+    #[test]
+    fn test_herdr_build_attach_cmd_line_call_operator_on_windows() {
+        use hudr2::herdr::HerdrClient;
+        use std::path::Path;
+
+        let exe = Path::new("C:\\Users\\user\\.cargo\\bin\\hudr2.exe");
+        let cmd = HerdrClient::build_attach_cmd_line(
+            exe,
+            "D:\\projects\\demo",
+            Some("w1:p1"),
+            Some(Path::new("D:\\cfg.json")),
+        );
+
+        #[cfg(target_os = "windows")]
+        assert!(cmd.starts_with("& \"C:\\Users\\user\\.cargo\\bin\\hudr2.exe\""));
+        #[cfg(not(target_os = "windows"))]
+        assert!(cmd.starts_with("\"C:\\Users\\user\\.cargo\\bin\\hudr2.exe\""));
+
+        assert!(cmd.contains("--cwd \"D:\\projects\\demo\""));
+        assert!(cmd.contains("--pane \"w1:p1\""));
+        assert!(cmd.contains("--config \"D:\\cfg.json\""));
+    }
+
+    #[test]
+    fn test_ecosystem_individual_update_buttons_and_click() {
+        use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
+
+        let mut state = AppState::new();
+        state.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "pi".to_string(),
+                    version: Some("v0.87.0".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v1.5.0".to_string()),
+                    update_available: true,
+                    is_updating: false,
+                },
+                ToolVersionInfo {
+                    name: "herdr".to_string(),
+                    version: Some("v0.9.5".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v0.9.5".to_string()),
+                    update_available: false,
+                    is_updating: false,
+                },
+            ],
+        };
+
+        // 1. Renderizado a 48 columnas: muestra el botón [actualizar] para la herramienta obsoleta
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        state.card_bounds = render_out.bounds;
+
+        let rendered_text = render_out.lines.join("\n");
+        assert!(rendered_text.contains("[actualizar]"));
+
+        // Verificar que existe el bound para update_tool en "pi"
+        let pi_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "update_tool" && b.action_path.as_deref() == Some("pi"))
+            .expect("bound para update_tool(pi) debe existir");
+
+        // Simular clic en la fila de pi
+        let action = state.handle_mouse_click(pi_bound.start_line, 0);
+        assert_eq!(
+            action,
+            Some(ClickAction::UpdateTool("pi".to_string())),
+            "Clic en la fila de pi debe emitir UpdateTool(\"pi\")"
+        );
+
+        // herdr no debe tener bound de actualización
+        assert!(
+            !state
+                .card_bounds
+                .iter()
+                .any(|b| b.id == "update_tool" && b.action_path.as_deref() == Some("herdr")),
+            "herdr no debe tener bound de actualización porque está al día"
+        );
+
+        // 2. Estado is_updating: debe mostrar [actualizando...] y no permitir clic
+        state.snapshot.ecosystem.tools[0].is_updating = true;
+        let render_updating = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        state.card_bounds = render_updating.bounds;
+
+        let updating_text = render_updating.lines.join("\n");
+        assert!(updating_text.contains("[actualizando...]"));
+        assert!(
+            !state
+                .card_bounds
+                .iter()
+                .any(|b| b.id == "update_tool" && b.action_path.as_deref() == Some("pi")),
+            "pi no debe tener bound de actualización mientras se está actualizando"
+        );
+
+        // 3. Ancho estrecho (36 columnas): botón adaptativo compacto [↑]
+        state.snapshot.ecosystem.tools[0].is_updating = false;
+        let render_narrow = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 36);
+        let narrow_text = render_narrow.lines.join("\n");
+        assert!(narrow_text.contains("[↑]"));
+
+        // Ninguna línea debe superar el ancho especificado
+        for line in &render_narrow.lines {
+            let visible_w = ui::string_width(line);
+            assert!(
+                visible_w <= 36,
+                "Línea excede ancho 36 (ancho real {}): {}",
+                visible_w,
+                line
+            );
+        }
     }
 }

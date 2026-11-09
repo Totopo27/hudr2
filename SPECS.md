@@ -6,7 +6,7 @@ El objetivo central es sustituir la versión previa en Node.js por un binario au
 - Mantener el consumo de memoria dentro del umbral de 5 a 15 MB de RAM frente a los 120-250 MB que retenía Node con V8.
 - Eliminar pausas por recolección de basura y saltos de latencia al refrescar la pantalla con un bucle reactivo basado en canales `mpsc` y 0% de uso de CPU en reposo.
 - Acceder a los datos de `opencode.db` y `engram.db` abriendo conexiones SQLite directas con bandera de solo lectura (`SQLITE_OPEN_READONLY`), resolución de mtime en `-wal`/`-shm` y sin bloqueos de escritura con los procesos principales.
-- Conectar con Herdr y Telar mediante el canal IPC nativo (`\\.\pipe\herdr-...` en Windows o domain socket en Unix) para consultar el pane y tab activo, usando el CLI únicamente como alternativa de rescate.
+- Conectar con Herdr mediante el canal IPC nativo (`\\.\pipe\herdr-...` en Windows o domain socket en Unix) para consultar el pane y tab activo, usando el CLI únicamente como alternativa de rescate.
 - Manejo atómico y seguro de archivos de caché (`.{pid}.tmp`) para evitar condiciones de carrera o truncados corruptos.
 - Cero dependencias innecesarias (sin crate `regex`, parsing de cadenas ASCII puro con helpers estándar de `str`).
 

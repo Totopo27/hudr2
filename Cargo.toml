@@ -3,7 +3,7 @@ name = "hudr2"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "High-density developer telemetry HUD and status sidebar for Herdr/Telar and OpenCode in native Rust"
+description = "High-density developer telemetry HUD and status sidebar for Herdr and OpenCode in native Rust"
 
 [dependencies]
 # Terminal

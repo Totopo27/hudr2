@@ -34,7 +34,7 @@ Use this skill whenever the user asks to add, remove, reorder, restyle, optimize
    - Inline git diff previews in [`src/git.rs`](../../../src/git.rs) MUST filter paths through `is_sensitive_file` (`.env*`, `*secret*`, `*token*`, `*auth*`, `*.pem`, `*.key`, `id_rsa`, etc.) before reading any content.
    - Collapsed-card persistence in [`src/state.rs`](../../../src/state.rs) writes only to `hudr2.json` via atomic `<file>.tmp` + `rename`. `AppState::new()` must stay in-memory (`config_path: None`) so unit/seam tests never touch user disk state.
 4. **Dynamic Multi-Model Quota Health:**
-   - `hudr2` supports **Gemini, Claude, GPT, DeepSeek, Qwen**, and other model families.
+   - `hudr2` supports **Gemini, Claude, GPT, DeepSeek, Qwen, Argon**, and other model families.
    - In [`src/quotas/cliproxy.rs`](../../../src/quotas/cliproxy.rs), `evaluate_account_for_model` and `sync_account_health_for_model` dynamically evaluate `5h` and `Wk` quotas, traffic-light colors (`CORAL` <= 15%, `AMBER` <= 50%, `MINT` > 50%), and migration alerts in `Integraciones` based on the **active model family in the session** (`snap.agent_session.model`), falling back to `Gemini` (or default account metrics) when no specific family pool matches.
    - `Cuota de Modelos` displays all pools available for the active workspace's account (`local_prefix`).
 5. **Multi-Agent Session Telemetry (OpenCode + Pi / Gentle Shell):**

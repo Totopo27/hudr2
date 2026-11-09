@@ -306,6 +306,33 @@ impl HerdrClient {
             .map(ToString::to_string)
     }
 
+    /// Construye la línea de comando para ejecutar `hudr2` dentro del nuevo pane split.
+    /// En Windows (donde Herdr lanza PowerShell por defecto), antepone el operador `&`
+    /// para que PowerShell invoque correctamente ejecutables entrecomillados con argumentos.
+    pub fn build_attach_cmd_line(
+        exe_path: &Path,
+        cwd: &str,
+        parent_pane: Option<&str>,
+        config_path: Option<&Path>,
+    ) -> String {
+        let exe_str = exe_path.to_string_lossy();
+        #[cfg(target_os = "windows")]
+        let mut cmd_line = format!("& \"{exe_str}\" --cwd \"{cwd}\"");
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd_line = format!("\"{exe_str}\" --cwd \"{cwd}\"");
+
+        if let Some(parent) = parent_pane {
+            let trimmed = parent.trim();
+            if !trimmed.is_empty() {
+                cmd_line.push_str(&format!(" --pane \"{trimmed}\""));
+            }
+        }
+        if let Some(cfg) = config_path {
+            cmd_line.push_str(&format!(" --config \"{}\"", cfg.to_string_lossy()));
+        }
+        cmd_line
+    }
+
     /// Crea un split derecho del 20% en Herdr/Telar y lanza `hudr2` dentro del nuevo panel sin secuestrar el actual.
     pub fn attach_sidebar_split(
         exe_path: &Path,
@@ -335,17 +362,8 @@ impl HerdrClient {
             return false;
         };
 
-        let exe_str = exe_path.to_string_lossy();
-        let mut cmd_line = format!("\"{exe_str}\" --cwd \"{cwd}\"");
-        if let Ok(parent_pane) = std::env::var("HERDR_PANE_ID") {
-            let trimmed = parent_pane.trim();
-            if !trimmed.is_empty() {
-                cmd_line.push_str(&format!(" --pane \"{trimmed}\""));
-            }
-        }
-        if let Some(cfg) = config_path {
-            cmd_line.push_str(&format!(" --config \"{}\"", cfg.to_string_lossy()));
-        }
+        let parent_pane = std::env::var("HERDR_PANE_ID").ok();
+        let cmd_line = Self::build_attach_cmd_line(exe_path, cwd, parent_pane.as_deref(), config_path);
 
         Self::run_herdr_cli(&["pane", "run", &new_pane_id, &cmd_line]).is_some()
     }

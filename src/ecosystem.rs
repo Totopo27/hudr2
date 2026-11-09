@@ -105,13 +105,10 @@ pub fn clean_version_output(tool_name: &str, raw: &str) -> String {
     let known_prefixes = [
         tool_name,
         "engram",
-        "telardev",
-        "telar",
         "herdr",
         "gentle-ai",
         "gentle-shell",
         "pi",
-        "gs3-hud",
         "hudr2",
     ];
     for p in known_prefixes {
@@ -244,10 +241,8 @@ pub fn collect_ecosystem_telemetry() -> EcosystemTelemetry {
     };
     tools.push(engram_info);
 
-    // 6. herdr / telardev
-    let herdr_raw = run_version_cmd("herdr", &["--version"])
-        .or_else(|| run_version_cmd("telardev", &["--version"]))
-        .or_else(|| run_version_cmd("telar", &["--version"]));
+    // 6. herdr
+    let herdr_raw = run_version_cmd("herdr", &["--version"]);
     let herdr_info = match herdr_raw {
         Some(raw) => ToolVersionInfo {
             name: "herdr".to_string(),
@@ -274,8 +269,107 @@ pub fn repo_for_tool(name: &str) -> Option<&'static str> {
         "gentle-shell" => Some("Gentleman-Programming/gentle-shell"),
         "gentle-ai" => Some("Gentleman-Programming/gentle-ai"),
         "engram" => Some("Gentleman-Programming/engram"),
-        "herdr" | "telardev" | "telar" => Some("herdrdev/herdr"),
+        "herdr" => Some("herdrdev/herdr"),
         _ => None,
+    }
+}
+
+/// Define el comando oficial de actualización para cada herramienta del ecosistema.
+pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    match name {
+        "pi" => Some(("npm", vec!["install", "-g", "@earendil-works/pi-coding-agent@latest"])),
+        "gentle-shell" => Some(("npm", vec!["install", "-g", "gentle-pi@latest"])),
+        "gentle-ai" => Some(("gentle-ai", vec!["upgrade", "gentle-ai"])),
+        "engram" => Some(("gentle-ai", vec!["upgrade", "engram"])),
+        "herdr" => Some(("herdr", vec!["update"])),
+        "hudr2" => Some(("cargo", vec!["install", "--git", "https://github.com/Totopo27/hudr2"])),
+        _ => None,
+    }
+}
+
+/// Ejecuta el comando de actualización para una herramienta específica en un subproceso
+/// seguro y no bloqueante con timeout de 120s.
+pub fn execute_tool_update(name: &str) -> Result<String, String> {
+    let (bin, args) = update_cmd_for_tool(name)
+        .ok_or_else(|| format!("no hay comando de actualización definido para '{name}'"))?;
+
+    let mut cmd = if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", bin]);
+        for arg in &args {
+            c.arg(arg);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
+        c
+    } else {
+        let mut c = std::process::Command::new(bin);
+        for arg in &args {
+            c.arg(arg);
+        }
+        c
+    };
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("no se pudo iniciar el proceso '{bin}': {e}"))?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+
+    let out_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(p) = stdout_pipe {
+            let _ = p.take(32 * 1024).read_to_string(&mut s);
+        }
+        s
+    });
+
+    let err_handle = std::thread::spawn(move || {
+        let mut s = String::new();
+        if let Some(p) = stderr_pipe {
+            let _ = p.take(32 * 1024).read_to_string(&mut s);
+        }
+        s
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("tiempo límite de actualización agotado (120s) para '{name}'"));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("error esperando proceso: {e}")),
+        }
+    };
+
+    let stdout_str = out_handle.join().unwrap_or_default();
+    let stderr_str = err_handle.join().unwrap_or_default();
+
+    if status.success() {
+        Ok(format!("{name} actualizado correctamente"))
+    } else {
+        let err_detail = stderr_str
+            .lines()
+            .chain(stdout_str.lines())
+            .map(|l| l.trim())
+            .rfind(|l| !l.is_empty())
+            .unwrap_or("falló el comando de instalación");
+        Err(format!("{name}: {err_detail}"))
     }
 }
 
@@ -338,10 +432,7 @@ pub fn is_upstream_cache_expired(config_path: Option<&std::path::Path>) -> bool 
 
 pub fn apply_upstream_cache_to_ecosystem(eco: &mut EcosystemTelemetry, cache: &UpstreamCache) {
     for tool in &mut eco.tools {
-        let key = match tool.name.as_str() {
-            "telardev" | "telar" => "herdr",
-            other => other,
-        };
+        let key = tool.name.as_str();
         if let Some(Some(up_ver)) = cache.versions.get(key) {
             tool.upstream_version = Some(up_ver.clone());
             if let Some(ref cur_ver) = tool.version {
@@ -523,5 +614,28 @@ mod tests {
 
         assert_eq!(eco.tools[1].upstream_version.as_deref(), Some("v0.9.5"));
         assert!(!eco.tools[1].update_available);
+    }
+
+    #[test]
+    fn test_update_cmd_for_tool() {
+        assert!(update_cmd_for_tool("pi").is_some());
+        assert!(update_cmd_for_tool("gentle-shell").is_some());
+        assert!(update_cmd_for_tool("gentle-ai").is_some());
+        assert!(update_cmd_for_tool("engram").is_some());
+        assert!(update_cmd_for_tool("herdr").is_some());
+        assert!(update_cmd_for_tool("hudr2").is_some());
+        assert!(update_cmd_for_tool("nonexistent").is_none());
+
+        let (bin_pi, args_pi) = update_cmd_for_tool("pi").unwrap();
+        assert_eq!(bin_pi, "npm");
+        assert!(args_pi.contains(&"@earendil-works/pi-coding-agent@latest"));
+
+        let (bin_gs, args_gs) = update_cmd_for_tool("gentle-shell").unwrap();
+        assert_eq!(bin_gs, "npm");
+        assert!(args_gs.contains(&"gentle-pi@latest"));
+
+        let (bin_engram, args_engram) = update_cmd_for_tool("engram").unwrap();
+        assert_eq!(bin_engram, "gentle-ai");
+        assert_eq!(args_engram, vec!["upgrade", "engram"]);
     }
 }
