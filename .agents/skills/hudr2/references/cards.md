@@ -74,7 +74,8 @@
 - **Header:** `Stack · Ecosistema` (or `Stack · Ecosistema ↑<N>` in `AMBER` when updates are available).
 - **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
   - Up-to-date: `● <name> <version>` (`MINT`).
-  - Update available: `● <name> <version> ↑ <upstream>` (`AMBER`).
+  - Update available: `● <name> <version> ↑<upstream>` (`AMBER`) accompanied by an interactive clickable `[actualizar]` button (or adaptive `[↑]` when `width < 44`) mapped to `action_type: Some("update_tool")`.
+  - In progress: Displays `[actualizando...]` (or `[act...]`) while the background worker runs the official upgrade command non-blockingly, with flash notice updates and live TUI repaints.
   - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
 - **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 
