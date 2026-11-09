@@ -1949,6 +1949,13 @@ mod tests {
     #[test]
     fn test_refresh_all_skips_redraw_when_snapshot_unchanged() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fake_db = temp_dir.path().join("fake_opencode.db");
+        std::fs::File::create(&fake_db).unwrap();
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", fake_db.to_str().unwrap());
+        }
+
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1973,6 +1980,10 @@ mod tests {
                 );
             }
         });
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
     }
 
     #[test]
