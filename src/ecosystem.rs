@@ -297,6 +297,48 @@ pub fn assisted_update_notice(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Lee de forma continua fragmentos de bytes de un pipe (stdout o stderr) y emite líneas
+/// separadas tanto por `\n` como por `\r` (usado comúnmente en terminales para spinners y progreso).
+fn stream_pipe_chunks<R: std::io::Read>(
+    pipe: Option<R>,
+    tx: std::sync::mpsc::Sender<(String, bool)>,
+    is_err: bool,
+) -> String {
+    let mut full = String::new();
+    if let Some(mut r) = pipe {
+        let mut buf = [0u8; 512];
+        let mut cur = Vec::new();
+        while let Ok(n) = r.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                if b == b'\n' || b == b'\r' {
+                    if !cur.is_empty() {
+                        let line = String::from_utf8_lossy(&cur).trim().to_string();
+                        if !line.is_empty() {
+                            full.push_str(&line);
+                            full.push('\n');
+                            let _ = tx.send((line, is_err));
+                        }
+                        cur.clear();
+                    }
+                } else {
+                    cur.push(b);
+                }
+            }
+        }
+        if !cur.is_empty() {
+            let line = String::from_utf8_lossy(&cur).trim().to_string();
+            if !line.is_empty() {
+                full.push_str(&line);
+                let _ = tx.send((line, is_err));
+            }
+        }
+    }
+    full
+}
+
 /// Analiza líneas emitidas por instaladores (gentle-ai, npm, herdr, cargo) y aproxima el progreso y etapa.
 pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
     let lower = line.to_ascii_lowercase();
@@ -393,32 +435,12 @@ where
     let stderr_pipe = child.stderr.take();
 
     let out_handle = std::thread::spawn(move || {
-        let mut full = String::new();
-        if let Some(pipe) = stdout_pipe {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(pipe);
-            for line in reader.lines().map_while(Result::ok) {
-                full.push_str(&line);
-                full.push('\n');
-                let _ = tx_out.send((line, false));
-            }
-        }
-        full
+        stream_pipe_chunks(stdout_pipe, tx_out, false)
     });
 
     let tx_err = tx_lines.clone();
     let err_handle = std::thread::spawn(move || {
-        let mut full = String::new();
-        if let Some(pipe) = stderr_pipe {
-            use std::io::BufRead;
-            let reader = std::io::BufReader::new(pipe);
-            for line in reader.lines().map_while(Result::ok) {
-                full.push_str(&line);
-                full.push('\n');
-                let _ = tx_err.send((line, true));
-            }
-        }
-        full
+        stream_pipe_chunks(stderr_pipe, tx_err, true)
     });
     drop(tx_lines);
 
@@ -469,7 +491,24 @@ where
     let stdout_str = out_handle.join().unwrap_or_default();
     let stderr_str = err_handle.join().unwrap_or_default();
 
+    let combined = format!("{stdout_str}\n{stderr_str}");
+    let combined_lower = combined.to_ascii_lowercase();
+
     if status.success() {
+        if combined_lower.contains("manual update required")
+            || combined_lower.contains("skipped")
+            || combined_lower.contains("no files were changed")
+        {
+            let reason = combined
+                .lines()
+                .find(|l| {
+                    let low = l.to_ascii_lowercase();
+                    low.contains("manual update required") || low.contains("skipped")
+                })
+                .map(|l| l.trim())
+                .unwrap_or("requiere actualización manual");
+            return Err(format!("{name}: {reason}"));
+        }
         on_progress(100, "completado", 0, start_time.elapsed().as_secs());
         Ok(format!("{name} actualizado correctamente"))
     } else {

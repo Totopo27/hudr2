@@ -1233,7 +1233,12 @@ pub fn render_screen_with_diff_and_theme(
                     let row_line_idx = lines.len();
                     let left = if tool.is_installed {
                         let ver_str = tool.version.as_deref().unwrap_or("");
-                        if snap.check_updates && tool.update_available && let Some(ref up_ver) = tool.upstream_version {
+                        if tool.is_updating {
+                            format!(
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
+                                tool.name, ver_str
+                            )
+                        } else if snap.check_updates && tool.update_available && let Some(ref up_ver) = tool.upstream_version {
                             format!(
                                 "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET} {amber}\u{2191}{}{RESET}",
                                 tool.name, ver_str, up_ver

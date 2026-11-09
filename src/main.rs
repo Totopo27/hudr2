@@ -128,9 +128,18 @@ impl Drop for TerminalGuard {
 #[derive(Debug)]
 enum MainMsg {
     Terminal(Event),
-    DataChanged { git_touched: bool },
+    DataChanged {
+        git_touched: bool,
+    },
     Redraw,
     QuotaTick,
+    ToolProgress {
+        name: String,
+        percent: u8,
+        stage: String,
+        spinner_idx: usize,
+        elapsed: u64,
+    },
     Quit,
 }
 
@@ -543,6 +552,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 MainMsg::Redraw => {
                     app_state.write().await.needs_redraw = true;
                 }
+                MainMsg::ToolProgress {
+                    name,
+                    percent,
+                    stage,
+                    spinner_idx,
+                    elapsed,
+                } => {
+                    let mut st = app_state.write().await;
+                    if let Some(tool) = st
+                        .snapshot
+                        .ecosystem
+                        .tools
+                        .iter_mut()
+                        .find(|t| t.name == name)
+                    {
+                        tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
+                            percent,
+                            stage,
+                            spinner_idx,
+                            elapsed_secs: elapsed,
+                        });
+                        st.needs_redraw = true;
+                    }
+                }
                 MainMsg::QuotaTick => {
                     quota_tick = true;
                     let is_auto = {
@@ -908,7 +941,6 @@ fn spawn_tool_update(
 
         // 2. Ejecutar comando en worker thread reportando progreso continuo
         let tool_for_cmd = tool_name.clone();
-        let app_state_progress = app_state.clone();
         let wake_tx_progress = wake_tx.clone();
         let tool_name_for_cb = tool_name.clone();
 
@@ -916,24 +948,13 @@ fn spawn_tool_update(
             hudr2::ecosystem::execute_tool_update_with_progress(
                 &tool_for_cmd,
                 move |pct, stage, sp_idx, elapsed| {
-                    let mut st = app_state_progress.blocking_write();
-                    if let Some(tool) = st
-                        .snapshot
-                        .ecosystem
-                        .tools
-                        .iter_mut()
-                        .find(|t| t.name == tool_name_for_cb)
-                    {
-                        tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
-                            percent: pct,
-                            stage: stage.to_string(),
-                            spinner_idx: sp_idx,
-                            elapsed_secs: elapsed,
-                        });
-                        st.needs_redraw = true;
-                    }
-                    drop(st);
-                    let _ = wake_tx_progress.send(MainMsg::Redraw);
+                    let _ = wake_tx_progress.send(MainMsg::ToolProgress {
+                        name: tool_name_for_cb.clone(),
+                        percent: pct,
+                        stage: stage.to_string(),
+                        spinner_idx: sp_idx,
+                        elapsed,
+                    });
                 },
             )
         })
