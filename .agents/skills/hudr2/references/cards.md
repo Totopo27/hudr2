@@ -44,14 +44,17 @@
 ## 3. `Integraciones` (`id: "integraciones"`, index `3`)
 - **Header:** `Integraciones · <N> cuentas` or `! <N> crític` (`CORAL`) when any account is critical for the **active session's model family**.
 - **Account rows:** Evaluates each account via `crate::quotas::evaluate_account_for_model(acc, active_model)`:
+  - Supports OAuth accounts (`auths/*.json`) and API key accounts (`config.yaml` `api-keys`, `opencode.json` `providers.<proxy>.models`, `profiles.json` orchestrator models).
   - Glyph: `>` (`ACCENT_PINK`) if `local_prefix`, `●` (`ACCENT_PRIMARY`) if active in another pane, `●` (`MINT`) if idle, `!` (`AMBER`/`CORAL`) if warning/critical, `?` (`AMBER`) if HTTP error.
-  - Inline `5h` bar + `rem_5h%` + `Wk:rem_wk%` + `en <reset_5h>` (or `[AGOTÁNDOSE]` / `[AVISO 70%]` / `[error_msg]`).
+  - For OAuth accounts: inline `5h` gauge + `rem_5h%` + `Wk:rem_wk%` + `en <reset_5h>` (or `[AGOTÁNDOSE]` / `[AVISO 70%]`).
+  - For API key accounts: inline gauge reflecting remaining balance percentage + `$XX.XX disp` (balance remaining from $50.00 default or configured budget) + `[api-key]` (or `[SALDO AGOTADO]` when `<= 8%` / `[AVISO SALDO]` when `<= 20%`). Bypasses HTTP quota network sweeps.
 - **Alert block:** Shows `flash_notice` (when active) and `! CRÍTICO: <prefix> (activa) [presioná 'x' -> migrar a <target>]` (proxy config sync `s: sync` lives exclusively in the shortcut footer to avoid UX confusion with quota refresh).
 
 ## 4. `Cuota de Modelos` (`id: "pools"`, index `4`)
 - **Header:** `Cuota de Modelos · <active_acc_prefix> *` (scoped to `snap.agent_session.local_prefix`, fallback to first account).
-- **Pool rows:** Renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `Argon`, `GPT`, `DeepSeek`, `Qwen` pools when present).
-- **Traffic-light colors per pool:** `CORAL` (`<= 15%`), `AMBER` (`<= 50%`), `MINT` (`> 50%`).
+- **Pool rows:**
+  - For OAuth accounts: renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `Argon`, `GPT`, `DeepSeek`, `Qwen` pools) with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`).
+  - For API key accounts: renders truthful financial pools (`<Provider> API` with active session cost `$X.XXX` and `<Provider> Saldo` with remaining balance `$XX.XX`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
 
 ## 5. `Cambios` (`id: "git"`, index `5`)
 - **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).

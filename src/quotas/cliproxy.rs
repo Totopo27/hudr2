@@ -6,7 +6,10 @@
 
 use crate::config::{QUOTA_URL, USER_AGENT};
 use crate::models::{AccountQuota, QuotaPool};
-use crate::paths::resolve_auths_dir_for;
+use crate::paths::{
+    cliproxy_config_candidates_for, gentle_ai_profiles_candidates, opencode_config_candidates,
+    resolve_auths_dir_for,
+};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,7 +77,12 @@ fn file_mtime_secs(path_str: &str) -> u64 {
     if path_str.is_empty() {
         return 0;
     }
-    Path::new(path_str)
+    let actual_path = if let Some((p, _)) = path_str.split_once('#') {
+        p
+    } else {
+        path_str
+    };
+    Path::new(actual_path)
         .metadata()
         .and_then(|m| m.modified())
         .ok()
@@ -284,6 +292,9 @@ pub fn record_cached_quota_error_at(
 /// Determina si una cuenta inactiva necesita consulta remota por ser nueva (`unfetched`),
 /// haber cambiado su archivo de credenciales, haber cumplido el TTL de error o haber superado `resetTime`.
 pub fn needs_refresh(acc: &AccountQuota) -> bool {
+    if is_api_key(acc) {
+        return false;
+    }
     if is_unfetched(acc) {
         return true;
     }
@@ -310,6 +321,9 @@ pub fn needs_refresh(acc: &AccountQuota) -> bool {
 
 /// Comprueba si una cuenta candidata fue verificada recientemente (`<= max_age_secs`) y sigue vigente.
 pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
+    if is_api_key(acc) {
+        return !acc.has_error;
+    }
     if is_unfetched(acc) || acc.has_error || needs_refresh(acc) {
         return false;
     }
@@ -326,7 +340,15 @@ pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
 
 /// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
 pub fn is_unfetched(acc: &AccountQuota) -> bool {
-    !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
+    !is_api_key(acc) && !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
+}
+
+/// Comprueba si una cuenta corresponde a un perfil configurado vía API Key
+pub fn is_api_key(acc: &AccountQuota) -> bool {
+    acc.reset_5h == "api-key"
+        || acc.auth_file.contains('#')
+        || acc.auth_file.contains("config.yaml")
+        || acc.auth_file.contains("config.yml")
 }
 
 fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)> {
@@ -343,25 +365,282 @@ fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)
     has_creds.then(|| (file_name.to_string(), val))
 }
 
-/// Comprueba si el directorio de autenticación existe y contiene credenciales JSON válidas.
+/// Parsea cuentas y prefijos configurados bajo `api-keys:` en un archivo YAML de CLIProxy o CPAMC
+pub fn parse_api_key_accounts_from_yaml(content: &str) -> Vec<(String, String)> {
+    let mut accounts = Vec::new();
+    let mut in_api_keys = false;
+    let mut api_keys_indent = 0;
+    let mut current_provider = "Claude".to_string();
+    let mut provider_indent: Option<usize> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+
+        if trimmed == "api-keys:" || trimmed.starts_with("api-keys:") {
+            in_api_keys = true;
+            api_keys_indent = indent;
+            provider_indent = None;
+            continue;
+        }
+
+        if in_api_keys {
+            if indent <= api_keys_indent && !trimmed.starts_with('-') {
+                in_api_keys = false;
+                provider_indent = None;
+                continue;
+            }
+
+            if trimmed.ends_with(':') && !trimmed.starts_with('-') {
+                let is_provider_header = match provider_indent {
+                    None => indent > api_keys_indent,
+                    Some(pi) => indent <= pi && indent > api_keys_indent,
+                };
+
+                if is_provider_header {
+                    let provider_raw = trimmed.trim_end_matches(':').trim();
+                    let lower = provider_raw.to_ascii_lowercase();
+                    if !matches!(
+                        lower.as_str(),
+                        "keys" | "models" | "model" | "params" | "options" | "headers" | "settings"
+                    ) {
+                        provider_indent = Some(indent);
+                        current_provider = match lower.as_str() {
+                            "claude" | "anthropic" => "Claude".to_string(),
+                            "gemini" | "google" => "Gemini".to_string(),
+                            "openai" | "gpt" | "codex" => "GPT".to_string(),
+                            "deepseek" => "DeepSeek".to_string(),
+                            "qwen" => "Qwen".to_string(),
+                            other => {
+                                let mut c = other.chars();
+                                match c.next() {
+                                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                                    None => "API".to_string(),
+                                }
+                            }
+                        };
+                        continue;
+                    }
+                }
+            }
+
+            if let Some((k, v)) = trimmed.split_once(':') {
+                let key = k.trim().trim_start_matches('-').trim();
+                if key.eq_ignore_ascii_case("prefix") {
+                    let clean_pfx = v.trim().trim_matches(['"', '\'', ' ']);
+                    if !clean_pfx.is_empty() && !accounts.iter().any(|(p, _)| p == clean_pfx) {
+                        accounts.push((clean_pfx.to_string(), current_provider.clone()));
+                    }
+                }
+            }
+        }
+    }
+    accounts
+}
+
+/// Extrae prefijos de cuenta y modelo configurados en `opencode.json` (`providers.<proxy>.models` y `agents`)
+pub fn parse_api_key_accounts_from_opencode_json(content: &str) -> Vec<(String, String)> {
+    let mut accounts = Vec::new();
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(content) else {
+        return accounts;
+    };
+
+    // 1. providers.<proxy>.models
+    for section in ["providers", "provider"] {
+        if let Some(prov_map) = val.get(section).and_then(|p| p.as_object()) {
+            for prov_val in prov_map.values() {
+                if let Some(models_map) = prov_val.get("models").and_then(|m| m.as_object()) {
+                    for (model_key, model_entry) in models_map {
+                        if let Some((pfx, model_part)) = model_key.split_once('/') {
+                            if pfx.is_empty()
+                                || matches!(
+                                    pfx.to_ascii_lowercase().as_str(),
+                                    "cliproxy" | "opencode" | "cpamc" | "relay"
+                                )
+                            {
+                                continue;
+                            }
+                            let name_str = model_entry
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("");
+                            let family = resolve_model_family(model_part)
+                                .or_else(|| resolve_model_family(name_str))
+                                .unwrap_or("Claude");
+                            if !accounts.iter().any(|(p, _)| p.eq_ignore_ascii_case(pfx)) {
+                                accounts.push((pfx.to_string(), family.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    accounts
+}
+
+/// Extrae prefijos de cuenta y modelo configurados en `profiles.json` de Gentle AI / Pi
+pub fn parse_api_key_accounts_from_profiles_json(content: &str) -> Vec<(String, String)> {
+    let mut accounts = Vec::new();
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(content) else {
+        return accounts;
+    };
+    if let Some(profiles_map) = val.get("profiles").and_then(|p| p.as_object()) {
+        for profile in profiles_map.values() {
+            if let Some(model_str) = profile
+                .get("orchestrator")
+                .and_then(|o| o.get("model"))
+                .and_then(|m| m.as_str())
+            {
+                let clean = crate::opencode::normalize_model_str(model_str);
+                if let Some((pfx, model_part)) = clean.split_once('/')
+                    && !pfx.is_empty()
+                    && !matches!(
+                        pfx.to_ascii_lowercase().as_str(),
+                        "cliproxy" | "opencode" | "cpamc" | "relay"
+                    )
+                {
+                    let family = resolve_model_family(model_part).unwrap_or("Claude");
+                    if !accounts.iter().any(|(p, _)| p.eq_ignore_ascii_case(pfx)) {
+                        accounts.push((pfx.to_string(), family.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    accounts
+}
+
+/// Comprueba si el directorio de autenticación existe y contiene credenciales JSON válidas
+/// o si existen archivos de configuración con perfiles API Key activos.
 pub fn is_available() -> bool {
     is_available_for(".")
 }
 
-/// Comprueba si el directorio de autenticación para `target_dir` contiene credenciales JSON válidas.
+/// Comprueba si el directorio de autenticación para `target_dir` contiene credenciales JSON válidas
+/// o si existen archivos de configuración con perfiles API Key activos.
 pub fn is_available_for(target_dir: &str) -> bool {
     let auths_dir = resolve_auths_dir_for(target_dir);
-    if !auths_dir.exists() {
-        return false;
+    if auths_dir.exists()
+        && let Ok(entries) = fs::read_dir(&auths_dir)
+        && entries
+            .flatten()
+            .any(|entry| read_valid_credential_json(&entry.path()).is_some())
+    {
+        return true;
     }
 
-    let Ok(entries) = fs::read_dir(auths_dir) else {
-        return false;
-    };
+    // Comprobar candidatos config.yaml con api-keys
+    for cfg in cliproxy_config_candidates_for(target_dir) {
+        if let Ok(c) = fs::read_to_string(&cfg)
+            && !parse_api_key_accounts_from_yaml(&c).is_empty()
+        {
+            return true;
+        }
+    }
 
-    entries
-        .flatten()
-        .any(|entry| read_valid_credential_json(&entry.path()).is_some())
+    // Comprobar modelos en opencode.json si no hay entorno de auths explícito
+    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
+        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
+        for cfg in opencode_config_candidates(target_dir) {
+            if let Ok(c) = fs::read_to_string(&cfg)
+                && !parse_api_key_accounts_from_opencode_json(&c).is_empty()
+            {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
+pub const DEFAULT_API_KEY_BUDGET: f64 = 50.0;
+
+/// Resuelve el límite de presupuesto prepagado en dólares para una cuenta API Key.
+/// Lee `hudr2.json` si existe (`account_budgets.<prefix>` o `api_key_budget`) o usa el valor predeterminado de $50.00.
+pub fn resolve_api_key_budget(prefix: &str) -> f64 {
+    let cfg_path = crate::paths::resolve_hudr2_config_path();
+    if cfg_path.exists()
+        && let Ok(content) = fs::read_to_string(&cfg_path)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(custom) = v
+            .get("account_budgets")
+            .and_then(|ab| ab.get(prefix))
+            .and_then(|b| b.as_f64())
+        {
+            return custom;
+        }
+        if let Some(global) = v.get("api_key_budget").and_then(|b| b.as_f64()) {
+            return global;
+        }
+    }
+    DEFAULT_API_KEY_BUDGET
+}
+
+/// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.
+pub fn calculate_api_key_balance(prefix: &str, session_cost: f64) -> (f64, f64, u8) {
+    let budget = resolve_api_key_budget(prefix);
+    let rem_balance = (budget - session_cost).max(0.0);
+    let rem_pct = if budget > 0.0 {
+        ((rem_balance / budget) * 100.0).clamp(0.0, 100.0) as u8
+    } else {
+        0
+    };
+    (budget, rem_balance, rem_pct)
+}
+
+fn register_or_update_api_key_account(
+    target_list: &mut Vec<AccountQuota>,
+    prefix: &str,
+    provider: &str,
+    auth_file_str: &str,
+) {
+    let budget = resolve_api_key_budget(prefix);
+    let pools = vec![
+        QuotaPool {
+            label: format!("{provider} API"),
+            percent: 100,
+            reset: "api-key".to_string(),
+            pace: "$0.000".to_string(),
+        },
+        QuotaPool {
+            label: format!("{provider} Saldo"),
+            percent: 100,
+            reset: "api-key".to_string(),
+            pace: format!("${:.2}", budget),
+        },
+    ];
+
+    if let Some(existing) = target_list
+        .iter_mut()
+        .find(|a| a.auth_file == auth_file_str || a.prefix.eq_ignore_ascii_case(prefix))
+    {
+        existing.prefix = prefix.to_string();
+        existing.auth_file = auth_file_str.to_string();
+        if existing.pools.is_empty() {
+            existing.pools = pools;
+        }
+    } else {
+        target_list.push(AccountQuota {
+            prefix: prefix.to_string(),
+            auth_file: auth_file_str.to_string(),
+            rem_5h: 100,
+            reset_5h: "api-key".to_string(),
+            rem_wk: 100,
+            reset_wk: "api-key".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools,
+        });
+    }
 }
 
 /// Descubre y registra cuentas desde los archivos de credenciales de CLIProxy.
@@ -371,15 +650,14 @@ pub fn discover_accounts(target_list: &mut Vec<AccountQuota>) {
 
 /// Descubre y registra cuentas considerando el directorio de proyecto activo (`target_dir`).
 pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuota>) {
-    let auths_dir = resolve_auths_dir_for(target_dir);
-    if !auths_dir.exists() {
-        target_list.clear();
-        return;
-    }
-
     let mut seen_files = std::collections::HashSet::new();
+    let mut seen_prefixes = std::collections::HashSet::new();
 
-    if let Ok(entries) = fs::read_dir(auths_dir) {
+    // 1. Descubrimiento de cuentas OAuth (archivos JSON en auths_dir)
+    let auths_dir = resolve_auths_dir_for(target_dir);
+    if auths_dir.exists()
+        && let Ok(entries) = fs::read_dir(&auths_dir)
+    {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some((file_name, val)) = read_valid_credential_json(&path) {
@@ -411,9 +689,11 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
 
                 let path_str = path.to_string_lossy().to_string();
                 seen_files.insert(path_str.clone());
+                seen_prefixes.insert(prefix.to_lowercase());
+
                 if let Some(existing) = target_list
                     .iter_mut()
-                    .find(|a| a.auth_file == path_str || a.prefix == prefix)
+                    .find(|a| a.auth_file == path_str || a.prefix.eq_ignore_ascii_case(&prefix))
                 {
                     existing.prefix = prefix;
                     existing.auth_file = path_str;
@@ -461,7 +741,70 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
         }
     }
 
-    // Purgar cuentas huérfanas cuyos archivos JSON fueron eliminados del directorio auths
+    // 2. Descubrimiento de cuentas / perfiles por API Key (config.yaml de CLIProxy/CPAMC)
+    for cfg_path in cliproxy_config_candidates_for(target_dir) {
+        if let Ok(content) = fs::read_to_string(&cfg_path) {
+            let api_accounts = parse_api_key_accounts_from_yaml(&content);
+            for (prefix, provider) in api_accounts {
+                let p_low = prefix.to_lowercase();
+                let auth_file_str = format!("{}#{}", cfg_path.display(), prefix);
+                seen_files.insert(auth_file_str.clone());
+
+                if seen_prefixes.contains(&p_low) {
+                    continue;
+                }
+                seen_prefixes.insert(p_low);
+
+                register_or_update_api_key_account(target_list, &prefix, &provider, &auth_file_str);
+            }
+        }
+    }
+
+    // 3. Descubrimiento de perfiles de orquestador / modelos en opencode.json
+    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
+        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
+        for cfg_path in opencode_config_candidates(target_dir) {
+            if let Ok(content) = fs::read_to_string(&cfg_path) {
+                let api_accounts = parse_api_key_accounts_from_opencode_json(&content);
+                for (prefix, provider) in api_accounts {
+                    let p_low = prefix.to_lowercase();
+                    let auth_file_str = format!("{}#{}", cfg_path.display(), prefix);
+                    seen_files.insert(auth_file_str.clone());
+
+                    if seen_prefixes.contains(&p_low) {
+                        continue;
+                    }
+                    seen_prefixes.insert(p_low);
+
+                    register_or_update_api_key_account(target_list, &prefix, &provider, &auth_file_str);
+                }
+            }
+        }
+    }
+
+    // 4. Descubrimiento de perfiles de orquestador en profiles.json (Gentle AI / Pi)
+    if !has_explicit_auths {
+        for cfg_path in gentle_ai_profiles_candidates(target_dir) {
+            if let Ok(content) = fs::read_to_string(&cfg_path) {
+                let api_accounts = parse_api_key_accounts_from_profiles_json(&content);
+                for (prefix, provider) in api_accounts {
+                    let p_low = prefix.to_lowercase();
+                    let auth_file_str = format!("{}#{}", cfg_path.display(), prefix);
+                    seen_files.insert(auth_file_str.clone());
+
+                    if seen_prefixes.contains(&p_low) {
+                        continue;
+                    }
+                    seen_prefixes.insert(p_low);
+
+                    register_or_update_api_key_account(target_list, &prefix, &provider, &auth_file_str);
+                }
+            }
+        }
+    }
+
+    // Purgar cuentas huérfanas cuyos archivos JSON o configuraciones fueron eliminados
     target_list.retain(|a| seen_files.contains(&a.auth_file));
     target_list.sort_by(|a, b| a.prefix.cmp(&b.prefix));
 }
@@ -496,6 +839,16 @@ pub async fn fetch_quota_for_account_with_cache(
     acc: &mut AccountQuota,
     cache_path: Option<&Path>,
 ) -> u16 {
+    if is_api_key(acc) {
+        acc.has_error = false;
+        acc.error_msg.clear();
+        acc.rem_5h = 100;
+        acc.rem_wk = 100;
+        acc.reset_5h = "api-key".to_string();
+        acc.reset_wk = "api-key".to_string();
+        return 200;
+    }
+
     if !Path::new(&acc.auth_file).exists() {
         return 0;
     }
@@ -592,6 +945,17 @@ pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_js
     }
 }
 
+/// Comprueba si una cuenta es de Antigravity (Google / agy*).
+/// Para estas cuentas, el dato soberano y principal es `GEMINI MODELS` (Flash/Pro).
+/// Los pools secundarios (Argon) y terciarios (Claude/GPT) son desglosados en `Cuota de Modelos`.
+pub fn is_antigravity_account(acc: &AccountQuota) -> bool {
+    let lower_auth = acc.auth_file.to_lowercase();
+    let lower_pfx = acc.prefix.to_lowercase();
+    lower_auth.contains("antigravity")
+        || lower_auth.contains("google")
+        || lower_pfx.starts_with("agy")
+}
+
 /// Métricas efectivas de salud de una cuenta evaluadas dinámicamente para la familia del modelo activo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EffectiveAccountHealth {
@@ -650,6 +1014,37 @@ pub fn evaluate_account_for_model(
     acc: &AccountQuota,
     active_model: &str,
 ) -> EffectiveAccountHealth {
+    if is_api_key(acc) {
+        let rem = acc.rem_5h;
+        let is_critical = !acc.has_error && rem <= 8;
+        let is_warning = !acc.has_error && (rem > 8 && rem <= 20);
+        let family = resolve_model_family(active_model).unwrap_or("Claude");
+        return EffectiveAccountHealth {
+            rem_5h: rem,
+            reset_5h: "api-key".to_string(),
+            rem_wk: acc.rem_wk,
+            reset_wk: "api-key".to_string(),
+            is_critical,
+            is_warning,
+            family,
+        };
+    }
+
+    // Para cuentas de Antigravity (Google / agy*), la cuota soberana y principal es GEMINI MODELS.
+    // Los datos secundarios (Argon) y terciarios (Claude/GPT) son desglosados en la card
+    // 'Cuota de Modelos' y no deben sobreescribir la salud global en Integraciones.
+    if is_antigravity_account(acc) {
+        return EffectiveAccountHealth {
+            rem_5h: acc.rem_5h,
+            reset_5h: acc.reset_5h.clone(),
+            rem_wk: acc.rem_wk,
+            reset_wk: acc.reset_wk.clone(),
+            is_critical: acc.is_critical,
+            is_warning: acc.is_warning,
+            family: "Gemini",
+        };
+    }
+
     if let Some(family) = resolve_model_family(active_model) {
         let find_family_pools =
             |fam_prefix: &str| -> Option<(Option<&QuotaPool>, Option<&QuotaPool>)> {

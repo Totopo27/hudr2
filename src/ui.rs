@@ -673,6 +673,13 @@ pub fn render_screen_with_diff_and_theme(
                     .all_active_prefixes
                     .contains(&acc.prefix.to_lowercase());
 
+                let is_api = eff.reset_5h == "api-key" || acc.reset_5h == "api-key";
+                let right_normal = if is_api {
+                    format!("{TEXT_DIM}[api-key]{RESET}")
+                } else {
+                    format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h)
+                };
+
                 let (status_glyph, pct_color, right_text) = if acc.has_error {
                     let err_display = if acc.error_msg.to_lowercase().contains("expirado") {
                         if width < 34 {
@@ -696,31 +703,39 @@ pub fn render_screen_with_diff_and_theme(
                     (
                         format!("{BOLD}{CORAL}!{RESET}"),
                         CORAL,
-                        format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}"),
+                        if is_api {
+                            format!("{BOLD}{CORAL}[SALDO AGOTADO]{RESET}")
+                        } else {
+                            format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}")
+                        },
                     )
                 } else if eff.is_warning {
                     (
                         format!("{BOLD}{AMBER}!{RESET}"),
                         AMBER,
-                        format!("{AMBER}[AVISO 70%]{RESET}"),
+                        if is_api {
+                            format!("{AMBER}[AVISO SALDO]{RESET}")
+                        } else {
+                            format!("{AMBER}[AVISO 70%]{RESET}")
+                        },
                     )
                 } else if is_local {
                     (
                         format!("{accent_secondary}>{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
+                        right_normal,
                     )
                 } else if is_any_active {
                     (
                         format!("{accent_primary}\u{25cf}{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
+                        right_normal,
                     )
                 } else {
                     (
                         format!("{MINT}\u{25cf}{RESET}"),
                         MINT,
-                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h),
+                        right_normal,
                     )
                 };
 
@@ -741,25 +756,35 @@ pub fn render_screen_with_diff_and_theme(
                 };
                 let bar_len = if width < 38 { 2 } else { 3 };
                 let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
-                let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
-                let wk_color = if eff.is_critical {
-                    CORAL
-                } else if eff.is_warning {
-                    AMBER
+                let left = if is_api {
+                    let budget = crate::quotas::cliproxy::resolve_api_key_budget(&acc.prefix);
+                    let rem_balance = (budget * (eff.rem_5h as f64) / 100.0).max(0.0);
+                    if width < 38 {
+                        format!("{status_glyph} {pfx_disp} {bar} ${rem_balance:.2}")
+                    } else {
+                        format!("{status_glyph} {pfx_disp} {bar} ${rem_balance:.2} disp")
+                    }
                 } else {
-                    MINT
-                };
-                let wk_str = if width < 36 {
-                    String::new()
-                } else {
-                    let wk_label = if width < 40 { "W:" } else { "Wk:" };
-                    format!(
-                        " {TEXT_DIM}{wk_label}{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
-                        eff.rem_wk
-                    )
+                    let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
+                    let wk_color = if eff.is_critical {
+                        CORAL
+                    } else if eff.is_warning {
+                        AMBER
+                    } else {
+                        MINT
+                    };
+                    let wk_str = if width < 36 {
+                        String::new()
+                    } else {
+                        let wk_label = if width < 40 { "W:" } else { "Wk:" };
+                        format!(
+                            " {TEXT_DIM}{wk_label}{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                            eff.rem_wk
+                        )
+                    };
+                    format!("{status_glyph} {pfx_disp} {bar} {pct_5h}{wk_str}")
                 };
 
-                let left = format!("{status_glyph} {pfx_disp} {bar} {pct_5h}{wk_str}");
                 lines.push(draw_row(&left, &right_text, width));
             }
         }
@@ -843,8 +868,17 @@ pub fn render_screen_with_diff_and_theme(
                 width,
             ));
         } else if let Some(acc) = target_account {
+            let is_acc_api = crate::quotas::is_api_key(acc);
             for p in &acc.pools {
-                let pool_color = if p.percent <= 15 {
+                let pool_color = if is_acc_api {
+                    if p.percent <= 8 {
+                        CORAL
+                    } else if p.percent <= 20 {
+                        AMBER
+                    } else {
+                        MINT
+                    }
+                } else if p.percent <= 15 {
                     CORAL
                 } else if p.percent <= 50 {
                     AMBER
@@ -855,12 +889,18 @@ pub fn render_screen_with_diff_and_theme(
                 let bar_len = if width < 42 { 3 } else { 6 };
                 let bar = render_gauge_inline(p.percent, bar_len, pool_color);
                 let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
-                let pfx_w = if width < 42 { 7 } else { 9 };
+                let pfx_w = if width < 42 { 8 } else { 12 };
                 let p_label = format!("{:<width$}", p.label, width = pfx_w);
                 let left = format!(
                     "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
                 );
-                let right = if width < 40 {
+                let right = if p.reset == "api-key" {
+                    if width < 40 {
+                        format!("{pool_color}{}{RESET}", p.pace)
+                    } else {
+                        format!("{pool_color}{}{RESET} {TEXT_DIM}[api-key]{RESET}", p.pace)
+                    }
+                } else if width < 40 {
                     format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
                 } else {
                     format!(

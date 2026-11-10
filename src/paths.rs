@@ -134,6 +134,114 @@ pub fn resolve_auths_dir_for(target_dir: &str) -> PathBuf {
     home.join(".cliproxy").join("auths")
 }
 
+/// Candidatos para archivos de configuración de CLIProxy o CPAMC (`config.yaml` / `config.yml`)
+pub fn cliproxy_config_candidates_for(target_dir: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+
+    // 1. Variable de entorno explícita (precedencia absoluta para tests y overrides)
+    for env_key in ["CLIPROXY_CONFIG_PATH", "CPAMC_CONFIG_PATH"] {
+        if let Ok(dir) = std::env::var(env_key) {
+            let p = PathBuf::from(dir.trim());
+            if p.exists() {
+                candidates.push(p);
+                return candidates;
+            }
+        }
+    }
+
+    // Si se forzó un entorno de auths explícito (p.ej. CLIPROXY_AUTHS_DIR en tests),
+    // buscar únicamente en su entorno local y no en unidades ni perfiles globales del sistema
+    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
+        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    if has_explicit_auths {
+        let auths_dir = resolve_auths_dir_for(target_dir);
+        if let Some(parent) = auths_dir.parent() {
+            candidates.push(parent.join("config.yaml"));
+            candidates.push(parent.join("config.yml"));
+        }
+        candidates.push(auths_dir.join("config.yaml"));
+        candidates.push(auths_dir.join("config.yml"));
+        candidates.retain(|c| c.exists());
+        return candidates;
+    }
+
+    // 2. Directorio hermano o padre del auths_dir resuelto
+    let auths_dir = resolve_auths_dir_for(target_dir);
+    if let Some(parent) = auths_dir.parent() {
+        candidates.push(parent.join("config.yaml"));
+        candidates.push(parent.join("config.yml"));
+    }
+    candidates.push(auths_dir.join("config.yaml"));
+    candidates.push(auths_dir.join("config.yml"));
+
+    // 3. Proyecto actual
+    candidates.push(Path::new(target_dir).join("config.yaml"));
+    candidates.push(Path::new(target_dir).join("config.yml"));
+    candidates.push(Path::new(target_dir).join(".cliproxy").join("config.yaml"));
+    candidates.push(Path::new(target_dir).join(".cpamc").join("config.yaml"));
+
+    // 4. Directorios de configuración de usuario estándar
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    candidates.push(home.join(".cliproxy").join("config.yaml"));
+    candidates.push(home.join(".cliproxy").join("config.yml"));
+    candidates.push(home.join(".cpamc").join("config.yaml"));
+    candidates.push(home.join(".cpamc").join("config.yml"));
+    candidates.push(home.join("cliproxyapi").join("config.yaml"));
+    candidates.push(home.join("cliproxyapi").join("config.yml"));
+
+    if let Some(config_dir) = dirs::config_dir() {
+        candidates.push(config_dir.join("cliproxy").join("config.yaml"));
+        candidates.push(config_dir.join("cliproxy").join("config.yml"));
+        candidates.push(config_dir.join("cpamc").join("config.yaml"));
+        candidates.push(config_dir.join("cpamc").join("config.yml"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(system_drive) = std::env::var("SystemDrive") {
+            candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/config.yaml")));
+            candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/config.yml")));
+        }
+        push_windows_drive_candidates(
+            &mut candidates,
+            &[
+                "cliproxyapi/config.yaml",
+                "cliproxyapi/config.yml",
+                ".cliproxy/config.yaml",
+                ".cpamc/config.yaml",
+            ],
+        );
+    }
+
+    let mut unique = Vec::new();
+    for c in candidates {
+        if c.exists() && !unique.contains(&c) {
+            unique.push(c);
+        }
+    }
+    unique
+}
+
+/// Candidatos para archivos de perfiles de orquestador de Gentle AI / Pi (`profiles.json`)
+pub fn gentle_ai_profiles_candidates(target_dir: &str) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    candidates.push(Path::new(target_dir).join(".gentle-ai").join("profiles.json"));
+    candidates.push(Path::new(target_dir).join(".pi").join("gentle-ai").join("profiles.json"));
+    candidates.push(home.join(".gentle-ai").join("profiles.json"));
+    candidates.push(home.join(".pi").join("gentle-ai").join("profiles.json"));
+    candidates.push(home.join(".gentle-shell").join("profiles.json"));
+
+    let mut unique = Vec::new();
+    for c in candidates {
+        if c.exists() && !unique.contains(&c) {
+            unique.push(c);
+        }
+    }
+    unique
+}
+
 /// Resuelve la ruta al archivo SQLite de Engram
 pub fn resolve_engram_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("ENGRAM_DB_PATH") {

@@ -1992,8 +1992,8 @@ mod tests {
         use hudr2::quotas::{apply_quota_data, evaluate_account_for_model};
 
         let mut acc = AccountQuota {
-            prefix: "agy".to_string(),
-            auth_file: "auth.json".to_string(),
+            prefix: "proxy_acc".to_string(),
+            auth_file: "proxy_acc.json".to_string(),
             rem_5h: 100,
             reset_5h: "4h 59m".to_string(),
             rem_wk: 100,
@@ -2007,13 +2007,6 @@ mod tests {
 
         let payload = serde_json::json!({
             "groups": [
-                {
-                    "displayName": "Gemini Models",
-                    "buckets": [
-                        { "window": "5h", "remainingFraction": 0.92, "resetTime": "2026-11-06T18:00:00Z" },
-                        { "window": "weekly", "remainingFraction": 0.90, "resetTime": "2026-11-12T12:00:00Z" }
-                    ]
-                },
                 {
                     "displayName": "Claude Models",
                     "buckets": [
@@ -2033,39 +2026,32 @@ mod tests {
 
         apply_quota_data(&mut acc, &payload);
 
-        // 1. Con modelo Gemini: saludable (92% 5h, 90% Wk)
-        let eff_gem = evaluate_account_for_model(&acc, "gemini-3.8-flash-high");
-        assert_eq!(eff_gem.family, "Gemini");
-        assert_eq!(eff_gem.rem_5h, 92);
-        assert!(!eff_gem.is_critical);
-        assert!(!eff_gem.is_warning);
-
-        // 2. Con modelo Claude: crítico (8% 5h <= 15%)
+        // 1. Con modelo Claude: crítico (8% 5h <= 15%)
         let eff_cla = evaluate_account_for_model(&acc, "claude-sonnet-4-5");
         assert_eq!(eff_cla.family, "Claude");
         assert_eq!(eff_cla.rem_5h, 8);
         assert_eq!(eff_cla.rem_wk, 45);
         assert!(eff_cla.is_critical, "Claude al 8% debe marcarse crítico cuando la sesión usa Claude");
 
-        // 3. Con modelo GPT (compartiendo bucket con Claude cuando no hay bucket GPT separado): crítico (8%)
+        // 2. Con modelo GPT (compartiendo bucket con Claude cuando no hay bucket GPT separado): crítico (8%)
         let eff_gpt = evaluate_account_for_model(&acc, "gpt-4o");
         assert_eq!(eff_gpt.family, "GPT");
         assert_eq!(eff_gpt.rem_5h, 8);
         assert!(eff_gpt.is_critical);
 
-        // 4. Con modelo DeepSeek: en warning (25% restante => 75% usado, entre 70% y 85%)
+        // 3. Con modelo DeepSeek: en warning (25% restante => 75% usado, entre 70% y 85%)
         let eff_ds = evaluate_account_for_model(&acc, "deepseek-r1");
         assert_eq!(eff_ds.family, "DeepSeek");
         assert_eq!(eff_ds.rem_5h, 25);
         assert!(!eff_ds.is_critical);
         assert!(eff_ds.is_warning);
 
-        // 5. Renderizado UI en Integraciones cuando la sesión activa usa Claude:
+        // 4. Renderizado UI en Integraciones cuando la sesión activa usa Claude:
         let mut state = AppState::new();
         state.snapshot.accounts.push(acc);
         state.snapshot.agent_session.model = "claude-sonnet-4-5".to_string();
-        state.snapshot.agent_session.local_prefix = Some("agy".to_string());
-        state.snapshot.agent_session.all_active_prefixes.insert("agy".to_string());
+        state.snapshot.agent_session.local_prefix = Some("proxy_acc".to_string());
+        state.snapshot.agent_session.all_active_prefixes.insert("proxy_acc".to_string());
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let screen_clean = ui::strip_ansi(&render_out.lines.join("\n"));
@@ -2152,20 +2138,44 @@ mod tests {
         assert!(!eff_gem.is_critical, "Gemini Flash High no debe marcarse crítico por cuota de Argon");
         assert!(!eff_gem.is_warning);
 
-        // 4. Con modelo activo Argon: la sesión SÍ es crítica (2% restante)
+        // 4. Con cuentas Antigravity (agy3): la cuota principal soberana en Integraciones es GEMINI MODELS.
+        // Incluso si la sesión activa usa Claude Opus o Gemini Argon, Integraciones evalúa la salud
+        // global de la cuenta basándose en GEMINI MODELS (99% 5h, 49% Wk), sin alarmas falsas de [AGOTÁNDOSE].
+        let eff_claude = evaluate_account_for_model(&acc, "claude-opus-5-5");
+        assert_eq!(eff_claude.family, "Gemini");
+        assert_eq!(eff_claude.rem_wk, 49);
+        assert!(!eff_claude.is_critical, "Claude Opus como orquestador no debe marcar crítico agy3 en Integraciones");
+
         let eff_argon = evaluate_account_for_model(&acc, "gemini-4-argon");
-        assert_eq!(eff_argon.family, "Argon");
-        assert_eq!(eff_argon.rem_wk, 2);
-        assert!(eff_argon.is_critical, "Argon al 2% debe marcarse crítico cuando la sesión usa Argon");
+        assert_eq!(eff_argon.family, "Gemini");
+        assert_eq!(eff_argon.rem_wk, 49);
+        assert!(!eff_argon.is_critical, "Argon secundario no debe marcar crítico agy3 en Integraciones");
 
         // 5. Renderizado en UI:
-        // A) Cuando la sesión activa usa Gemini 3.8 Flash:
+        // A) Cuando la sesión activa usa Claude Opus:
         let mut state = AppState::new();
         state.snapshot.accounts.push(acc.clone());
-        state.snapshot.agent_session.model = "gemini-3.8-flash-high".to_string();
+        state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
         state.snapshot.agent_session.local_prefix = Some("agy3".to_string());
         state.snapshot.agent_session.all_active_prefixes.insert("agy3".to_string());
 
+        let render_claude = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_claude = ui::strip_ansi(&render_claude.lines.join("\n"));
+        assert!(
+            !screen_claude.contains("[AGOTÁNDOSE]"),
+            "Integraciones no debe mostrar [AGOTÁNDOSE] para agy3 cuando se orquesta con Claude y Gemini Wk tiene 49%"
+        );
+        assert!(
+            !screen_claude.contains("! 1 crític"),
+            "Integraciones no debe alertar '! 1 crític' para agy3 cuando se orquesta con Claude"
+        );
+        // Los pools de Claude y Argon siguen visibles en la card de desglose de cuenta (Cuota de Modelos):
+        assert!(screen_claude.contains("Gemini Wk"));
+        assert!(screen_claude.contains("Claude Wk"));
+        assert!(screen_claude.contains("Argon Wk"));
+
+        // B) Cuando la sesión activa usa Gemini 3.8 Flash:
+        state.snapshot.agent_session.model = "gemini-3.8-flash-high".to_string();
         let render_gemini = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let screen_gem = ui::strip_ansi(&render_gemini.lines.join("\n"));
         assert!(
@@ -2176,18 +2186,6 @@ mod tests {
             !screen_gem.contains("! 1 crític"),
             "Integraciones no debe alertar '! 1 crític' cuando el modelo activo es Gemini Flash"
         );
-        assert!(screen_gem.contains("Gemini Wk"));
-        assert!(screen_gem.contains("Argon Wk"));
-
-        // B) Cuando la sesión activa usa Argon:
-        state.snapshot.agent_session.model = "gemini-4-argon".to_string();
-        let render_argon = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
-        let screen_arg = ui::strip_ansi(&render_argon.lines.join("\n"));
-        assert!(
-            screen_arg.contains("[AGOTÁNDOSE]"),
-            "Debe mostrar [AGOTÁNDOSE] cuando la sesión usa activamente Argon y su pool está al 2%"
-        );
-        assert!(screen_arg.contains("! 1 crític"));
     }
 
     #[test]
@@ -4563,5 +4561,142 @@ mod tests {
             Some(ClickAction::UpdateTool("hudr2".to_string())),
             "Clic en la fila de hudr2 debe emitir UpdateTool(\"hudr2\")"
         );
+    }
+
+    #[tokio::test]
+    async fn test_claude_api_key_accounts_discovery_and_ui_rendering() {
+        use hudr2::quotas::{
+            discover_accounts_for, evaluate_account_for_model, fetch_quota_for_account_with_cache,
+            is_api_key, is_fresh_within, needs_refresh,
+            parse_api_key_accounts_from_opencode_json, parse_api_key_accounts_from_yaml,
+        };
+
+        // 1. Verificar parseo de config.yaml con cuentas de Claude
+        let yaml_sample = r#"
+api-keys:
+    claude:
+        - name: claude-1
+          prefix: "tavoclaude"
+          models:
+            - name: "claude-sonnet-5-5"
+            - name: "claude-opus-5-5"
+          keys:
+            - api-key: "sk-ant-sample-tavo"
+        - name: claude-3
+          prefix: "gianniclaude"
+          keys:
+            - api-key: "sk-ant-sample-gianni"
+        - name: claude-4
+          prefix: "clasclaude"
+          keys:
+            - api-key: "sk-ant-sample-clas"
+"#;
+        let accounts_yaml = parse_api_key_accounts_from_yaml(yaml_sample);
+        assert_eq!(accounts_yaml.len(), 3);
+        assert_eq!(accounts_yaml[0], ("tavoclaude".to_string(), "Claude".to_string()));
+        assert_eq!(accounts_yaml[1], ("gianniclaude".to_string(), "Claude".to_string()));
+        assert_eq!(accounts_yaml[2], ("clasclaude".to_string(), "Claude".to_string()));
+
+        // 2. Verificar parseo de opencode.json models
+        let opencode_json_sample = r#"{
+            "providers": {
+                "cliproxy": {
+                    "models": {
+                        "tavoclaude/claude-opus-5-5": {
+                            "name": "Claude Opus 5.5 (high) [tavoclaude]"
+                        },
+                        "gianniclaude/claude-opus-5-5": {
+                            "name": "Claude Opus 5.5 (high) [gianniclaude]"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let accounts_opencode = parse_api_key_accounts_from_opencode_json(opencode_json_sample);
+        assert_eq!(accounts_opencode.len(), 2);
+        assert!(accounts_opencode.iter().any(|(p, _)| p == "tavoclaude"));
+        assert!(accounts_opencode.iter().any(|(p, _)| p == "gianniclaude"));
+
+        // 3. Crear entorno temporal con config.yaml y probar discover_accounts_for
+        let _guard = ENV_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("config.yaml");
+        std::fs::write(&cfg_path, yaml_sample).unwrap();
+        unsafe {
+            std::env::set_var("CLIPROXY_CONFIG_PATH", cfg_path.to_str().unwrap());
+            std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
+        }
+
+        let mut discovered = Vec::new();
+        discover_accounts_for(tmp.path().to_str().unwrap(), &mut discovered);
+
+        unsafe {
+            std::env::remove_var("CLIPROXY_CONFIG_PATH");
+            std::env::remove_var("CLIPROXY_AUTHS_DIR");
+        }
+        drop(_guard);
+
+        assert_eq!(discovered.len(), 3);
+        assert!(discovered.iter().any(|a| a.prefix == "tavoclaude"));
+        assert!(discovered.iter().any(|a| a.prefix == "gianniclaude"));
+        assert!(discovered.iter().any(|a| a.prefix == "clasclaude"));
+
+        let tavo = discovered.iter().find(|a| a.prefix == "tavoclaude").unwrap();
+        assert!(is_api_key(tavo));
+        assert_eq!(tavo.reset_5h, "api-key");
+        assert_eq!(tavo.reset_wk, "api-key");
+        assert!(!needs_refresh(tavo));
+        assert!(is_fresh_within(tavo, 600));
+
+        // 4. Probar fetch_quota_for_account_with_cache (no debe fallar ni llamar HTTP)
+        let mut tavo_clone = tavo.clone();
+        let status = fetch_quota_for_account_with_cache(&mut tavo_clone, None).await;
+        assert_eq!(status, 200);
+        assert!(!tavo_clone.has_error);
+        assert_eq!(tavo_clone.rem_5h, 100);
+
+        // 5. Probar evaluación dinámica y semáforo de saldo para cuenta API Key
+        let eff_claude = evaluate_account_for_model(tavo, "claude-opus-5-5");
+        assert_eq!(eff_claude.family, "Claude");
+        assert_eq!(eff_claude.rem_5h, 100);
+        assert_eq!(eff_claude.reset_5h, "api-key");
+        assert!(!eff_claude.is_critical);
+        assert!(!eff_claude.is_warning);
+
+        // Probar umbrales de advertencia (<= 20%) y crítico (<= 8%)
+        let mut tavo_warning = tavo.clone();
+        tavo_warning.rem_5h = 20;
+        let eff_warn = evaluate_account_for_model(&tavo_warning, "claude-opus-5-5");
+        assert!(!eff_warn.is_critical);
+        assert!(eff_warn.is_warning);
+
+        let mut tavo_critical = tavo.clone();
+        tavo_critical.rem_5h = 8;
+        let eff_crit = evaluate_account_for_model(&tavo_critical, "claude-opus-5-5");
+        assert!(eff_crit.is_critical);
+        assert!(!eff_crit.is_warning);
+
+        // 6. Probar renderizado en UI (Integraciones + Cuota de Modelos con balance en $)
+        let mut state = AppState::new();
+        state.snapshot.accounts = discovered.clone();
+        state.snapshot.agent_session.local_prefix = Some("tavoclaude".to_string());
+        state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
+        state.collapsed_cards[3] = false; // Integraciones expandida
+        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let screen = render_out.lines.join("\n");
+        let clean_screen = ui::strip_ansi(&screen);
+
+        assert!(clean_screen.contains("Integraciones · 3 cuentas"));
+        assert!(clean_screen.contains("[api-key]"));
+        assert!(clean_screen.contains("> tavoclaude"));
+        assert!(clean_screen.contains("$50.00 disp"));
+        assert!(!clean_screen.contains("Wk:100%"));
+        assert!(clean_screen.contains("Cuota de Modelos · tavoclaude *"));
+        assert!(clean_screen.contains("Claude API"));
+        assert!(clean_screen.contains("Claude Saldo"));
+        assert!(!clean_screen.contains("Claude Wk"));
+        assert!(!clean_screen.contains("Claude 5h"));
     }
 }

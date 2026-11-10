@@ -121,6 +121,33 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.ecosystem = eco;
         }
 
+        // Sincronizar telemetría de costos y balance para cuentas API Key
+        let session_cost = state.snapshot.agent_session.cost;
+        let local_pfx = state.snapshot.agent_session.local_prefix.clone();
+        for acc in &mut accounts_copy {
+            if quotas::is_api_key(acc) {
+                let is_current = local_pfx
+                    .as_deref()
+                    .map(|lp| lp.eq_ignore_ascii_case(&acc.prefix))
+                    .unwrap_or(false);
+                let cost_to_apply = if is_current { session_cost } else { 0.0 };
+                let (_budget, rem_balance, rem_pct) =
+                    quotas::calculate_api_key_balance(&acc.prefix, cost_to_apply);
+                acc.rem_5h = rem_pct;
+                acc.rem_wk = rem_pct;
+                acc.is_critical = rem_pct <= 8;
+                acc.is_warning = rem_pct > 8 && rem_pct <= 20;
+                for p in &mut acc.pools {
+                    p.percent = rem_pct;
+                    if p.label.ends_with("API") {
+                        p.pace = format!("${:.3}", cost_to_apply);
+                    } else if p.label.ends_with("Saldo") {
+                        p.pace = format!("${:.2}", rem_balance);
+                    }
+                }
+            }
+        }
+
         let active_model = state.snapshot.agent_session.effective_model().to_string();
         for acc in &mut accounts_copy {
             quotas::sync_account_health_for_model(acc, &active_model);
@@ -636,8 +663,13 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
         }) else {
             break;
         };
+        let actual_path = accounts[idx]
+            .auth_file
+            .split_once('#')
+            .map(|(p, _)| p)
+            .unwrap_or(&accounts[idx].auth_file);
         if quotas::is_fresh_within(&accounts[idx], 600)
-            || !std::path::Path::new(&accounts[idx].auth_file).exists()
+            || !std::path::Path::new(actual_path).exists()
         {
             break;
         }
