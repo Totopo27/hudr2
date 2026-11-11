@@ -6350,6 +6350,7 @@ api-keys:
         assert!(text_ajustes.contains("Nombre"), "Ajustes debe mostrar la fila Nombre");
         assert!(text_ajustes.contains("Tema"), "Ajustes debe mostrar la fila Tema");
         assert!(text_ajustes.contains("Updates"), "Ajustes debe mostrar la fila Updates");
+        assert!(text_ajustes.contains("Alertas sonoras"), "Ajustes debe mostrar la fila Alertas sonoras");
     }
 
     #[test]
