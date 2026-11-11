@@ -646,7 +646,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     | state::ClickAction::ToggleCardVisibility(_)
                                     | state::ClickAction::CycleTheme(_)
                                     | state::ClickAction::StartEditSidebarName
-                                    | state::ClickAction::StartEditBalance(_) => {}
+                                    | state::ClickAction::StartEditBalance(_)
+                                    | state::ClickAction::CycleSoundMode(_) => {}
                                 }
                             }
                         }

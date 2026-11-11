@@ -899,10 +899,17 @@ pub fn render_screen_with_diff_and_theme(
                             (glyph, name, right)
                         }
                         crate::models::OrchestratorStatus::Idle => {
-                            let glyph = format!("{AMBER}\u{25cf}{RESET}");
-                            let name = format!("{TEXT_PRIMARY}{}{RESET}", orch.name);
-                            let right = format!("{TEXT_DIM}-- en espera{RESET}");
-                            (glyph, name, right)
+                            if orch.recently_finished {
+                                let glyph = format!("{MINT}\u{25cf}{RESET}");
+                                let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch.name);
+                                let right = format!("{BOLD}{MINT}\u{2713} finalizado{RESET}");
+                                (glyph, name, right)
+                            } else {
+                                let glyph = format!("{AMBER}\u{25cf}{RESET}");
+                                let name = format!("{TEXT_PRIMARY}{}{RESET}", orch.name);
+                                let right = format!("{TEXT_DIM}-- en espera{RESET}");
+                                (glyph, name, right)
+                            }
                         }
                         crate::models::OrchestratorStatus::Offline => {
                             let glyph = format!("{TEXT_DIM}\u{25cb}{RESET}");
@@ -2005,6 +2012,21 @@ pub fn render_screen_with_diff_and_theme(
             start_line: updates_row_idx,
             end_line: updates_row_idx,
             action_type: Some("toggle_check_updates"),
+            action_path: None,
+        });
+
+        // 4. Fila interactiva para configurar alertas sonoras de orquestación
+        let sound_left = format!("{label_color}Avisos{RESET}  {text_primary}Alertas sonoras{RESET}");
+        let (sound_badge, is_active) = snap.sound_mode.display_badge();
+        let sound_color = if is_active { mint } else { text_dim };
+        let sound_right = format!("{sound_color}{sound_badge}{RESET}");
+        let sound_row_idx = lines.len();
+        lines.push(draw_row(&sound_left, &sound_right, width));
+        bounds.push(CardBounds {
+            id: "cycle_sound_mode",
+            start_line: sound_row_idx,
+            end_line: sound_row_idx,
+            action_type: Some("cycle_sound_mode"),
             action_path: None,
         });
     }

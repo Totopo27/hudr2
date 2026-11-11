@@ -11,6 +11,7 @@ pub mod orchestrators;
 pub mod paths;
 pub mod pi;
 pub mod quotas;
+pub mod sound;
 pub mod state;
 pub mod sync;
 pub mod theme;

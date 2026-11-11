@@ -97,6 +97,7 @@ pub fn discover_orchestrators(
                         is_warning,
                         rem_pct,
                         subagents,
+                        recently_finished: false,
                     });
                 }
             }
@@ -170,6 +171,7 @@ pub fn discover_orchestrators(
                     is_warning,
                     rem_pct,
                     subagents,
+                    recently_finished: false,
                 });
             }
         }

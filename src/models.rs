@@ -220,6 +220,8 @@ pub struct OrchestratorProfile {
     pub rem_pct: u8,
     #[serde(default)]
     pub subagents: Vec<SubAgentProfile>,
+    #[serde(default)]
+    pub recently_finished: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -243,4 +245,5 @@ pub struct TelemetrySnapshot {
     pub is_editing_balance: bool,
     pub editing_balance_prefix: Option<String>,
     pub balance_input_buffer: String,
+    pub sound_mode: crate::sound::SoundMode,
 }

@@ -172,6 +172,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             &state.snapshot.agent_session,
             &panes,
         );
+        state.update_orchestrator_alerts();
 
         if state.snapshot != prev_snapshot {
             state.needs_redraw = true;

@@ -30,10 +30,11 @@ pub struct ConfigData {
     pub theme: Option<String>,
     pub sidebar_name: Option<String>,
     pub check_updates: bool,
+    pub sound_mode: crate::sound::SoundMode,
     pub account_budgets: std::collections::HashMap<String, f64>,
 }
 
-/// Carga la configuración (tarjetas colapsadas y ocultas, tema y nombre de sidebar) desde un archivo JSON.
+/// Carga la configuración (tarjetas colapsadas y ocultas, tema, nombre, updates y modo de sonido) desde un archivo JSON.
 pub fn load_config(path: &Path) -> ConfigData {
     let Ok(bytes) = std::fs::read(path) else {
         return ConfigData {
@@ -42,6 +43,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             theme: None,
             sidebar_name: None,
             check_updates: true,
+            sound_mode: crate::sound::SoundMode::Bell,
             account_budgets: std::collections::HashMap::new(),
         };
     };
@@ -52,6 +54,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             theme: None,
             sidebar_name: None,
             check_updates: true,
+            sound_mode: crate::sound::SoundMode::Bell,
             account_budgets: std::collections::HashMap::new(),
         };
     };
@@ -96,6 +99,12 @@ pub fn load_config(path: &Path) -> ConfigData {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    let sound_mode = v
+        .get("sound_mode")
+        .and_then(Value::as_str)
+        .map(crate::sound::SoundMode::from_str_loose)
+        .unwrap_or(crate::sound::SoundMode::Bell);
+
     let mut account_budgets = std::collections::HashMap::new();
     if let Some(map) = v.get("account_budgets").and_then(Value::as_object) {
         for (k, val) in map {
@@ -111,11 +120,12 @@ pub fn load_config(path: &Path) -> ConfigData {
         theme,
         sidebar_name,
         check_updates,
+        sound_mode,
         account_budgets,
     }
 }
 
-/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre y updates.
+/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre, updates y modo de sonido.
 pub fn save_config(
     path: &Path,
     collapsed: &[bool; 12],
@@ -123,6 +133,7 @@ pub fn save_config(
     theme: Option<&str>,
     sidebar_name: Option<&str>,
     check_updates: bool,
+    sound_mode: crate::sound::SoundMode,
 ) -> Result<(), String> {
     let collapsed_names: Vec<&str> = CARD_KEYS
         .iter()
@@ -146,6 +157,7 @@ pub fn save_config(
     payload["collapsed"] = json!(collapsed_names);
     payload["hidden"] = json!(hidden_names);
     payload["check_updates"] = json!(check_updates);
+    payload["sound_mode"] = json!(sound_mode.as_str());
     if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
         payload["theme"] = json!(t);
     }
@@ -195,6 +207,14 @@ pub fn save_account_budget(
     crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrchestratorTrackState {
+    pub last_status: crate::models::OrchestratorStatus,
+    pub was_critical: bool,
+    pub working_since: Option<std::time::Instant>,
+    pub finished_at: Option<std::time::Instant>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct QuickPeekState {
     pub title: String,
@@ -221,11 +241,13 @@ pub struct AppState {
     pub is_editing_sidebar_name: bool,
     pub name_input_buffer: String,
     pub check_updates: bool,
+    pub sound_mode: crate::sound::SoundMode,
     pub is_editing_balance: bool,
     pub editing_balance_prefix: Option<String>,
     pub balance_input_buffer: String,
     pub last_click_instant: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
+    pub orch_trackers: std::collections::HashMap<String, OrchestratorTrackState>,
 }
 
 impl AppState {
@@ -238,6 +260,7 @@ impl AppState {
             snapshot: TelemetrySnapshot {
                 project_dir: cwd,
                 check_updates: true,
+                sound_mode: crate::sound::SoundMode::Bell,
                 ..Default::default()
             },
             // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem, personalizar]
@@ -258,11 +281,13 @@ impl AppState {
             is_editing_sidebar_name: false,
             name_input_buffer: String::new(),
             check_updates: true,
+            sound_mode: crate::sound::SoundMode::Bell,
             is_editing_balance: false,
             editing_balance_prefix: None,
             balance_input_buffer: String::new(),
             last_click_instant: None,
             last_click_row: None,
+            orch_trackers: std::collections::HashMap::new(),
         }
     }
 
@@ -278,9 +303,11 @@ impl AppState {
             s.theme = cfg.theme.clone();
             s.sidebar_name = cfg.sidebar_name.clone();
             s.check_updates = cfg.check_updates;
+            s.sound_mode = cfg.sound_mode;
             s.snapshot.theme_name = cfg.theme;
             s.snapshot.sidebar_name = cfg.sidebar_name;
             s.snapshot.check_updates = cfg.check_updates;
+            s.snapshot.sound_mode = cfg.sound_mode;
         }
         s.config_path = config_path;
         s
@@ -295,7 +322,74 @@ impl AppState {
                 self.theme.as_deref(),
                 self.sidebar_name.as_deref(),
                 self.check_updates,
+                self.sound_mode,
             );
+        }
+    }
+
+    pub fn cycle_sound_mode(&mut self) -> crate::sound::SoundMode {
+        self.sound_mode = self.sound_mode.next();
+        self.snapshot.sound_mode = self.sound_mode;
+        self.needs_redraw = true;
+        self.persist_config_if_configured();
+        self.sound_mode
+    }
+
+    pub fn update_orchestrator_alerts(&mut self) {
+        let now = std::time::Instant::now();
+        let sound_mode = self.sound_mode;
+
+        for orch in &mut self.snapshot.orchestrators {
+            let tracker = self
+                .orch_trackers
+                .entry(orch.name.clone())
+                .or_insert_with(|| OrchestratorTrackState {
+                    last_status: orch.status,
+                    was_critical: orch.is_critical,
+                    working_since: if orch.status == crate::models::OrchestratorStatus::Working {
+                        Some(now)
+                    } else {
+                        None
+                    },
+                    finished_at: None,
+                });
+
+            // 1. Transición Working -> Idle (Fin de tarea global de la flota)
+            if tracker.last_status == crate::models::OrchestratorStatus::Working
+                && orch.status == crate::models::OrchestratorStatus::Idle
+            {
+                tracker.finished_at = Some(now);
+                let duration = tracker
+                    .working_since
+                    .map(|s| now.saturating_duration_since(s))
+                    .unwrap_or_default();
+                // Evita sonar en microtareas insignificantes (< 2 segundos)
+                if duration >= std::time::Duration::from_secs(2) {
+                    crate::sound::emit_alert(sound_mode, crate::sound::AlertKind::FleetCompleted);
+                }
+            }
+
+            // 2. Transición a Working
+            if orch.status == crate::models::OrchestratorStatus::Working {
+                if tracker.last_status != crate::models::OrchestratorStatus::Working {
+                    tracker.working_since = Some(now);
+                }
+                // Alerta sonora preventiva de cuota crítica durante ejecución activa
+                if orch.is_critical && !tracker.was_critical {
+                    crate::sound::emit_alert(sound_mode, crate::sound::AlertKind::QuotaCritical);
+                }
+            }
+
+            // 3. Refuerzo visual temporal: marcar recently_finished si terminó hace < 4 segundos
+            if orch.status == crate::models::OrchestratorStatus::Idle
+                && let Some(f_time) = tracker.finished_at
+                && now.saturating_duration_since(f_time) < std::time::Duration::from_secs(4)
+            {
+                orch.recently_finished = true;
+            }
+
+            tracker.last_status = orch.status;
+            tracker.was_critical = orch.is_critical;
         }
     }
 
@@ -678,6 +772,11 @@ impl AppState {
                 && let Some(url) = action_path
             {
                 return Some(ClickAction::OpenBillingUrl(url));
+            } else if action == "cycle_sound_mode" {
+                let next_sm = self.cycle_sound_mode();
+                let (badge, _) = next_sm.display_badge();
+                self.set_flash_notice(Some(format!("+ Alertas sonoras: {badge}")), 2500);
+                return Some(ClickAction::CycleSoundMode(next_sm));
             }
         }
 
@@ -730,4 +829,5 @@ pub enum ClickAction {
     UpdateTool(String),
     StartEditBalance(String),
     OpenBillingUrl(String),
+    CycleSoundMode(crate::sound::SoundMode),
 }

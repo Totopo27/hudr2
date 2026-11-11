@@ -55,9 +55,13 @@
 - **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `CORAL` when an orchestrator's sovereign model has exhausted quota).
 - **Discovery:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json`) profiles/orchestrator agents. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
 - **Status Lifecycle:**
-  - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session or Herdr pane.
+  - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session or Herdr pane (including any of its active subagents).
   - `Idle` (`-- en espera`, `AMBER` `●`): Orchestrator paused, session active but idle with completed turns or active pane.
+  - `Recently Finished` (`✓ finalizado`, `MINT` `●`): Temporary visual confirmation shown for ~4 seconds when transitioning from `Working` to `Idle`, accompanied by an audible completion alert (`FleetCompleted`) when configured.
   - `Offline` (`○ apagado`, `TEXT_DIM` `○`): Orchestrator configured but dormant / unused.
+- **Sound Alerts Integration:**
+  - `FleetCompleted`: Emits completion chime/bell when the orchestrator and all its subagents finish their task (`Working` -> `Idle`) for tasks >= 2 seconds.
+  - `QuotaCritical`: Emits a distinctive warning tone when the active working orchestrator enters critical quota (>85% or HTTP 429), alerting the user to press `x` for hot migration before execution halts.
 - **Sovereign Quota Governance:** Migration urgency is governed **strictly** by the sovereign orchestrator model (`orchestrator.model` in `profiles.json`), ignoring secondary subagent models.
 - **Interactive Actions & Migration:**
   - Migration banner: When the active working orchestrator has depleted its sovereign quota (`is_critical`), renders responsive migration alert `! CRÍTICO: <name> (activo) [presioná 'x' -> migrar a <target>]` (adapting dynamically to `[x -> migrar]` or `[x: migrar]` on narrower widths).
@@ -123,14 +127,5 @@
     - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
     - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
     - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`), controlling online version checks.
-- **Header:** `Personalizar` (collapsed by default).
-- **Rows:**
-  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
-  - `[x] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`). Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
-  - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
-  - Redundant fixed row was eliminated to prevent vertical waste (`personalizar` can never hide itself).
-  - **Divider & Settings section:**
-    - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
-    - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
-    - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`), controlling online version checks.
-  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "...", "check_updates": true}`).
+    - `Avisos  Alertas sonoras` with clickable `[x] campana` / `[x] nativo` / `[ ] silencio` (`action_type: Some("cycle_sound_mode")`), controlling audio feedback for orchestrator fleet completion and critical quota warnings.
+  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "...", "check_updates": true, "sound_mode": "bell"}`).

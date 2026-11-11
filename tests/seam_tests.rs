@@ -4365,6 +4365,100 @@ mod tests {
     }
 
     #[test]
+    fn test_sound_mode_config_persistence_and_mouse_cycle() {
+        use hudr2::sound::SoundMode;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        let mut st = AppState::with_config(Some(cfg_path.clone()), None);
+        assert_eq!(st.sound_mode, SoundMode::Bell); // default Bell
+
+        // Expandir tarjeta personalizar (idx 11) y renderizar
+        st.toggle_card(11);
+        let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
+        st.card_bounds = render_out.bounds;
+
+        let click_line = st
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "cycle_sound_mode")
+            .map(|b| b.start_line)
+            .expect("bound para cycle_sound_mode debe existir en Personalizar");
+
+        // Simular clic en la fila de cycle_sound_mode: Bell -> Native
+        let action = st.handle_mouse_click(click_line, 0);
+        assert!(matches!(action, Some(ClickAction::CycleSoundMode(SoundMode::Native))));
+        assert_eq!(st.sound_mode, SoundMode::Native);
+
+        // Recargar en un nuevo AppState desde disco para verificar persistencia atómica
+        let st2 = AppState::with_config(Some(cfg_path.clone()), None);
+        assert_eq!(st2.sound_mode, SoundMode::Native, "El modo Native debe persistir en hudr2.json");
+
+        // Simular segundo clic: Native -> Off
+        let action2 = st.handle_mouse_click(click_line, 0);
+        assert!(matches!(action2, Some(ClickAction::CycleSoundMode(SoundMode::Off))));
+        assert_eq!(st.sound_mode, SoundMode::Off);
+
+        let st3 = AppState::with_config(Some(cfg_path.clone()), None);
+        assert_eq!(st3.sound_mode, SoundMode::Off, "El modo Off debe persistir en hudr2.json");
+
+        // Simular tercer clic: Off -> Bell
+        let action3 = st.handle_mouse_click(click_line, 0);
+        assert!(matches!(action3, Some(ClickAction::CycleSoundMode(SoundMode::Bell))));
+        assert_eq!(st.sound_mode, SoundMode::Bell);
+
+        let st4 = AppState::with_config(Some(cfg_path), None);
+        assert_eq!(st4.sound_mode, SoundMode::Bell, "El modo Bell debe persistir en hudr2.json");
+    }
+
+    #[test]
+    fn test_orchestrator_recently_finished_visual_transition() {
+        use hudr2::models::{OrchestratorProfile, OrchestratorStatus};
+
+        let mut st = AppState::new();
+        let orch_name = "test-orch".to_string();
+
+        // 1. Orquestador trabajando
+        st.snapshot.orchestrators = vec![OrchestratorProfile {
+            name: orch_name.clone(),
+            model: "claude-3-7-sonnet".to_string(),
+            model_short: "claude-3-7".to_string(),
+            prefix: Some("claude".to_string()),
+            thinking: None,
+            is_default: true,
+            status: OrchestratorStatus::Working,
+            is_critical: false,
+            is_warning: false,
+            rem_pct: 90,
+            subagents: Vec::new(),
+            recently_finished: false,
+        }];
+        st.update_orchestrator_alerts();
+
+        // Verificar que el estado inicial en Working fue registrado
+        assert_eq!(
+            st.orch_trackers.get(&orch_name).unwrap().last_status,
+            OrchestratorStatus::Working
+        );
+
+        // 2. Transición a Idle
+        st.snapshot.orchestrators[0].status = OrchestratorStatus::Idle;
+        st.update_orchestrator_alerts();
+
+        // Verificar que recently_finished se encendió
+        assert!(st.snapshot.orchestrators[0].recently_finished);
+
+        // Renderizar y comprobar que el glifo '✓ finalizado' está presente en el render
+        let out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
+        let screen_text = out.lines.join("\n");
+        assert!(
+            screen_text.contains("finalizado"),
+            "La pantalla debe contener '✓ finalizado' durante la ventana de confirmación visual"
+        );
+    }
+
+    #[test]
     fn test_herdr_build_attach_cmd_line_call_operator_on_windows() {
         use hudr2::herdr::HerdrClient;
         use std::path::Path;

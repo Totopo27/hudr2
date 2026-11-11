@@ -76,6 +76,7 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 - **Visibilidad:** Cada fila muestra su estado `[x] visible` o `[ ] oculta` con casillas universales ASCII sin fuentes rotas. Un clic alterna su visibilidad para reducir el HUD a ~28 líneas.
 - **Nombre:** Permite editar interactivamente el encabezado del sidebar (`:: <Nombre> ::`) haciendo clic en `[editar >]`, doble clic en la tarjeta o pulsando `n` (con `Enter` para guardar, `Esc` para cancelar y persistencia atómica en `hudr2.json`). Escribir vacío o `HUDR2` restablece el nombre por defecto.
 - **Tema:** Muestra el tema activo y permite cambiarlo con un clic en `[cambiar >]` o pulsando `m`.
+- **Avisos sonoros:** Configura alertas sonoras para orquestadores (`[x] campana`, `[x] nativo` o `[ ] silencio`), emitiendo tono armónico cuando la flota concluye una tarea (`✓ finalizado`) y advertencia si el orquestador activo entra en cuota crítica (`x: migrar`).
 - Las preferencias se guardan de forma atómica en `hudr2.json`.
 
 ---
