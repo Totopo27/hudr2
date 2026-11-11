@@ -49,11 +49,38 @@ pub fn discover_orchestrators(
                     let (is_critical, is_warning, rem_pct) =
                         evaluate_orchestrator_quota_health(accounts, prefix.as_deref(), &model_short, &clean);
 
+                    let mut subagents = Vec::new();
+                    let mut seen_roles = std::collections::HashSet::new();
+                    if let Some(prof_map) = prof.as_object() {
+                        if let Some(agents_map) = prof_map.get("agents").and_then(|a| a.as_object()) {
+                            for (role, a_val) in agents_map {
+                                let role_low = role.to_lowercase();
+                                if seen_roles.insert(role_low)
+                                    && let Some(sub) = parse_subagent_entry(role, a_val, &known_prefixes)
+                                {
+                                    subagents.push(sub);
+                                }
+                            }
+                        }
+                        for (role, a_val) in prof_map {
+                            let role_low = role.to_lowercase();
+                            if role != "orchestrator"
+                                && role != "agents"
+                                && a_val.is_object()
+                                && seen_roles.insert(role_low)
+                                && let Some(sub) = parse_subagent_entry(role, a_val, &known_prefixes)
+                            {
+                                subagents.push(sub);
+                            }
+                        }
+                    }
+
                     let status = resolve_orchestrator_status(
                         name,
                         prefix.as_deref(),
                         &model_short,
                         &clean,
+                        &subagents,
                         active_session,
                         panes,
                     );
@@ -69,6 +96,7 @@ pub fn discover_orchestrators(
                         is_critical,
                         is_warning,
                         rem_pct,
+                        subagents,
                     });
                 }
             }
@@ -107,11 +135,25 @@ pub fn discover_orchestrators(
                 let (is_critical, is_warning, rem_pct) =
                     evaluate_orchestrator_quota_health(accounts, prefix.as_deref(), &model_short, &clean);
 
+                let mut subagents = Vec::new();
+                let mut seen_roles = std::collections::HashSet::new();
+                for (sub_name, sub_val) in agent_map {
+                    let sub_low = sub_name.to_lowercase();
+                    if sub_name != name
+                        && sub_val.is_object()
+                        && seen_roles.insert(sub_low)
+                        && let Some(sub) = parse_subagent_entry(sub_name, sub_val, &known_prefixes)
+                    {
+                        subagents.push(sub);
+                    }
+                }
+
                 let status = resolve_orchestrator_status(
                     name,
                     prefix.as_deref(),
                     &model_short,
                     &clean,
+                    &subagents,
                     active_session,
                     panes,
                 );
@@ -127,6 +169,7 @@ pub fn discover_orchestrators(
                     is_critical,
                     is_warning,
                     rem_pct,
+                    subagents,
                 });
             }
         }
@@ -147,6 +190,28 @@ pub fn discover_orchestrators(
     });
 
     profiles
+}
+
+fn parse_subagent_entry(
+    role: &str,
+    val: &serde_json::Value,
+    known_prefixes: &[String],
+) -> Option<crate::models::SubAgentProfile> {
+    let model_raw = val.get("model").and_then(|m| m.as_str())?;
+    let thinking = val
+        .get("thinking")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string());
+    let clean = crate::opencode::normalize_model_str(model_raw);
+    let (prefix, model_short) = resolve_prefix_and_short_model(role, &clean, known_prefixes);
+
+    Some(crate::models::SubAgentProfile {
+        role: role.to_string(),
+        model: clean,
+        model_short,
+        prefix,
+        thinking,
+    })
 }
 
 fn resolve_prefix_and_short_model(
@@ -201,22 +266,45 @@ fn evaluate_orchestrator_quota_health(
     }
 }
 
-/// Determina si un perfil de orquestador está Working, Idle o Offline.
+/// Determina si un perfil de orquestador está Working, Idle o Offline,
+/// evaluando tanto la identidad del orquestador como la pertenencia estricta de subagentes activos.
 fn resolve_orchestrator_status(
     profile_name: &str,
     prefix_opt: Option<&str>,
     model_short: &str,
     full_model: &str,
+    subagents: &[crate::models::SubAgentProfile],
     active_session: &AgentSession,
     panes: &[HerdrPane],
 ) -> OrchestratorStatus {
-    let name_match = active_session.agent.eq_ignore_ascii_case(profile_name)
+    // 1. Coincidencia directa con panes de Herdr (fuente de verdad si hay perfil asignado al pane)
+    for p in panes {
+        let pane_prof = p.tokens.get("profile").map(|s| s.as_str());
+        let pane_agent = p.agent.as_deref();
+        let hit = pane_prof.map(|pr| pr.eq_ignore_ascii_case(profile_name)).unwrap_or(false)
+            || pane_agent.map(|ag| ag.eq_ignore_ascii_case(profile_name)).unwrap_or(false);
+
+        if hit {
+            if p.agent_status.as_deref() == Some("working") {
+                return OrchestratorStatus::Working;
+            }
+            return OrchestratorStatus::Idle;
+        }
+    }
+
+    // 2. Coincidencia directa de la sesión activa con el orquestador mismo
+    let is_orch_name = active_session.agent.eq_ignore_ascii_case(profile_name)
         || active_session
             .agent
             .to_lowercase()
             .contains(&profile_name.to_lowercase());
 
-    let model_match = if let Some(pfx) = prefix_opt {
+    let is_generic_orch = active_session.agent.eq_ignore_ascii_case("orchestrator")
+        || active_session.agent.eq_ignore_ascii_case("gentle-orchestrator")
+        || active_session.agent.eq_ignore_ascii_case("pi")
+        || active_session.agent.eq_ignore_ascii_case("gentle-shell");
+
+    let orch_model_match = if let Some(pfx) = prefix_opt {
         active_session
             .local_prefix
             .as_deref()
@@ -229,8 +317,40 @@ fn resolve_orchestrator_status(
             || active_session.model.eq_ignore_ascii_case(full_model)
     };
 
-    // 1. Coincidencia con la sesión local activa
-    if name_match || model_match {
+    let direct_orch_match = is_orch_name || (is_generic_orch && orch_model_match);
+
+    // 3. Coincidencia estricta con subagentes configurados en este perfil
+    let subagent_match = subagents.iter().any(|sub| {
+        let sess_agent = active_session.agent.to_lowercase();
+        let full_lower = sub.role.to_lowercase();
+        let clean_role = crate::ui::clean_subagent_role(&sub.role);
+        let sess_clean = crate::ui::clean_subagent_role(&sess_agent);
+
+        let role_hit = sess_agent == full_lower
+            || sess_agent == clean_role
+            || sess_clean == clean_role
+            || sess_agent.contains(&full_lower)
+            || sess_agent.contains(&clean_role);
+
+        if !role_hit {
+            return false;
+        }
+
+        // Si coincide el rol, verificar que coincida el modelo/cuenta asignada a este subagente en este perfil
+        if let Some(ref spfx) = sub.prefix {
+            active_session
+                .local_prefix
+                .as_deref()
+                .map(|lp| lp.eq_ignore_ascii_case(spfx))
+                .unwrap_or(false)
+                || active_session.model.to_lowercase().contains(&spfx.to_lowercase())
+        } else {
+            active_session.model_short.eq_ignore_ascii_case(&sub.model_short)
+                || active_session.model.eq_ignore_ascii_case(&sub.model)
+        }
+    });
+
+    if direct_orch_match || subagent_match {
         if active_session.agent_status == "working" {
             return OrchestratorStatus::Working;
         }
@@ -239,21 +359,6 @@ fn resolve_orchestrator_status(
                 || active_session.tokens_input > 0
                 || active_session.session_id.is_some())
         {
-            return OrchestratorStatus::Idle;
-        }
-    }
-
-    // 2. Coincidencia con panes de Herdr
-    for p in panes {
-        let pane_prof = p.tokens.get("profile").map(|s| s.as_str());
-        let pane_agent = p.agent.as_deref();
-        let hit = pane_prof.map(|pr| pr.eq_ignore_ascii_case(profile_name)).unwrap_or(false)
-            || pane_agent.map(|ag| ag.eq_ignore_ascii_case(profile_name)).unwrap_or(false);
-
-        if hit {
-            if p.agent_status.as_deref() == Some("working") {
-                return OrchestratorStatus::Working;
-            }
             return OrchestratorStatus::Idle;
         }
     }

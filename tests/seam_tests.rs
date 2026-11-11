@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_paths_env_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let fake_opencode_db = tmp.path().join("opencode.db");
         std::fs::write(&fake_opencode_db, b"sqlite").unwrap();
@@ -635,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_opencode_db_telemetry_scanning() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use hudr2::models::HerdrPane;
         use hudr2::opencode::{read_opencode_session, resolve_session_for_pane};
         use rusqlite::Connection;
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_pane_priority_focused_and_working_over_current_cwd() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use hudr2::models::HerdrPane;
         use hudr2::opencode::read_opencode_session;
         use rusqlite::Connection;
@@ -1327,7 +1327,7 @@ mod tests {
 
     #[test]
     fn test_engram_telemetry_caching() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         hudr2::engram::clear_engram_cache();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1455,7 +1455,7 @@ mod tests {
     fn test_quota_manager_and_collector_availability() {
         use hudr2::quotas::is_available;
 
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
@@ -1482,7 +1482,7 @@ mod tests {
         let mut state = AppState::new();
         state.snapshot.accounts.clear();
         state.collapsed_cards[3] = false; // Integraciones expandida
-        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+        state.collapsed_cards[5] = false; // Cuota de Modelos expandida
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let screen_text = render_out.lines.join("\n");
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(acc.error_msg, "rate limited");
 
         // 4. Purga de cuentas huérfanas cuando un archivo .json se elimina
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
@@ -1895,7 +1895,7 @@ mod tests {
 
     #[test]
     fn test_engram_handoff_summary_extraction_and_render() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         hudr2::engram::clear_engram_cache();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1962,6 +1962,10 @@ mod tests {
             .unwrap();
         rt.block_on(async {
             let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+            {
+                let mut state = app_state.write().await;
+                state.snapshot.project_dir = temp_dir.path().to_str().unwrap().to_string();
+            }
             hudr2::app::refresh_all(&app_state).await;
 
             {
@@ -2297,7 +2301,7 @@ mod tests {
 
     #[test]
     fn test_herdr_metadata_tokens_parsing_and_pi_live_telemetry() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use hudr2::herdr::HerdrClient;
         use hudr2::models::AccountQuota;
         use hudr2::pi::try_read_pi_session;
@@ -2824,7 +2828,7 @@ mod tests {
 
     #[test]
     fn test_opencode_modern_schema_session_part_and_cpamc_attribution() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("opencode.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -2964,7 +2968,7 @@ mod tests {
 
     #[test]
     fn test_opencode_dual_schema_precedence_session_over_stale_session_v2() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("opencode.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3091,7 +3095,7 @@ mod tests {
 
     #[test]
     fn test_opencode_upgraded_db_coexisting_legacy_tables_and_message_data_hydration() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let db_path = tmp.path().join("opencode.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -3281,7 +3285,7 @@ mod tests {
         use serde_json::json;
         use std::collections::HashSet;
 
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_quota_runtime_cache();
 
         let tmp = tempfile::tempdir().unwrap();
@@ -3411,7 +3415,7 @@ mod tests {
         use serde_json::json;
         use std::collections::HashSet;
 
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_quota_runtime_cache();
 
         let now = chrono::Utc::now().timestamp();
@@ -4618,7 +4622,7 @@ api-keys:
         assert!(accounts_opencode.iter().any(|(p, _)| p == "gianniclaude"));
 
         // 3. Crear entorno temporal con config.yaml y probar discover_accounts_for
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("config.yaml");
         std::fs::write(&cfg_path, yaml_sample).unwrap();
@@ -4682,7 +4686,7 @@ api-keys:
         state.snapshot.agent_session.local_prefix = Some("clasclaude".to_string());
         state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
         state.collapsed_cards[3] = false; // Integraciones expandida
-        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+        state.collapsed_cards[5] = false; // Cuota de Modelos expandida
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let screen = render_out.lines.join("\n");
@@ -4738,7 +4742,7 @@ api-keys:
     fn test_turn_and_task_cost_metrics_in_contexto_and_cuota_de_modelos() {
         let mut state = AppState::new();
         state.collapsed_cards[1] = false; // Contexto expandido
-        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+        state.collapsed_cards[5] = false; // Cuota de Modelos expandida
         state.snapshot.agent_session.turn_count = 10;
         state.snapshot.agent_session.cost = 0.25;
         state.snapshot.agent_session.last_turn_cost = 0.035;
@@ -4814,7 +4818,7 @@ api-keys:
             hydrate_accounts_from_cache, is_api_key, is_codex_account,
         };
 
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let auths_dir = tmp.path().join("auths");
         std::fs::create_dir_all(&auths_dir).unwrap();
@@ -4923,7 +4927,7 @@ api-keys:
         // 6. Probar renderizado en UI de Integraciones y Cuota de Modelos
         let mut state = AppState::new();
         state.collapsed_cards[3] = false; // Integraciones expandida
-        state.collapsed_cards[4] = false; // Cuota de Modelos expandida
+        state.collapsed_cards[5] = false; // Cuota de Modelos expandida
         state.snapshot.accounts = vec![codex_acc.clone()];
         state.snapshot.agent_session.local_prefix = Some("codex".to_string());
         state.snapshot.agent_session.cost = 0.45;
@@ -5324,6 +5328,380 @@ api-keys:
         unsafe {
             std::env::remove_var("GENTLE_AI_PROFILES_PATH");
             std::env::remove_var("OPENCODE_CONFIG_PATH");
+        }
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_orchestrator_fleet_breakdown() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::state::{AppState, ClickAction};
+
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false; // Expandir Cuota de Modelos
+
+        // 1. Configurar un perfil de orquestador activo con subagentes
+        let orch = OrchestratorProfile {
+            name: "fleet-tavo".to_string(),
+            model: "tavoclaude/claude-opus-5-5".to_string(),
+            model_short: "claude-opus-5-5".to_string(),
+            prefix: Some("tavoclaude".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "gentle-ai-worker".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+                SubAgentProfile {
+                    role: "jd-fix-agent".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+                SubAgentProfile {
+                    role: "gentle-ai-explore".to_string(),
+                    model: "agy/gemini-3.8-flash-medium".to_string(),
+                    model_short: "gemini-3.8-flash-medium".to_string(),
+                    prefix: Some("agy".to_string()),
+                    thinking: Some("medium".to_string()),
+                },
+                SubAgentProfile {
+                    role: "review-risk".to_string(),
+                    model: "agy3/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy3".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        state.snapshot.orchestrators = vec![orch];
+
+        // 2. Configurar cuentas de Integraciones
+        let claude_acc = AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            rem_5h: 100,
+            reset_5h: "api-key".to_string(),
+            rem_wk: 100,
+            reset_wk: "api-key".to_string(),
+            ..Default::default()
+        };
+        let agy2_acc = AccountQuota {
+            prefix: "agy2".to_string(),
+            auth_file: "auth_agy2.json".to_string(),
+            rem_5h: 95,
+            reset_5h: "4h 20m".to_string(),
+            rem_wk: 90,
+            reset_wk: "3d 12h".to_string(),
+            ..Default::default()
+        };
+        let agy_acc = AccountQuota {
+            prefix: "agy".to_string(),
+            auth_file: "auth_agy.json".to_string(),
+            rem_5h: 80,
+            reset_5h: "2h 10m".to_string(),
+            rem_wk: 85,
+            reset_wk: "2d 08h".to_string(),
+            ..Default::default()
+        };
+        let agy3_acc = AccountQuota {
+            prefix: "agy3".to_string(),
+            auth_file: "auth_agy3.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 50m".to_string(),
+            rem_wk: 98,
+            reset_wk: "5d 00h".to_string(),
+            ..Default::default()
+        };
+
+        state.snapshot.accounts = vec![claude_acc, agy2_acc, agy_acc, agy3_acc];
+
+        // 3. Estado de sesión activa:
+        // Orquestador está en working
+        state.snapshot.agent_session.agent = "fleet-tavo".to_string();
+        state.snapshot.agent_session.agent_status = "working".to_string();
+        state.snapshot.agent_session.local_prefix = Some("tavoclaude".to_string());
+        state.snapshot.agent_session.model_short = "claude-opus-5-5".to_string();
+
+        // Explore (agy) ya trabajó en esta sesión y ahora está pasivo
+        state.snapshot.agent_session.all_active_prefixes.insert("agy".to_string());
+
+        // 4. Renderizado y verificación
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+        let raw = render_out.lines.join("\n");
+
+        // Header contiene el nombre del orquestador activo
+        assert!(screen.contains("Cuota de Modelos · fleet-tavo *"));
+
+        // Orquestador activo tiene '>'
+        assert!(screen.contains("> orch"));
+        assert!(screen.contains("tavoclaude"));
+
+        // Subagente pasivo (explore/agy) tiene '●' en color púrpura/MAGENTA
+        assert!(raw.contains(hudr2::config::MAGENTA));
+        assert!(screen.contains("● explore"));
+        assert!(screen.contains("agy"));
+        assert!(screen.contains("80%"));
+
+        // Subagentes inactivos individuales: worker (agy2), fix (agy2), review-risk (agy3) tienen '○' en gris
+        assert!(screen.contains("○ worker"));
+        assert!(screen.contains("○ fix"));
+        assert!(screen.contains("agy2"));
+        assert!(screen.contains("95%"));
+
+        assert!(screen.contains("○ review-risk"));
+        assert!(screen.contains("agy3"));
+        assert!(screen.contains("100%"));
+
+        // 5. Clic para colapsar Cuota de Modelos (card index 5)
+        state.card_bounds = render_out.bounds;
+        let pools_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "pools")
+            .expect("bound de la card pools debe existir");
+
+        let click = state.handle_mouse_click(pools_bound.start_line, 0);
+        assert_eq!(click, Some(ClickAction::ToggledCard(5)));
+        assert!(state.collapsed_cards[5]);
+    }
+
+    #[test]
+    fn test_orchestrators_subagent_disambiguation_and_profile_isolation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::state::AppState;
+
+        let mut state = AppState::new();
+        state.collapsed_cards[4] = false; // Orquestadores
+        state.collapsed_cards[5] = false; // Cuota de Modelos
+
+        // Configuración de 3 orquestadores:
+        // 1. fleet-tavo: worker (agy2) y fix (agy2) comparten modelo y prefijo
+        let orch_tavo = OrchestratorProfile {
+            name: "fleet-tavo".to_string(),
+            model: "tavoclaude/claude-opus-5-5".to_string(),
+            model_short: "claude-opus-5-5".to_string(),
+            prefix: Some("tavoclaude".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+                SubAgentProfile {
+                    role: "fix".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        // 2. fleet-codex: worker asignado también a agy2
+        let orch_codex = OrchestratorProfile {
+            name: "fleet-codex".to_string(),
+            model: "tavocodex/gpt-5.6-sol".to_string(),
+            model_short: "gpt-5.6-sol".to_string(),
+            prefix: Some("tavocodex".to_string()),
+            status: OrchestratorStatus::Offline,
+            subagents: vec![SubAgentProfile {
+                role: "worker".to_string(),
+                model: "agy2/gemini-3.8-flash-high".to_string(),
+                model_short: "gemini-3.8-flash-high".to_string(),
+                prefix: Some("agy2".to_string()),
+                thinking: Some("high".to_string()),
+            }],
+            ..Default::default()
+        };
+
+        // 3. fleet-gianni: agy2 asignado a 'verify' en vez de 'worker', y worker a claude
+        let orch_gianni = OrchestratorProfile {
+            name: "fleet-gianni".to_string(),
+            model: "gianniclaude/claude-opus-5-5".to_string(),
+            model_short: "claude-opus-5-5".to_string(),
+            prefix: Some("gianniclaude".to_string()),
+            status: OrchestratorStatus::Offline,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "verify".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash-high".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: Some("medium".to_string()),
+                },
+                SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "gianniclaude/claude-sonnet-5-5".to_string(),
+                    model_short: "claude-sonnet-5-5".to_string(),
+                    prefix: Some("gianniclaude".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        state.snapshot.orchestrators = vec![orch_tavo, orch_codex, orch_gianni];
+
+        let acc_agy2 = AccountQuota {
+            prefix: "agy2".to_string(),
+            auth_file: "auth_agy2.json".to_string(),
+            rem_5h: 88,
+            reset_5h: "3h 40m".to_string(),
+            rem_wk: 92,
+            reset_wk: "4d 10h".to_string(),
+            ..Default::default()
+        };
+        let acc_claude = AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            rem_5h: 100,
+            reset_5h: "api-key".to_string(),
+            rem_wk: 100,
+            reset_wk: "api-key".to_string(),
+            ..Default::default()
+        };
+        state.snapshot.accounts = vec![acc_agy2, acc_claude];
+
+        // CASO 1: En fleet-tavo está trabajando 'worker' (agy2)
+        state.snapshot.agent_session = AgentSession {
+            agent: "worker".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy2".to_string()),
+            model_short: "gemini-3.8-flash-high".to_string(),
+            model: "agy2/gemini-3.8-flash-high".to_string(),
+            ..Default::default()
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // Cuota de Modelos está contextualizada en fleet-tavo (Working)
+        assert!(screen.contains("Cuota de Modelos · fleet-tavo *"));
+
+        // 'worker' debe estar activo con '>'
+        assert!(screen.contains("> worker"));
+
+        // 'fix' (a pesar de compartir agy2 y el mismo modelo) DEBE permanecer inactivo con '○'
+        assert!(screen.contains("○ fix"));
+        assert!(!screen.contains("> fix"));
+
+        // CASO 2: En fleet-gianni está activo 'verify' (agy2)
+        state.snapshot.orchestrators[0].status = OrchestratorStatus::Offline;
+        state.snapshot.orchestrators[2].status = OrchestratorStatus::Working;
+        state.snapshot.agent_session.agent = "verify".to_string();
+
+        let render_gianni = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen_gianni = ui::strip_ansi(&render_gianni.lines.join("\n"));
+
+        // Cuota de Modelos ahora está en fleet-gianni
+        assert!(screen_gianni.contains("Cuota de Modelos · fleet-gianni *"));
+
+        // 'verify' debe tener '>'
+        assert!(screen_gianni.contains("> verify"));
+
+        // 'worker' de fleet-gianni (que usa claude) no debe activarse
+        assert!(screen_gianni.contains("○ worker"));
+        assert!(!screen_gianni.contains("> worker"));
+    }
+
+    #[test]
+    fn test_orchestrators_profile_subagent_deduplication_and_long_role_truncation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorStatus};
+        use hudr2::orchestrators::discover_orchestrators;
+        use hudr2::state::AppState;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let gentle_dir = tmp.path().join(".gentle-ai");
+        std::fs::create_dir_all(&gentle_dir).unwrap();
+
+        // profiles.json con subagente duplicado deliberadamente en "agents" y en raíz del perfil
+        let profiles_json = serde_json::json!({
+            "default": "fleet-dup",
+            "profiles": {
+                "fleet-dup": {
+                    "orchestrator": {
+                        "model": "tavoclaude/claude-opus-5-5"
+                    },
+                    "agents": {
+                        "worker": {
+                            "model": "agy2/gemini-3.8-flash-high"
+                        },
+                        "very-long-specialized-coordinator-agent": {
+                            "model": "agy3/gemini-3.8-flash-medium"
+                        }
+                    },
+                    "worker": {
+                        "model": "agy2/gemini-3.8-flash-high"
+                    }
+                }
+            }
+        });
+
+        let profiles_file = gentle_dir.join("profiles.json");
+        std::fs::write(&profiles_file, serde_json::to_string(&profiles_json).unwrap()).unwrap();
+
+        unsafe {
+            std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_file.to_str().unwrap());
+        }
+
+        let acc_agy2 = AccountQuota {
+            prefix: "agy2".to_string(),
+            auth_file: "auth_agy2.json".to_string(),
+            rem_5h: 90,
+            reset_5h: "4h 00m".to_string(),
+            rem_wk: 95,
+            reset_wk: "5d 00h".to_string(),
+            ..Default::default()
+        };
+        let accounts = vec![acc_agy2];
+        let session = AgentSession::default();
+        let panes = vec![];
+
+        let discovered = discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
+        let dup_orch = discovered.iter().find(|o| o.name == "fleet-dup").expect("fleet-dup debe existir");
+
+        // Verificación 1: Deduplicación defensiva
+        // 'worker' solo debe existir 1 vez en subagents a pesar de estar repetido en el JSON
+        let worker_count = dup_orch.subagents.iter().filter(|s| s.role == "worker").count();
+        assert_eq!(worker_count, 1, "worker no debe aparecer duplicado en la flota de subagentes");
+
+        // Verificación 2: Truncado inteligente y seguro de roles largos en terminal angosta (38 columnas)
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        let mut active_orch = dup_orch.clone();
+        active_orch.status = OrchestratorStatus::Working;
+        state.snapshot.orchestrators = vec![active_orch];
+        state.snapshot.accounts = accounts;
+
+        let render_narrow = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 38);
+        let pools_bound = render_narrow
+            .bounds
+            .iter()
+            .find(|b| b.id == "pools")
+            .expect("bound de la card pools debe existir");
+
+        for line in &render_narrow.lines[pools_bound.start_line..=pools_bound.end_line] {
+            let stripped = ui::strip_ansi(line);
+            let w = ui::string_width(&stripped);
+            assert_eq!(w, 38, "Cada fila de la card pools debe medir exactamente 38 caracteres sin desbordar");
+        }
+
+        unsafe {
+            std::env::remove_var("GENTLE_AI_PROFILES_PATH");
         }
     }
 }

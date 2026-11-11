@@ -263,6 +263,33 @@ pub fn format_tokens(num: i64) -> String {
     }
 }
 
+pub fn clean_subagent_role(role: &str) -> String {
+    let s = role.to_lowercase();
+    let s = s.trim_start_matches("gentle-ai-");
+    let s = s.trim_start_matches("gentle-");
+    let s = s.trim_start_matches("agent-");
+    let s = s.trim_end_matches("-agent");
+    if s.starts_with("jd-judge-") {
+        s.replace("jd-judge-", "judge-")
+    } else if s == "jd-fix" {
+        "fix".to_string()
+    } else if s == "review-readability" {
+        "review-read".to_string()
+    } else if s == "review-reliability" {
+        "review-rel".to_string()
+    } else if s == "review-resilience" {
+        "review-res".to_string()
+    } else if s == "deep-researcher" {
+        "deep-rsch".to_string()
+    } else if s == "news-researcher" {
+        "news-rsch".to_string()
+    } else if s == "ui-designer" {
+        "ui-design".to_string()
+    } else {
+        s.to_string()
+    }
+}
+
 pub fn render_screen(
     snap: &TelemetrySnapshot,
     collapsed: &[bool; 12],
@@ -971,121 +998,217 @@ pub fn render_screen_with_diff_and_theme(
     // 6. Pool de Modelos / Cuotas Breakdown Card (5)
     if !hidden_cards.contains("pools") {
         let pools_start = lines.len();
-    let default_prefix = snap
-        .accounts
-        .first()
-        .map(|a| a.prefix.as_str())
-        .unwrap_or("local");
-    let active_acc_prefix = snap
-        .agent_session
-        .local_prefix
-        .as_deref()
-        .unwrap_or(default_prefix);
 
-    // Cuenta activa contextual para este espacio de trabajo específico
-    let target_account = snap
-        .accounts
-        .iter()
-        .find(|a| a.prefix.to_lowercase() == active_acc_prefix.to_lowercase())
-        .or_else(|| snap.accounts.first());
+        let active_orch = snap
+            .orchestrators
+            .iter()
+            .find(|o| o.status == crate::models::OrchestratorStatus::Working)
+            .or_else(|| {
+                snap.orchestrators
+                    .iter()
+                    .find(|o| o.status == crate::models::OrchestratorStatus::Idle)
+            })
+            .or_else(|| snap.orchestrators.iter().find(|o| o.is_default))
+            .or_else(|| snap.orchestrators.first());
 
-    let pool_title = format!(
-        "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} {accent_secondary}*{RESET}"
-    );
+        if let Some(orch) = active_orch {
+            let pool_title = format!(
+                "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{}{RESET} {accent_secondary}*{RESET}",
+                orch.name
+            );
 
-    lines.push(draw_top(&pool_title, collapsed[5], width));
-    if !collapsed[5] {
-        if snap.accounts.is_empty() {
-            lines.push(draw_row(
-                &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
-                &format!("{TEXT_DIM}[inactivo]{RESET}"),
-                width,
-            ));
-        } else if let Some(acc) = target_account {
-            let is_acc_api = crate::quotas::is_api_key(acc);
-            if is_acc_api {
-                let is_local = snap
-                    .agent_session
-                    .local_prefix
-                    .as_deref()
-                    .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                    .unwrap_or(false);
-                let is_any_active = snap
-                    .agent_session
-                    .all_active_prefixes
-                    .contains(&acc.prefix.to_lowercase());
-                let session_cost = if is_local || is_any_active {
-                    snap.agent_session.cost
-                } else {
-                    0.0
-                };
-                let maybe_budget = crate::quotas::cliproxy::get_user_configured_budget(&acc.prefix);
-                let (_, rem_balance, rem_pct, cost_since_set) =
-                    crate::quotas::cliproxy::calculate_api_key_balance(
-                        &acc.prefix,
-                        session_cost,
-                        snap.agent_session.session_id.as_deref(),
-                    );
+            lines.push(draw_top(&pool_title, collapsed[5], width));
+            if !collapsed[5] {
+                struct FleetRow<'a> {
+                    role_label: String,
+                    full_role: &'a str,
+                    prefix: Option<&'a str>,
+                    model_short: &'a str,
+                    is_orch: bool,
+                }
 
-                let api_label = acc
-                    .pools
-                    .first()
-                    .map(|p| p.label.as_str())
-                    .unwrap_or("API");
+                let mut fleet_rows: Vec<FleetRow> = Vec::new();
 
-                // 1. Fila de API y gasto sesión (sin etiqueta repetitiva [api-key])
-                let pool_color = if maybe_budget.is_some() {
-                    if rem_pct <= 8 {
-                        CORAL
-                    } else if rem_pct <= 20 {
-                        AMBER
+                // Fila soberana del Orquestador
+                fleet_rows.push(FleetRow {
+                    role_label: "orch".to_string(),
+                    full_role: orch.name.as_str(),
+                    prefix: orch.prefix.as_deref(),
+                    model_short: &orch.model_short,
+                    is_orch: true,
+                });
+
+                // Opción B: Fila individual por cada subagente (trazabilidad absoluta)
+                for sub in &orch.subagents {
+                    let clean_r = clean_subagent_role(&sub.role);
+                    fleet_rows.push(FleetRow {
+                        role_label: clean_r,
+                        full_role: sub.role.as_str(),
+                        prefix: sub.prefix.as_deref(),
+                        model_short: &sub.model_short,
+                        is_orch: false,
+                    });
+                }
+
+                for row in &fleet_rows {
+                    let pfx_str = row.prefix.unwrap_or("local");
+                    let target_acc = snap
+                        .accounts
+                        .iter()
+                        .find(|a| a.prefix.eq_ignore_ascii_case(pfx_str));
+
+                    // Determinar estado de ejecución:
+                    // 1. Activo (Working):
+                    let is_active = if row.is_orch {
+                        orch.status == crate::models::OrchestratorStatus::Working
+                            && (snap.agent_session.agent_status == "working"
+                                && (snap.agent_session.agent.eq_ignore_ascii_case(&orch.name)
+                                    || snap.agent_session.agent.eq_ignore_ascii_case("orchestrator")
+                                    || snap.agent_session.agent.eq_ignore_ascii_case("gentle-orchestrator")
+                                    || snap.agent_session.agent.eq_ignore_ascii_case("pi")
+                                    || snap.agent_session.agent.eq_ignore_ascii_case("gentle-shell")
+                                    || (snap.agent_session.local_prefix.as_deref() == orch.prefix.as_deref()
+                                        && snap.agent_session.model_short.eq_ignore_ascii_case(&orch.model_short))))
+                    } else if snap.agent_session.agent_status != "working" {
+                        false
                     } else {
-                        MINT
-                    }
-                } else {
-                    MINT
-                };
-                let pfx_w = if width < 42 { 8 } else { 12 };
-                let p_label = format!("{:<width$}", api_label, width = pfx_w);
-                let row1_left = if maybe_budget.is_some() {
-                    let bar_len = if width < 42 { 3 } else { 6 };
-                    let bar = render_gauge_inline(rem_pct, bar_len, pool_color);
-                    let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", rem_pct);
-                    format!("{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}")
-                } else {
-                    format!("{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET}")
-                };
-                let avg_cost = snap.agent_session.avg_turn_cost();
-                let display_cost = if maybe_budget.is_some() {
-                    cost_since_set
-                } else {
-                    session_cost
-                };
-                let row1_right = if width < 42 {
-                    format!("{BOLD}{TEXT_PRIMARY}${:.3}{RESET}", display_cost)
-                } else if avg_cost > 0.0 {
-                    format!(
-                        "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET} {TEXT_DIM}\u{00b7} ${:.3}/req{RESET}",
-                        display_cost, avg_cost
-                    )
-                } else {
-                    format!(
-                        "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET}",
-                        display_cost
-                    )
-                };
-                lines.push(draw_row(&row1_left, &row1_right, width));
+                        let sess_agent = snap.agent_session.agent.to_lowercase();
+                        let full_lower = row.full_role.to_lowercase();
+                        let clean_lower = row.role_label.to_lowercase();
+                        let sess_clean = clean_subagent_role(&sess_agent);
 
-                // 2. Fila de Saldo (definir / editar / saldo agotado)
-                let saldo_row_idx = lines.len();
-                let is_editing = snap.is_editing_balance
-                    && snap
-                        .editing_balance_prefix
-                        .as_deref()
-                        .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                        .unwrap_or(false);
+                        // 1. Verificación estricta de rol para este subagente en particular:
+                        let role_matches = sess_agent == full_lower
+                            || sess_agent == clean_lower
+                            || sess_clean == clean_lower
+                            || sess_agent.contains(&full_lower)
+                            || sess_agent.contains(&clean_lower);
 
-                if is_editing {
+                        // 2. Verificación de coincidencia de modelo / prefijo configurado en este perfil:
+                        let model_matches = if let Some(pfx) = row.prefix {
+                            snap.agent_session
+                                .local_prefix
+                                .as_deref()
+                                .map(|lp| lp.eq_ignore_ascii_case(pfx))
+                                .unwrap_or(false)
+                                || snap.agent_session.model.to_lowercase().contains(&pfx.to_lowercase())
+                        } else {
+                            snap.agent_session.model_short.eq_ignore_ascii_case(row.model_short)
+                                || snap.agent_session.model.eq_ignore_ascii_case(row.model_short)
+                        };
+
+                        role_matches && model_matches
+                    };
+
+                    // 2. Pasivo (recién dejó de trabajar / presente en all_active_prefixes / idle):
+                    let is_passive = !is_active
+                        && (row.prefix
+                            .map(|p| snap.agent_session.all_active_prefixes.contains(&p.to_lowercase()))
+                            .unwrap_or(false)
+                            || (row.is_orch && orch.status == crate::models::OrchestratorStatus::Idle));
+
+                    // 3. Glifos y colores de texto solicitados:
+                    // Activos: '>' y texto blanco brillante (BOLD TEXT_PRIMARY)
+                    // Pasivos: '●' en MAGENTA (púrpura) y texto blanco (TEXT_PRIMARY)
+                    // Inactivos: '○' en gris (TEXT_DIM) y texto gris (TEXT_MUTED)
+                    let (status_glyph, text_color) = if is_active {
+                        (format!("{accent_secondary}>{RESET}"), format!("{BOLD}{TEXT_PRIMARY}"))
+                    } else if is_passive {
+                        (format!("{MAGENTA}\u{25cf}{RESET}"), TEXT_PRIMARY.to_string())
+                    } else {
+                        (format!("{TEXT_DIM}\u{25cb}{RESET}"), TEXT_MUTED.to_string())
+                    };
+
+                    let pfx_w = if width < 42 { 5 } else { 7 };
+                    let role_w = if width < 42 { 8 } else { 11 };
+                    let role_truncated = truncate_to_width(&row.role_label, role_w);
+                    let role_disp = format!("{:<width$}", role_truncated, width = role_w);
+                    let pfx_disp = format!("{:<width$}", pfx_str, width = pfx_w);
+
+                    let left = if width >= 68 {
+                        format!("{status_glyph} {text_color}{role_disp}{RESET} {pfx_disp} {TEXT_DIM}({}){RESET}", row.model_short)
+                    } else {
+                        format!("{status_glyph} {text_color}{role_disp}{RESET} {pfx_disp}")
+                    };
+
+                    // Proyección de cuota / saldo para esta cuenta y modelo:
+                    let bar_len = if width < 42 { 2 } else { 3 };
+
+                    let right = if let Some(acc) = target_acc {
+                        let is_api = crate::quotas::is_api_key(acc);
+                        if is_api {
+                            let session_cost = if is_active || is_passive {
+                                snap.agent_session.cost
+                            } else {
+                                0.0
+                            };
+                            let (maybe_budget, rem_balance, rem_pct, _cost) =
+                                crate::quotas::cliproxy::calculate_api_key_balance(
+                                    &acc.prefix,
+                                    session_cost,
+                                    snap.agent_session.session_id.as_deref(),
+                                );
+                            let pool_color = if maybe_budget.is_some() {
+                                if rem_pct <= 8 {
+                                    CORAL
+                                } else if rem_pct <= 20 {
+                                    AMBER
+                                } else {
+                                    MINT
+                                }
+                            } else {
+                                MINT
+                            };
+                            let bar = render_gauge_inline(rem_pct, bar_len, pool_color);
+                            if let Some(rem) = rem_balance {
+                                if rem <= 0.0 || rem_pct <= 8 {
+                                    format!("{bar} {BOLD}{CORAL}[SALDO AGOTADO]{RESET}")
+                                } else if width < 42 {
+                                    format!("{bar} {BOLD}{pool_color}${rem:.2}{RESET}")
+                                } else {
+                                    format!("{bar} {BOLD}{pool_color}${rem:.2} disp{RESET}")
+                                }
+                            } else {
+                                format!("{TEXT_DIM}[{}]{RESET}", acc.reset_5h)
+                            }
+                        } else {
+                            let eff = crate::quotas::evaluate_account_for_model(acc, row.model_short);
+                            let pool_color = if eff.is_critical {
+                                CORAL
+                            } else if eff.is_warning {
+                                AMBER
+                            } else {
+                                MINT
+                            };
+                            let bar = render_gauge_inline(eff.rem_5h, bar_len, pool_color);
+                            let pct_5h = format!("{BOLD}{pool_color}{:>3}%{RESET}", eff.rem_5h);
+                            let wk_color = if eff.is_critical {
+                                CORAL
+                            } else if eff.is_warning {
+                                AMBER
+                            } else {
+                                MINT
+                            };
+                            let wk_str = if width < 40 {
+                                format!(" {TEXT_DIM}W:{RESET}{BOLD}{wk_color}{:>3}%{RESET}", eff.rem_wk)
+                            } else {
+                                format!(" {TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}", eff.rem_wk)
+                            };
+
+                            if eff.is_critical {
+                                format!("{bar} {pct_5h}{wk_str} {CORAL}[AGOTADO]{RESET}")
+                            } else {
+                                format!("{bar} {pct_5h}{wk_str}")
+                            }
+                        }
+                    } else {
+                        format!("{TEXT_DIM}[disp]{RESET}")
+                    };
+
+                    lines.push(draw_row(&left, &right, width));
+                }
+
+                if snap.is_editing_balance {
                     let input_display = if snap.balance_input_buffer.is_empty() {
                         format!("{TEXT_DIM}_ (ingresa saldo ej: 50.00){RESET}")
                     } else {
@@ -1096,99 +1219,235 @@ pub fn render_screen_with_diff_and_theme(
                     };
                     let left = format!("{accent_secondary}> {RESET}{BOLD}Saldo $: {input_display}");
                     let right = format!("{AMBER}[Enter|Esc]{RESET}");
+                    let row_idx = lines.len();
                     lines.push(draw_row(&left, &right, width));
-                } else if let (Some(_b), Some(rem)) = (maybe_budget, rem_balance) {
-                    let saldo_color = if rem <= 0.0 || rem_pct <= 8 {
-                        CORAL
-                    } else if rem_pct <= 20 {
-                        AMBER
-                    } else {
-                        MINT
-                    };
-                    let bar_len = if width < 42 { 3 } else { 6 };
-                    let bar = render_gauge_inline(rem_pct, bar_len, saldo_color);
-                    let pfx_w = if width < 42 { 6 } else { 8 };
-                    let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
-                    let left = format!(
-                        "{saldo_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {BOLD}{saldo_color}${rem:.2}{RESET}"
-                    );
-                    let right = if rem <= 0.0 {
-                        format!("{BOLD}{CORAL}[AGOTADO]{RESET} {TEXT_DIM}[editar]{RESET}")
-                    } else if avg_cost > 0.0 && width >= 42 {
-                        let count = (rem / avg_cost).round() as u64;
-                        let count_str = if count >= 1000 {
-                            format!("~{:.1}k", count as f64 / 1000.0)
-                        } else {
-                            format!("~{count}")
-                        };
-                        format!("{TEXT_DIM}{count_str} reqs{RESET} {TEXT_DIM}[editar]{RESET}")
-                    } else {
-                        format!("{TEXT_DIM}disp{RESET} {TEXT_DIM}[editar]{RESET}")
-                    };
-                    lines.push(draw_row(&left, &right, width));
-                } else {
-                    let pfx_w = if width < 42 { 6 } else { 8 };
-                    let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
-                    let left = format!("{TEXT_MUTED}\u{25cf}{RESET} {TEXT_MUTED}{p_label}{RESET}");
-                    let right = format!("{MINT}[definir saldo]{RESET}");
-                    lines.push(draw_row(&left, &right, width));
+                    bounds.push(CardBounds {
+                        id: "edit_balance",
+                        start_line: row_idx,
+                        end_line: row_idx,
+                        action_type: Some("edit_balance"),
+                        action_path: snap.editing_balance_prefix.clone(),
+                    });
                 }
-                bounds.push(CardBounds {
-                    id: "edit_balance",
-                    start_line: saldo_row_idx,
-                    end_line: saldo_row_idx,
-                    action_type: Some("edit_balance"),
-                    action_path: Some(acc.prefix.clone()),
-                });
+            }
+        } else {
+            // Fallback legado si no hay perfiles de orquestador definidos
+            let default_prefix = snap
+                .accounts
+                .first()
+                .map(|a| a.prefix.as_str())
+                .unwrap_or("local");
+            let active_acc_prefix = snap
+                .agent_session
+                .local_prefix
+                .as_deref()
+                .unwrap_or(default_prefix);
 
-                // 3. Fila de Facturación oficial con [ver ->]
-                let portal_row_idx = lines.len();
-                let billing_url = crate::quotas::cliproxy::provider_billing_url(&acc.prefix);
-                let portal_left = if width < 40 {
-                    format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n{RESET}")
-                } else {
-                    format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n oficial{RESET}")
-                };
-                let portal_right = format!("{MINT}[ver ->]{RESET}");
-                lines.push(draw_row(&portal_left, &portal_right, width));
-                bounds.push(CardBounds {
-                    id: "open_billing_url",
-                    start_line: portal_row_idx,
-                    end_line: portal_row_idx,
-                    action_type: Some("open_billing_url"),
-                    action_path: Some(billing_url.to_string()),
-                });
-            } else {
-                for p in &acc.pools {
-                    let pool_color = if p.percent <= 15 {
-                        CORAL
-                    } else if p.percent <= 50 {
-                        AMBER
-                    } else {
-                        MINT
-                    };
+            let target_account = snap
+                .accounts
+                .iter()
+                .find(|a| a.prefix.to_lowercase() == active_acc_prefix.to_lowercase())
+                .or_else(|| snap.accounts.first());
 
-                    let bar_len = if width < 42 { 3 } else { 6 };
-                    let bar = render_gauge_inline(p.percent, bar_len, pool_color);
-                    let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
-                    let pfx_w = if width < 42 { 8 } else { 12 };
-                    let p_label = format!("{:<width$}", p.label, width = pfx_w);
-                    let left = format!(
-                        "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
-                    );
-                    let right = if width < 40 {
-                        format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+            let pool_title = format!(
+                "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} {accent_secondary}*{RESET}"
+            );
+
+            lines.push(draw_top(&pool_title, collapsed[5], width));
+            if !collapsed[5] {
+                if snap.accounts.is_empty() {
+                    lines.push(draw_row(
+                        &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
+                        &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                        width,
+                    ));
+                } else if let Some(acc) = target_account {
+                    let is_acc_api = crate::quotas::is_api_key(acc);
+                    if is_acc_api {
+                        let is_local = snap
+                            .agent_session
+                            .local_prefix
+                            .as_deref()
+                            .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                            .unwrap_or(false);
+                        let is_any_active = snap
+                            .agent_session
+                            .all_active_prefixes
+                            .contains(&acc.prefix.to_lowercase());
+                        let session_cost = if is_local || is_any_active {
+                            snap.agent_session.cost
+                        } else {
+                            0.0
+                        };
+                        let maybe_budget = crate::quotas::cliproxy::get_user_configured_budget(&acc.prefix);
+                        let (_, rem_balance, rem_pct, cost_since_set) =
+                            crate::quotas::cliproxy::calculate_api_key_balance(
+                                &acc.prefix,
+                                session_cost,
+                                snap.agent_session.session_id.as_deref(),
+                            );
+
+                        let api_label = acc
+                            .pools
+                            .first()
+                            .map(|p| p.label.as_str())
+                            .unwrap_or("API");
+
+                        let pool_color = if maybe_budget.is_some() {
+                            if rem_pct <= 8 {
+                                CORAL
+                            } else if rem_pct <= 20 {
+                                AMBER
+                            } else {
+                                MINT
+                            }
+                        } else {
+                            MINT
+                        };
+                        let pfx_w = if width < 42 { 8 } else { 12 };
+                        let p_label = format!("{:<width$}", api_label, width = pfx_w);
+                        let row1_left = if maybe_budget.is_some() {
+                            let bar_len = if width < 42 { 3 } else { 6 };
+                            let bar = render_gauge_inline(rem_pct, bar_len, pool_color);
+                            let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", rem_pct);
+                            format!("{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}")
+                        } else {
+                            format!("{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET}")
+                        };
+                        let avg_cost = snap.agent_session.avg_turn_cost();
+                        let display_cost = if maybe_budget.is_some() {
+                            cost_since_set
+                        } else {
+                            session_cost
+                        };
+                        let row1_right = if width < 42 {
+                            format!("{BOLD}{TEXT_PRIMARY}${:.3}{RESET}", display_cost)
+                        } else if avg_cost > 0.0 {
+                            format!(
+                                "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET} {TEXT_DIM}\u{00b7} ${:.3}/req{RESET}",
+                                display_cost, avg_cost
+                            )
+                        } else {
+                            format!(
+                                "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET}",
+                                display_cost
+                            )
+                        };
+                        lines.push(draw_row(&row1_left, &row1_right, width));
+
+                        let saldo_row_idx = lines.len();
+                        let is_editing = snap.is_editing_balance
+                            && snap
+                                .editing_balance_prefix
+                                .as_deref()
+                                .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                                .unwrap_or(false);
+
+                        if is_editing {
+                            let input_display = if snap.balance_input_buffer.is_empty() {
+                                format!("{TEXT_DIM}_ (ingresa saldo ej: 50.00){RESET}")
+                            } else {
+                                format!(
+                                    "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
+                                    snap.balance_input_buffer
+                                )
+                            };
+                            let left = format!("{accent_secondary}> {RESET}{BOLD}Saldo $: {input_display}");
+                            let right = format!("{AMBER}[Enter|Esc]{RESET}");
+                            lines.push(draw_row(&left, &right, width));
+                        } else if let (Some(_b), Some(rem)) = (maybe_budget, rem_balance) {
+                            let saldo_color = if rem <= 0.0 || rem_pct <= 8 {
+                                CORAL
+                            } else if rem_pct <= 20 {
+                                AMBER
+                            } else {
+                                MINT
+                            };
+                            let bar_len = if width < 42 { 3 } else { 6 };
+                            let bar = render_gauge_inline(rem_pct, bar_len, saldo_color);
+                            let pfx_w = if width < 42 { 6 } else { 8 };
+                            let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
+                            let left = format!(
+                                "{saldo_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {BOLD}{saldo_color}${rem:.2}{RESET}"
+                            );
+                            let right = if rem <= 0.0 {
+                                format!("{BOLD}{CORAL}[AGOTADO]{RESET} {TEXT_DIM}[editar]{RESET}")
+                            } else if avg_cost > 0.0 && width >= 42 {
+                                let count = (rem / avg_cost).round() as u64;
+                                let count_str = if count >= 1000 {
+                                    format!("~{:.1}k", count as f64 / 1000.0)
+                                } else {
+                                    format!("~{count}")
+                                };
+                                format!("{TEXT_DIM}{count_str} reqs{RESET} {TEXT_DIM}[editar]{RESET}")
+                            } else {
+                                format!("{TEXT_DIM}disp{RESET} {TEXT_DIM}[editar]{RESET}")
+                            };
+                            lines.push(draw_row(&left, &right, width));
+                        } else {
+                            let pfx_w = if width < 42 { 6 } else { 8 };
+                            let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
+                            let left = format!("{TEXT_MUTED}\u{25cf}{RESET} {TEXT_MUTED}{p_label}{RESET}");
+                            let right = format!("{MINT}[definir saldo]{RESET}");
+                            lines.push(draw_row(&left, &right, width));
+                        }
+                        bounds.push(CardBounds {
+                            id: "edit_balance",
+                            start_line: saldo_row_idx,
+                            end_line: saldo_row_idx,
+                            action_type: Some("edit_balance"),
+                            action_path: Some(acc.prefix.clone()),
+                        });
+
+                        // 3. Fila de Facturación oficial con [ver ->]
+                        let portal_row_idx = lines.len();
+                        let billing_url = crate::quotas::cliproxy::provider_billing_url(&acc.prefix);
+                        let portal_left = if width < 40 {
+                            format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n{RESET}")
+                        } else {
+                            format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n oficial{RESET}")
+                        };
+                        let portal_right = format!("{MINT}[ver ->]{RESET}");
+                        lines.push(draw_row(&portal_left, &portal_right, width));
+                        bounds.push(CardBounds {
+                            id: "open_billing_url",
+                            start_line: portal_row_idx,
+                            end_line: portal_row_idx,
+                            action_type: Some("open_billing_url"),
+                            action_path: Some(billing_url.to_string()),
+                        });
                     } else {
-                        format!(
-                            "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
-                            p.pace, p.reset
-                        )
-                    };
-                    lines.push(draw_row(&left, &right, width));
+                        for p in &acc.pools {
+                            let pool_color = if p.percent <= 15 {
+                                CORAL
+                            } else if p.percent <= 50 {
+                                AMBER
+                            } else {
+                                MINT
+                            };
+
+                            let bar_len = if width < 42 { 3 } else { 6 };
+                            let bar = render_gauge_inline(p.percent, bar_len, pool_color);
+                            let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
+                            let pfx_w = if width < 42 { 8 } else { 12 };
+                            let p_label = format!("{:<width$}", p.label, width = pfx_w);
+                            let left = format!(
+                                "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
+                            );
+                            let right = if width < 40 {
+                                format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+                            } else {
+                                format!(
+                                    "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                                    p.pace, p.reset
+                                )
+                            };
+                            lines.push(draw_row(&left, &right, width));
+                        }
+                    }
                 }
             }
         }
-    }
         lines.push(draw_bottom(width));
         bounds.push(CardBounds {
             id: "pools",

@@ -65,10 +65,20 @@
   - Keybindings: `5` toggles collapse, `x` triggers orchestrator migration, `d` triggers confined idle session liberation.
 
 ## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)
-- **Header:** `Cuota de Modelos · <active_acc_prefix> *` (scoped to `snap.agent_session.local_prefix`, fallback to first account).
-- **Pool rows:**
-  - For OAuth accounts (Antigravity): renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `Argon`, `GPT`, `DeepSeek`, `Qwen` pools) with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`).
-  - For API key and subscription accounts (Claude, Codex): renders truthful financial/session pools (`<Provider> API` or `Codex <Plan>` with active session cost `$X.XXX` and `<Provider> Saldo` with remaining balance `$XX.XX`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
+- **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped to active orchestrator, fallback to `<active_acc_prefix> *` or first account).
+- **Orchestrator Fleet Breakdown (Opción B: Fila individual por subagente):**
+  - Identifies the active orchestrator from Card 4 `Orquestadores` (`Working` -> `Idle` -> `is_default` -> first profile).
+  - Inspects all subagents and orchestrator models configured for that orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`).
+  - Renders a dedicated individual row for the sovereign orchestrator plus an individual row for every configured subagent (e.g. `worker`, `fix`, `explore`, `verify`, `judge-a`, `judge-b`, `review-risk`, `review-read`, `review-rel`, `review-res`, `deep-rsch`, `news-rsch`, `ui-design`), guaranteeing 100% absolute traceability of every subagent's quota and execution state.
+  - Runtime visual activity glyphs:
+    - `>` in accent color (`ACCENT_SECONDARY`) + bright bold text (`BOLD TEXT_PRIMARY`) for the active working model/agent (`Working`).
+    - `●` in purple (`MAGENTA`) + white text (`TEXT_PRIMARY`) for passive components that recently finished working / were used in the session (`all_active_prefixes`) or are in idle panes.
+    - `○` in gray (`TEXT_DIM`) + gray text (`TEXT_MUTED`) for inactive / unused components in this session.
+  - Quota and Balance Projections:
+    - For OAuth accounts (Antigravity): evaluates the sovereign/target pool for that model with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`) with inline gauge and `%` remaining.
+    - For API key and subscription accounts (Claude, Codex): renders session cost or balance remaining (`$XX.XX disp` / `$X.XX sesión`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
+  - Interactive balance editing: Allows in-place balance editing for active API key accounts (`[editar saldo]` / key `b`).
+  - Legacy fallback: When no orchestrator profiles are discovered (e.g. tests or isolated environments), gracefully falls back to single-account pool breakdown.
 
 ## 6. `Cambios` (`id: "git"`, index `6`)
 - **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).

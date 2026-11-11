@@ -198,6 +198,15 @@ pub enum OrchestratorStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct SubAgentProfile {
+    pub role: String,             // e.g. "worker", "explore", "verify", "jd-judge-a", "review-risk"
+    pub model: String,            // e.g. "agy2/gemini-3.8-flash-high"
+    pub model_short: String,      // e.g. "gemini-3.8-flash-high"
+    pub prefix: Option<String>,   // e.g. "agy2"
+    pub thinking: Option<String>, // e.g. "high", "medium"
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OrchestratorProfile {
     pub name: String,             // e.g. "fleet-codex", "fleet-tavo", "fleet-gianni"
     pub model: String,            // e.g. "gpt-5.6-sol", "tavoclaude/claude-opus-5-5"
@@ -209,6 +218,8 @@ pub struct OrchestratorProfile {
     pub is_critical: bool, // Evaluado estrictamente con el modelo soberano del orquestador
     pub is_warning: bool,
     pub rem_pct: u8,
+    #[serde(default)]
+    pub subagents: Vec<SubAgentProfile>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
