@@ -11,8 +11,8 @@ mod prefix;
 mod session;
 
 pub use model_info::{
-    clean_model_name, clean_opencode_terminal_title, is_opencode_terminal_title,
-    resolve_model_context_limit,
+    clean_model_name, clean_opencode_terminal_title, estimate_tokens_cost,
+    extract_model_name_from_val, is_opencode_terminal_title, resolve_model_context_limit,
 };
 pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
 pub use session::{
@@ -34,6 +34,8 @@ struct MessageStatsCacheEntry {
     tokens_input: Option<i64>,
     tokens_output: Option<i64>,
     cost: Option<f64>,
+    last_turn_cost: f64,
+    turn_count: usize,
     tool_total: usize,
     tool_reads: usize,
     tool_writes: usize,
@@ -286,6 +288,8 @@ fn collect_message_stats(
         if let Some(c) = cached.cost {
             session.cost = c;
         }
+        session.last_turn_cost = cached.last_turn_cost;
+        session.turn_count = cached.turn_count;
         session.tool_total = cached.tool_total;
         session.tool_reads = cached.tool_reads;
         session.tool_writes = cached.tool_writes;
@@ -300,9 +304,13 @@ fn collect_message_stats(
     let mut msg_tokens_in: i64 = 0;
     let mut msg_tokens_out: i64 = 0;
     let mut msg_cost: f64 = 0.0;
+    let mut msg_turns: usize = 0;
+    let mut msg_last_cost: Option<f64> = None;
     let mut part_tokens_in: i64 = 0;
     let mut part_tokens_out: i64 = 0;
     let mut part_cost: f64 = 0.0;
+    let mut part_turns: usize = 0;
+    let mut part_last_cost: Option<f64> = None;
 
     let (msg_table, part_table) = paired_message_and_part_tables(conn, session_table);
 
@@ -351,17 +359,45 @@ fn collect_message_stats(
                     found_active_tokens = true;
                 }
 
+                let mut turn_cost = val.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let mut turn_in = 0;
+                let mut turn_out = 0;
+                let mut turn_cr = 0;
+                let mut turn_cw = 0;
+
                 if let Some(tok_obj) = val.get("tokens").or_else(|| val.get("usage")) {
-                    msg_tokens_in += tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
-                    msg_tokens_out += tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
+                    turn_in = tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+                    turn_out = tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
                         + tok_obj
                             .get("reasoning")
                             .and_then(|v| v.as_i64())
                             .unwrap_or(0);
+                    turn_cr = tok_obj
+                        .get("cache")
+                        .and_then(|c| c.get("read"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    turn_cw = tok_obj
+                        .get("cache")
+                        .and_then(|c| c.get("write"))
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+
+                    msg_tokens_in += turn_in;
+                    msg_tokens_out += turn_out;
                 }
-                if let Some(c) = val.get("cost").and_then(|v| v.as_f64()) {
-                    msg_cost += c;
+                msg_turns += 1;
+
+                if turn_cost <= 0.0 && (turn_in > 0 || turn_out > 0 || turn_cr > 0 || turn_cw > 0) {
+                    let msg_model = extract_model_name_from_val(&val)
+                        .unwrap_or_else(|| session.model.clone());
+                    turn_cost = estimate_tokens_cost(&msg_model, turn_in, turn_out, turn_cr, turn_cw);
                 }
+
+                if msg_last_cost.is_none() && turn_cost > 0.0 {
+                    msg_last_cost = Some(turn_cost);
+                }
+                msg_cost += turn_cost;
 
                 // Uso de herramientas en contenido estructurado
                 if let Some(content_arr) = val.get("content").and_then(|c| c.as_array()) {
@@ -454,19 +490,45 @@ fn collect_message_stats(
                         session.active_turn_tokens = toks;
                         found_active_tokens = true;
                     }
+                    let mut turn_cost = val.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let mut turn_in = 0;
+                    let mut turn_out = 0;
+                    let mut turn_cr = 0;
+                    let mut turn_cw = 0;
+
                     if let Some(tok_obj) = val.get("tokens").or_else(|| val.get("usage")) {
-                        part_tokens_in +=
-                            tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
-                        part_tokens_out +=
-                            tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
-                                + tok_obj
-                                    .get("reasoning")
-                                    .and_then(|v| v.as_i64())
-                                    .unwrap_or(0);
+                        turn_in = tok_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
+                        turn_out = tok_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0)
+                            + tok_obj
+                                .get("reasoning")
+                                .and_then(|v| v.as_i64())
+                                .unwrap_or(0);
+                        turn_cr = tok_obj
+                            .get("cache")
+                            .and_then(|c| c.get("read"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+                        turn_cw = tok_obj
+                            .get("cache")
+                            .and_then(|c| c.get("write"))
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0);
+
+                        part_tokens_in += turn_in;
+                        part_tokens_out += turn_out;
                     }
-                    if let Some(c) = val.get("cost").and_then(|v| v.as_f64()) {
-                        part_cost += c;
+                    part_turns += 1;
+
+                    if turn_cost <= 0.0 && (turn_in > 0 || turn_out > 0 || turn_cr > 0 || turn_cw > 0) {
+                        let part_model = extract_model_name_from_val(&val)
+                            .unwrap_or_else(|| session.model.clone());
+                        turn_cost = estimate_tokens_cost(&part_model, turn_in, turn_out, turn_cr, turn_cw);
                     }
+
+                    if part_last_cost.is_none() && turn_cost > 0.0 {
+                        part_last_cost = Some(turn_cost);
+                    }
+                    part_cost += turn_cost;
                 }
 
                 if effective_type == "tool"
@@ -486,7 +548,7 @@ fn collect_message_stats(
         }
     }
 
-    // 3. Hidratar acumulado de sesión y costo si la tabla `session` no tenía columnas dedicadas
+    // 3. Hidratar acumulado de sesión y costo si la tabla `session` no tenía columnas dedicadas o cost era 0.0
     let mut cached_ti = None;
     let mut cached_to = None;
     let mut cached_cost = None;
@@ -503,12 +565,35 @@ fn collect_message_stats(
             cached_to = Some(to);
         }
     }
+
     if session.cost == 0.0 {
         let resolved_cost = if msg_cost > 0.0 { msg_cost } else { part_cost };
         if resolved_cost > 0.0 {
             session.cost = resolved_cost;
             cached_cost = Some(resolved_cost);
+        } else if session.tokens_input > 0 || session.tokens_output > 0 {
+            let fallback_cost =
+                estimate_tokens_cost(&session.model, session.tokens_input, session.tokens_output, 0, 0);
+            if fallback_cost > 0.0 {
+                session.cost = fallback_cost;
+                cached_cost = Some(fallback_cost);
+            }
         }
+    }
+
+    session.turn_count = if msg_turns > 0 {
+        msg_turns
+    } else if part_turns > 0 {
+        part_turns
+    } else if session.tokens_input > 0 || session.tokens_output > 0 {
+        1
+    } else {
+        0
+    };
+
+    session.last_turn_cost = msg_last_cost.or(part_last_cost).unwrap_or(0.0);
+    if session.last_turn_cost == 0.0 && session.turn_count > 0 && session.cost > 0.0 {
+        session.last_turn_cost = session.cost / (session.turn_count as f64);
     }
 
     // 4. Fallback de tokens de turno: si las tablas de mensajes/partes no proveyeron el desglose,
@@ -536,6 +621,8 @@ fn collect_message_stats(
                 tokens_input: cached_ti,
                 tokens_output: cached_to,
                 cost: cached_cost,
+                last_turn_cost: session.last_turn_cost,
+                turn_count: session.turn_count,
                 tool_total: session.tool_total,
                 tool_reads: session.tool_reads,
                 tool_writes: session.tool_writes,

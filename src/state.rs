@@ -4,11 +4,12 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const CARD_KEYS: [&str; 11] = [
+pub const CARD_KEYS: [&str; 12] = [
     "estado",
     "contexto",
     "proyecto",
     "integraciones",
+    "orquestadores",
     "pools",
     "git",
     "engram",
@@ -18,17 +19,18 @@ pub const CARD_KEYS: [&str; 11] = [
     "personalizar",
 ];
 
-pub const DEFAULT_COLLAPSED: [bool; 11] = [
-    false, false, true, false, false, false, false, false, false, false, true,
+pub const DEFAULT_COLLAPSED: [bool; 12] = [
+    false, false, true, false, false, false, false, false, false, false, false, true,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigData {
-    pub collapsed: [bool; 11],
+    pub collapsed: [bool; 12],
     pub hidden: HashSet<String>,
     pub theme: Option<String>,
     pub sidebar_name: Option<String>,
     pub check_updates: bool,
+    pub account_budgets: std::collections::HashMap<String, f64>,
 }
 
 /// Carga la configuración (tarjetas colapsadas y ocultas, tema y nombre de sidebar) desde un archivo JSON.
@@ -40,6 +42,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             theme: None,
             sidebar_name: None,
             check_updates: true,
+            account_budgets: std::collections::HashMap::new(),
         };
     };
     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
@@ -49,12 +52,13 @@ pub fn load_config(path: &Path) -> ConfigData {
             theme: None,
             sidebar_name: None,
             check_updates: true,
+            account_budgets: std::collections::HashMap::new(),
         };
     };
 
     let mut collapsed = DEFAULT_COLLAPSED;
     if let Some(arr) = v.get("collapsed").and_then(Value::as_array) {
-        collapsed = [false; 11];
+        collapsed = [false; 12];
         for item in arr.iter().filter_map(Value::as_str) {
             let normalized = if item == "tarjetas" { "personalizar" } else { item };
             if let Some(idx) = CARD_KEYS.iter().position(|&k| k == normalized) {
@@ -92,19 +96,29 @@ pub fn load_config(path: &Path) -> ConfigData {
         .and_then(Value::as_bool)
         .unwrap_or(true);
 
+    let mut account_budgets = std::collections::HashMap::new();
+    if let Some(map) = v.get("account_budgets").and_then(Value::as_object) {
+        for (k, val) in map {
+            if let Some(num) = val.as_f64() {
+                account_budgets.insert(k.clone(), num);
+            }
+        }
+    }
+
     ConfigData {
         collapsed,
         hidden,
         theme,
         sidebar_name,
         check_updates,
+        account_budgets,
     }
 }
 
 /// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre y updates.
 pub fn save_config(
     path: &Path,
-    collapsed: &[bool; 11],
+    collapsed: &[bool; 12],
     hidden: &HashSet<String>,
     theme: Option<&str>,
     sidebar_name: Option<&str>,
@@ -120,17 +134,63 @@ pub fn save_config(
         .copied()
         .filter(|&k| k != "tarjetas" && hidden.contains(k))
         .collect();
-    let mut payload = json!({
-        "collapsed": collapsed_names,
-        "hidden": hidden_names,
-        "check_updates": check_updates,
-    });
+
+    let mut payload = if let Ok(existing_bytes) = std::fs::read(path)
+        && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&existing_bytes)
+    {
+        Value::Object(map)
+    } else {
+        json!({})
+    };
+
+    payload["collapsed"] = json!(collapsed_names);
+    payload["hidden"] = json!(hidden_names);
+    payload["check_updates"] = json!(check_updates);
     if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
         payload["theme"] = json!(t);
     }
     if let Some(n) = sidebar_name.filter(|s| !s.trim().is_empty()) {
         payload["sidebar_name"] = json!(n);
     }
+    let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
+    crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
+}
+
+/// Guarda de forma atómica el saldo prepago/presupuesto de una cuenta en `hudr2.json`,
+/// asociándolo a la línea base de costo y sesión actual para evitar restar consumo histórico.
+pub fn save_account_budget(
+    path: &Path,
+    prefix: &str,
+    amount: Option<f64>,
+    baseline_cost: f64,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let mut payload = if let Ok(existing_bytes) = std::fs::read(path)
+        && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&existing_bytes)
+    {
+        Value::Object(map)
+    } else {
+        json!({})
+    };
+
+    let mut budgets_map = payload
+        .get("account_budgets")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    if let Some(amt) = amount {
+        let entry = json!({
+            "budget": amt,
+            "baseline_cost": baseline_cost,
+            "session_id": session_id,
+        });
+        budgets_map.insert(prefix.to_string(), entry);
+    } else {
+        budgets_map.remove(prefix);
+    }
+
+    payload["account_budgets"] = Value::Object(budgets_map);
     let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
     crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
 }
@@ -145,7 +205,7 @@ pub struct QuickPeekState {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub snapshot: TelemetrySnapshot,
-    pub collapsed_cards: [bool; 11],
+    pub collapsed_cards: [bool; 12],
     pub hidden_cards: HashSet<String>,
     pub scroll_offset: usize,
     pub card_bounds: Vec<CardBounds>,
@@ -161,6 +221,9 @@ pub struct AppState {
     pub is_editing_sidebar_name: bool,
     pub name_input_buffer: String,
     pub check_updates: bool,
+    pub is_editing_balance: bool,
+    pub editing_balance_prefix: Option<String>,
+    pub balance_input_buffer: String,
     pub last_click_instant: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
 }
@@ -195,6 +258,9 @@ impl AppState {
             is_editing_sidebar_name: false,
             name_input_buffer: String::new(),
             check_updates: true,
+            is_editing_balance: false,
+            editing_balance_prefix: None,
+            balance_input_buffer: String::new(),
             last_click_instant: None,
             last_click_row: None,
         }
@@ -324,6 +390,66 @@ impl AppState {
         self.snapshot.is_editing_name = false;
         self.snapshot.name_input_buffer.clear();
         self.set_flash_notice(Some("Edición de nombre cancelada".to_string()), 2000);
+        self.needs_redraw = true;
+    }
+
+    pub fn start_edit_balance(&mut self, prefix: &str) {
+        self.is_editing_balance = true;
+        self.editing_balance_prefix = Some(prefix.to_string());
+        let current_budget = crate::quotas::cliproxy::get_user_configured_budget(prefix);
+        self.balance_input_buffer = current_budget
+            .map(|b| format!("{b:.2}"))
+            .unwrap_or_default();
+        self.snapshot.is_editing_balance = true;
+        self.snapshot.editing_balance_prefix = Some(prefix.to_string());
+        self.snapshot.balance_input_buffer = self.balance_input_buffer.clone();
+        self.needs_redraw = true;
+    }
+
+    pub fn update_balance_input_buffer(&mut self, new_buffer: String) {
+        self.balance_input_buffer = new_buffer;
+        self.snapshot.balance_input_buffer = self.balance_input_buffer.clone();
+        self.needs_redraw = true;
+    }
+
+    pub fn commit_balance(&mut self) {
+        if let Some(ref pfx) = self.editing_balance_prefix.clone() {
+            let clean = self.balance_input_buffer.trim().trim_start_matches('$');
+            let parsed = clean.parse::<f64>().ok().filter(|&v| v > 0.0);
+            let cfg_path = crate::paths::resolve_hudr2_config_path();
+            let current_cost = self.snapshot.agent_session.cost;
+            let current_sid = self.snapshot.agent_session.session_id.clone();
+            let _ = save_account_budget(&cfg_path, pfx, parsed, current_cost, current_sid);
+
+            if let Some(val) = parsed {
+                self.set_flash_notice(
+                    Some(format!("Saldo para {pfx}: ${val:.2}")),
+                    3000,
+                );
+            } else {
+                self.set_flash_notice(
+                    Some(format!("Saldo restablecido para {pfx}")),
+                    3000,
+                );
+            }
+        }
+        self.is_editing_balance = false;
+        self.editing_balance_prefix = None;
+        self.balance_input_buffer.clear();
+        self.snapshot.is_editing_balance = false;
+        self.snapshot.editing_balance_prefix = None;
+        self.snapshot.balance_input_buffer.clear();
+        self.needs_redraw = true;
+    }
+
+    pub fn cancel_edit_balance(&mut self) {
+        self.is_editing_balance = false;
+        self.editing_balance_prefix = None;
+        self.balance_input_buffer.clear();
+        self.snapshot.is_editing_balance = false;
+        self.snapshot.editing_balance_prefix = None;
+        self.snapshot.balance_input_buffer.clear();
+        self.set_flash_notice(Some("Edición de saldo cancelada".to_string()), 2000);
         self.needs_redraw = true;
     }
 
@@ -543,6 +669,15 @@ impl AppState {
                 && let Some(p) = action_path
             {
                 return Some(ClickAction::UpdateTool(p));
+            } else if action == "edit_balance"
+                && let Some(p) = action_path
+            {
+                self.start_edit_balance(&p);
+                return Some(ClickAction::StartEditBalance(p));
+            } else if action == "open_billing_url"
+                && let Some(url) = action_path
+            {
+                return Some(ClickAction::OpenBillingUrl(url));
             }
         }
 
@@ -593,4 +728,6 @@ pub enum ClickAction {
     StartEditSidebarName,
     ToggleCheckUpdates(bool),
     UpdateTool(String),
+    StartEditBalance(String),
+    OpenBillingUrl(String),
 }

@@ -42,6 +42,7 @@ impl DbSessionRecord {
 
     /// Copia agente, modelo (y su límite de contexto), tokens y costo al resumen de sesión.
     pub(super) fn apply_to(&self, session: &mut AgentSession) {
+        session.session_id = Some(self.id.clone());
         if let Some(ref a) = self.agent {
             if !a.trim().is_empty() {
                 session.agent = a.clone();

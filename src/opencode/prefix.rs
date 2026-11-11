@@ -160,13 +160,16 @@ fn extract_model_prefix_candidate(clean_model: &str) -> Option<String> {
 pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> Option<String> {
     // 1. Del agente (ej: orchestrator-cuenta1, apply-dev, gentle-orchestrator-acc2)
     if !agent.is_empty() {
-        if let Some(candidate) = extract_agent_candidate(agent)
-            && (sorted_prefixes.is_empty()
-                || sorted_prefixes
-                    .iter()
-                    .any(|p| p.to_lowercase() == candidate))
-        {
-            return Some(candidate);
+        if let Some(candidate) = extract_agent_candidate(agent) {
+            if sorted_prefixes.is_empty() {
+                return Some(candidate);
+            }
+            if let Some(matched) = sorted_prefixes.iter().find(|p| {
+                let pl = p.to_ascii_lowercase();
+                pl == candidate || pl.ends_with(&candidate)
+            }) {
+                return Some(matched.to_ascii_lowercase());
+            }
         }
 
         let lower_agent = agent.to_lowercase();
@@ -181,6 +184,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
                 || lower_agent.ends_with(&pat_under)
                 || lower_agent.contains(&pat_paren)
                 || lower_agent.contains(&pat_bracket)
+                || (p_low.ends_with("codex") && lower_agent.contains("codex"))
             {
                 return Some(p_low);
             }
@@ -244,6 +248,7 @@ pub fn extract_prefix(agent: &str, model: &str, sorted_prefixes: &[String]) -> O
                 || clean_model.ends_with(&format!(" {p_low}"))
                 || clean_model.ends_with(&format!("({p_low})"))
                 || clean_model.ends_with(&format!("[{p_low}]"))
+                || (p_low.ends_with("codex") && clean_model.contains("[codex]"))
             {
                 return Some(p_low);
             }

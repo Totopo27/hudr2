@@ -184,6 +184,16 @@ pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Op
 
     let mut stale_keys = Vec::new();
     for acc in accounts.iter_mut() {
+        if is_api_key(acc) {
+            let key = acc.prefix.to_lowercase();
+            if guard.entries.remove(&key).is_some()
+                && let Some(cp) = cache_path
+            {
+                persist_disk_cache(&mut guard, cp);
+            }
+            continue;
+        }
+
         let key = acc.prefix.to_lowercase();
         let Some(rec) = guard.entries.get(&key).cloned() else {
             continue;
@@ -343,9 +353,17 @@ pub fn is_unfetched(acc: &AccountQuota) -> bool {
     !is_api_key(acc) && !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
 }
 
-/// Comprueba si una cuenta corresponde a un perfil configurado vía API Key
+/// Comprueba si una cuenta corresponde a una suscripción o autenticación OAuth de OpenAI Codex
+pub fn is_codex_account(acc: &AccountQuota) -> bool {
+    acc.prefix.to_lowercase().contains("codex")
+        || acc.auth_file.to_lowercase().contains("codex")
+        || matches!(acc.reset_5h.as_str(), "plus" | "pro" | "team" | "free" | "codex")
+}
+
+/// Comprueba si una cuenta corresponde a un perfil configurado vía API Key o suscripción financiera/balance (Codex)
 pub fn is_api_key(acc: &AccountQuota) -> bool {
     acc.reset_5h == "api-key"
+        || is_codex_account(acc)
         || acc.auth_file.contains('#')
         || acc.auth_file.contains("config.yaml")
         || acc.auth_file.contains("config.yml")
@@ -559,40 +577,126 @@ pub fn is_available_for(target_dir: &str) -> bool {
     false
 }
 
-pub const DEFAULT_API_KEY_BUDGET: f64 = 50.0;
-
-/// Resuelve el límite de presupuesto prepagado en dólares para una cuenta API Key.
-/// Lee `hudr2.json` si existe (`account_budgets.<prefix>` o `api_key_budget`) o usa el valor predeterminado de $50.00.
-pub fn resolve_api_key_budget(prefix: &str) -> f64 {
+/// Obtiene el balance inicial o presupuesto definido por el usuario para una cuenta API Key.
+/// Retorna `None` si el usuario aún no ha configurado ningún saldo para esta cuenta.
+pub fn get_user_configured_budget(prefix: &str) -> Option<f64> {
     let cfg_path = crate::paths::resolve_hudr2_config_path();
     if cfg_path.exists()
         && let Ok(content) = fs::read_to_string(&cfg_path)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
     {
-        if let Some(custom) = v
-            .get("account_budgets")
-            .and_then(|ab| ab.get(prefix))
-            .and_then(|b| b.as_f64())
-        {
-            return custom;
+        if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
+            if let Some(b) = custom.as_f64() {
+                return Some(b);
+            }
+            if let Some(b) = custom.get("budget").and_then(|b| b.as_f64()) {
+                return Some(b);
+            }
         }
         if let Some(global) = v.get("api_key_budget").and_then(|b| b.as_f64()) {
-            return global;
+            return Some(global);
         }
     }
-    DEFAULT_API_KEY_BUDGET
+    None
+}
+
+/// Devuelve la URL oficial de facturación y consulta de saldo según el proveedor o prefijo.
+pub fn provider_billing_url(provider_or_prefix: &str) -> &'static str {
+    let lower = provider_or_prefix.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        "https://platform.claude.com/spending"
+    } else if lower.contains("deepseek") {
+        "https://platform.deepseek.com/top_up"
+    } else if lower.contains("gemini") || lower.contains("google") || lower.contains("aistudio") {
+        "https://aistudio.google.com/"
+    } else if lower.contains("opencode") || lower.contains("zen") {
+        "https://opencode.ai/zen"
+    } else if lower.contains("kimi") || lower.contains("moonshot") {
+        "https://platform.moonshot.cn/console/pay"
+    } else if lower.contains("codex") {
+        "https://chatgpt.com/#settings/Subscription"
+    } else if lower.contains("openai") || lower.contains("gpt") {
+        "https://platform.openai.com/settings/organization/billing/overview"
+    } else if lower.contains("openrouter") {
+        "https://openrouter.ai/credits"
+    } else if lower.contains("groq") {
+        "https://console.groq.com/settings/billing"
+    } else if lower.contains("together") {
+        "https://api.together.ai/settings/billing"
+    } else if lower.contains("mistral") {
+        "https://console.mistral.ai/billing/"
+    } else if lower.contains("perplexity") || lower.contains("pplx") {
+        "https://www.perplexity.ai/settings/api"
+    } else if lower.contains("cerebras") {
+        "https://cloud.cerebras.ai/"
+    } else if lower.contains("fireworks") {
+        "https://fireworks.ai/account/billing"
+    } else if lower.contains("xai") || lower.contains("grok") {
+        "https://console.x.ai/"
+    } else if lower.contains("cohere") {
+        "https://dashboard.cohere.com/billing"
+    } else {
+        "https://platform.claude.com/spending"
+    }
 }
 
 /// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.
-pub fn calculate_api_key_balance(prefix: &str, session_cost: f64) -> (f64, f64, u8) {
-    let budget = resolve_api_key_budget(prefix);
-    let rem_balance = (budget - session_cost).max(0.0);
-    let rem_pct = if budget > 0.0 {
-        ((rem_balance / budget) * 100.0).clamp(0.0, 100.0) as u8
-    } else {
-        0
-    };
-    (budget, rem_balance, rem_pct)
+/// Si el usuario configuró el saldo con línea base, solo descuenta el costo incurrido
+/// desde ese momento en la sesión, protegiendo el saldo de consumos históricos previos.
+/// Retorna: `(budget, rem_balance, rem_pct, cost_since_set)`
+pub fn calculate_api_key_balance(
+    prefix: &str,
+    session_cost: f64,
+    session_id: Option<&str>,
+) -> (Option<f64>, Option<f64>, u8, f64) {
+    let cfg_path = crate::paths::resolve_hudr2_config_path();
+    if cfg_path.exists()
+        && let Ok(content) = fs::read_to_string(&cfg_path)
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+    {
+        if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
+            let (budget, baseline, saved_sid) = if let Some(b) = custom.as_f64() {
+                (b, 0.0, None)
+            } else if let Some(b) = custom.get("budget").and_then(|v| v.as_f64()) {
+                let base = custom.get("baseline_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let sid = custom.get("session_id").and_then(|v| v.as_str());
+                (b, base, sid)
+            } else {
+                return (None, None, 100, 0.0);
+            };
+
+            let same_session = match (saved_sid, session_id) {
+                (Some(s1), Some(s2)) => s1 == s2,
+                _ => true,
+            };
+
+            let cost_since_set = if same_session {
+                (session_cost - baseline).max(0.0)
+            } else {
+                session_cost.max(0.0)
+            };
+
+            let rem_balance = (budget - cost_since_set).max(0.0);
+            let rem_pct = if budget > 0.0 {
+                ((rem_balance / budget) * 100.0).clamp(0.0, 100.0) as u8
+            } else {
+                0
+            };
+            return (Some(budget), Some(rem_balance), rem_pct, cost_since_set);
+        }
+
+        if let Some(global) = v.get("api_key_budget").and_then(|b| b.as_f64()) {
+            let rem_balance = (global - session_cost).max(0.0);
+            let rem_pct = if global > 0.0 {
+                ((rem_balance / global) * 100.0).clamp(0.0, 100.0) as u8
+            } else {
+                0
+            };
+            return (Some(global), Some(rem_balance), rem_pct, session_cost);
+        }
+    }
+
+    (None, None, 100, 0.0)
 }
 
 fn register_or_update_api_key_account(
@@ -601,7 +705,11 @@ fn register_or_update_api_key_account(
     provider: &str,
     auth_file_str: &str,
 ) {
-    let budget = resolve_api_key_budget(prefix);
+    let user_budget = get_user_configured_budget(prefix);
+    let saldo_pace = match user_budget {
+        Some(b) => format!("${:.2}", b),
+        None => "[definir saldo]".to_string(),
+    };
     let pools = vec![
         QuotaPool {
             label: format!("{provider} API"),
@@ -613,7 +721,7 @@ fn register_or_update_api_key_account(
             label: format!("{provider} Saldo"),
             percent: 100,
             reset: "api-key".to_string(),
-            pace: format!("${:.2}", budget),
+            pace: saldo_pace,
         },
     ];
 
@@ -673,12 +781,28 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     .or_else(|| raw_stem.strip_prefix("oauth-"))
                     .unwrap_or(raw_stem);
 
+                let cred_type = val
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let is_codex = cred_type.eq_ignore_ascii_case("codex")
+                    || raw_stem.to_ascii_lowercase().starts_with("codex")
+                    || raw_stem.to_ascii_lowercase().ends_with("codex");
+
                 let prefix = val
                     .get("prefix")
                     .and_then(|p| p.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
-                        if !clean_stem.is_empty() {
+                        if is_codex {
+                            let mut cand = "codex".to_string();
+                            let mut idx = 2;
+                            while seen_prefixes.contains(&cand.to_lowercase()) {
+                                cand = format!("codex{idx}");
+                                idx += 1;
+                            }
+                            cand
+                        } else if !clean_stem.is_empty() {
                             clean_stem.to_string()
                         } else if !email.is_empty() {
                             email.split('@').next().unwrap_or("acc").to_string()
@@ -690,6 +814,95 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                 let path_str = path.to_string_lossy().to_string();
                 seen_files.insert(path_str.clone());
                 seen_prefixes.insert(prefix.to_lowercase());
+
+                if is_codex {
+                    let plan = val
+                        .get("plan_type")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("plus");
+                    let badge = if plan.is_empty() {
+                        "codex".to_string()
+                    } else {
+                        plan.to_lowercase()
+                    };
+                    let plan_display = match badge.as_str() {
+                        "plus" => "Plus",
+                        "pro" => "Pro",
+                        "team" => "Team",
+                        "free" => "Free",
+                        _ => "Plus",
+                    };
+                    let user_budget = get_user_configured_budget(&prefix);
+                    let saldo_pace = match user_budget {
+                        Some(b) => format!("${:.2}", b),
+                        None => "[definir saldo]".to_string(),
+                    };
+                    let pools = vec![
+                        QuotaPool {
+                            label: format!("Codex {plan_display}"),
+                            percent: 100,
+                            reset: badge.clone(),
+                            pace: "$0.000".to_string(),
+                        },
+                        QuotaPool {
+                            label: "Codex Saldo".to_string(),
+                            percent: 100,
+                            reset: badge.clone(),
+                            pace: saldo_pace,
+                        },
+                    ];
+
+                    let is_disabled = val
+                        .get("disabled")
+                        .and_then(|d| d.as_bool())
+                        .unwrap_or(false);
+                    let is_expired = val
+                        .get("expired")
+                        .and_then(|e| e.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.timestamp() < chrono::Utc::now().timestamp())
+                        .unwrap_or(false);
+
+                    let (has_error, error_msg) = if is_disabled {
+                        (true, "deshabilitado".to_string())
+                    } else if is_expired {
+                        (true, "expirado".to_string())
+                    } else {
+                        (false, String::new())
+                    };
+
+                    if let Some(existing) = target_list
+                        .iter_mut()
+                        .find(|a| a.auth_file == path_str || a.prefix.eq_ignore_ascii_case(&prefix))
+                    {
+                        existing.prefix = prefix;
+                        existing.auth_file = path_str;
+                        existing.reset_5h = badge.clone();
+                        existing.reset_wk = badge;
+                        existing.has_error = has_error;
+                        existing.error_msg = error_msg;
+                        if existing.pools.is_empty()
+                            || existing.pools[0].label.starts_with("Gemini")
+                        {
+                            existing.pools = pools;
+                        }
+                    } else {
+                        target_list.push(AccountQuota {
+                            prefix,
+                            auth_file: path_str,
+                            rem_5h: 100,
+                            reset_5h: badge.clone(),
+                            rem_wk: 100,
+                            reset_wk: badge,
+                            is_critical: false,
+                            is_warning: false,
+                            has_error,
+                            error_msg,
+                            pools,
+                        });
+                    }
+                    continue;
+                }
 
                 if let Some(existing) = target_list
                     .iter_mut()
@@ -840,12 +1053,33 @@ pub async fn fetch_quota_for_account_with_cache(
     cache_path: Option<&Path>,
 ) -> u16 {
     if is_api_key(acc) {
+        if Path::new(&acc.auth_file).exists()
+            && !acc.auth_file.contains('#')
+            && let Ok(content) = fs::read_to_string(&acc.auth_file)
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
+        {
+            if v.get("disabled").and_then(|d| d.as_bool()) == Some(true) {
+                acc.has_error = true;
+                acc.error_msg = "deshabilitado".to_string();
+                return 200;
+            }
+            if let Some(exp_str) = v.get("expired").and_then(|e| e.as_str())
+                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp_str)
+                && dt.timestamp() < chrono::Utc::now().timestamp()
+            {
+                acc.has_error = true;
+                acc.error_msg = "expirado".to_string();
+                return 200;
+            }
+        }
         acc.has_error = false;
         acc.error_msg.clear();
         acc.rem_5h = 100;
         acc.rem_wk = 100;
-        acc.reset_5h = "api-key".to_string();
-        acc.reset_wk = "api-key".to_string();
+        if acc.reset_5h.is_empty() || acc.reset_5h == UNFETCHED_RESET {
+            acc.reset_5h = "api-key".to_string();
+            acc.reset_wk = "api-key".to_string();
+        }
         return 200;
     }
 
@@ -1018,12 +1252,13 @@ pub fn evaluate_account_for_model(
         let rem = acc.rem_5h;
         let is_critical = !acc.has_error && rem <= 8;
         let is_warning = !acc.has_error && (rem > 8 && rem <= 20);
-        let family = resolve_model_family(active_model).unwrap_or("Claude");
+        let family = resolve_model_family(active_model)
+            .unwrap_or(if is_codex_account(acc) { "GPT" } else { "Claude" });
         return EffectiveAccountHealth {
             rem_5h: rem,
-            reset_5h: "api-key".to_string(),
+            reset_5h: acc.reset_5h.clone(),
             rem_wk: acc.rem_wk,
-            reset_wk: "api-key".to_string(),
+            reset_wk: acc.reset_wk.clone(),
             is_critical,
             is_warning,
             family,

@@ -630,12 +630,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     state::ClickAction::UpdateTool(tool_name) => {
                                         spawn_tool_update(tool_name, app_state.clone(), tx.clone());
                                     }
+                                    state::ClickAction::OpenBillingUrl(url) => {
+                                        let url_clone = url.clone();
+                                        state.set_flash_notice(
+                                            Some("+ Abriendo portal en navegador...".to_string()),
+                                            2500,
+                                        );
+                                        tokio::task::spawn_blocking(move || {
+                                            app::open_url_in_browser(&url_clone);
+                                        });
+                                    }
                                     state::ClickAction::ToggleGitFileDiff(_)
                                     | state::ClickAction::OpenQuickPeek(_)
                                     | state::ClickAction::CloseQuickPeek
                                     | state::ClickAction::ToggleCardVisibility(_)
                                     | state::ClickAction::CycleTheme(_)
-                                    | state::ClickAction::StartEditSidebarName => {}
+                                    | state::ClickAction::StartEditSidebarName
+                                    | state::ClickAction::StartEditBalance(_) => {}
                                 }
                             }
                         }
@@ -658,7 +669,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             should_quit = true;
                         } else {
                             let mut state = app_state.write().await;
-                            if state.is_editing_sidebar_name {
+                            if state.is_editing_balance {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        state.commit_balance();
+                                        refresh_needed = true;
+                                    }
+                                    KeyCode::Esc => {
+                                        state.cancel_edit_balance();
+                                    }
+                                    KeyCode::Backspace => {
+                                        let mut buf = state.balance_input_buffer.clone();
+                                        buf.pop();
+                                        state.update_balance_input_buffer(buf);
+                                    }
+                                    KeyCode::Char(c)
+                                        if state.balance_input_buffer.chars().count() < 12
+                                            && (c.is_ascii_digit() || c == '.' || c == '$') =>
+                                    {
+                                        let mut buf = state.balance_input_buffer.clone();
+                                        buf.push(c);
+                                        state.update_balance_input_buffer(buf);
+                                    }
+                                    _ => {}
+                                }
+                            } else if state.is_editing_sidebar_name {
                                 match key.code {
                                     KeyCode::Enter => {
                                         state.commit_sidebar_name();
@@ -682,153 +717,192 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     _ => {}
                                 }
                             } else {
-                                match norm_code {
-                                    KeyCode::Char('q') => should_quit = true,
-                                    KeyCode::Char('c') => {
-                                        state.toggle_all_collapse();
-                                        if !state.collapsed_cards[2]
-                                            && state.snapshot.tree.root_path.is_empty()
-                                        {
-                                            refresh_needed = true;
+                                // Seguridad de atajos: Los atajos de una sola tecla (incluyendo 'd: liberar',
+                                // 's: sync', 'r: act', 'q: salir', etc.) NUNCA deben dispararse si el usuario
+                                // presionó modificadores como Ctrl o Alt (ej. Ctrl+D para EOF de shell, Alt+D, etc.).
+                                let has_control_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
+                                    || key.modifiers.contains(KeyModifiers::ALT);
+
+                                if !has_control_or_alt {
+                                    match norm_code {
+                                        KeyCode::Char('q') => should_quit = true,
+                                        KeyCode::Char('c') => {
+                                            state.toggle_all_collapse();
+                                            if !state.collapsed_cards[2]
+                                                && state.snapshot.tree.root_path.is_empty()
+                                            {
+                                                refresh_needed = true;
+                                            }
                                         }
-                                    }
-                                    KeyCode::Char('1') => state.toggle_card(0), // Estado
-                                    KeyCode::Char('2') => state.toggle_card(1), // Contexto
-                                    KeyCode::Char('3') => {
-                                        state.toggle_card(2); // Proyecto
-                                        if !state.collapsed_cards[2]
-                                            && state.snapshot.tree.root_path.is_empty()
-                                        {
-                                            refresh_needed = true;
+                                        KeyCode::Char('1') => state.toggle_card(0), // Estado
+                                        KeyCode::Char('2') => state.toggle_card(1), // Contexto
+                                        KeyCode::Char('3') => {
+                                            state.toggle_card(2); // Proyecto
+                                            if !state.collapsed_cards[2]
+                                                && state.snapshot.tree.root_path.is_empty()
+                                            {
+                                                refresh_needed = true;
+                                            }
                                         }
-                                    }
-                                    KeyCode::Char('4') => state.toggle_card(3), // Integraciones
-                                    KeyCode::Char('5') => state.toggle_card(4), // Cuotas de Modelos
-                                    KeyCode::Char('6') => state.toggle_card(5), // Cambios
-                                    KeyCode::Char('7') => state.toggle_card(6), // Engram
-                                    KeyCode::Char('8') => state.toggle_card(7), // Herramientas
-                                    KeyCode::Char('9') => state.toggle_card(8), // MCP
-                                    KeyCode::Char('e') => state.toggle_card(9), // Stack · Ecosistema
-                                    KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(10), // Personalizar
-                                    KeyCode::Char('n') => {
-                                        state.start_edit_sidebar_name();
-                                    }
-                                    KeyCode::Char('u') => {
-                                        let now_enabled = state.toggle_check_updates();
-                                        let msg = if now_enabled {
-                                            "+ Updates: Chequeo online activado (3h)".to_string()
-                                        } else {
-                                            "+ Updates: Chequeo online apagado".to_string()
-                                        };
-                                        state.set_flash_notice(Some(msg), 2500);
-                                        if now_enabled {
-                                            spawn_upstream_check(app_state.clone(), tx.clone());
+                                        KeyCode::Char('4') => state.toggle_card(3), // Integraciones
+                                        KeyCode::Char('5') => state.toggle_card(4), // Orquestadores
+                                        KeyCode::Char('6') => state.toggle_card(5), // Cuotas de Modelos
+                                        KeyCode::Char('7') => state.toggle_card(6), // Cambios
+                                        KeyCode::Char('8') => state.toggle_card(7), // Engram
+                                        KeyCode::Char('9') => state.toggle_card(8), // Herramientas
+                                        KeyCode::Char('e') => state.toggle_card(10), // Stack · Ecosistema
+                                        KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(11), // Personalizar
+                                        KeyCode::Char('n') => {
+                                            state.start_edit_sidebar_name();
                                         }
+                                        KeyCode::Char('b') => {
+                                            let maybe_target = {
+                                                let default_pfx = state
+                                                    .snapshot
+                                                    .accounts
+                                                    .first()
+                                                    .map(|a| a.prefix.as_str())
+                                                    .unwrap_or("local");
+                                                let active_pfx = state
+                                                    .snapshot
+                                                    .agent_session
+                                                    .local_prefix
+                                                    .as_deref()
+                                                    .unwrap_or(default_pfx);
+                                                let is_api = state
+                                                    .snapshot
+                                                    .accounts
+                                                    .iter()
+                                                    .find(|a| a.prefix.eq_ignore_ascii_case(active_pfx))
+                                                    .map(hudr2::quotas::is_api_key)
+                                                    .unwrap_or(false);
+                                                if is_api {
+                                                    Some(active_pfx.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            };
+                                            if let Some(pfx) = maybe_target {
+                                                state.start_edit_balance(&pfx);
+                                            }
+                                        }
+                                        KeyCode::Char('u') => {
+                                            let now_enabled = state.toggle_check_updates();
+                                            let msg = if now_enabled {
+                                                "+ Updates: Chequeo online activado (3h)".to_string()
+                                            } else {
+                                                "+ Updates: Chequeo online apagado".to_string()
+                                            };
+                                            state.set_flash_notice(Some(msg), 2500);
+                                            if now_enabled {
+                                                spawn_upstream_check(app_state.clone(), tx.clone());
+                                            }
+                                        }
+                                        KeyCode::Char('m') => {
+                                            state.cycle_theme();
+                                        }
+                                        KeyCode::Char('s') => {
+                                            let state_ref = app_state.clone();
+                                            let tx_done = tx.clone();
+                                            tokio::spawn(async move {
+                                                let wake_tx = tx_done.clone();
+                                                let notify_cb = move || {
+                                                    let _ = wake_tx.send(MainMsg::Redraw);
+                                                };
+                                                app::sync_integrations_action_with_notify(
+                                                    &state_ref,
+                                                    Some(&notify_cb),
+                                                )
+                                                .await;
+                                                app::force_refresh_with_notify(
+                                                    &state_ref,
+                                                    false,
+                                                    false,
+                                                    Some(&notify_cb),
+                                                )
+                                                .await;
+                                                let _ = tx_done
+                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                            });
+                                        }
+                                        KeyCode::Char('r') => {
+                                            let state_ref = app_state.clone();
+                                            let tx_done = tx.clone();
+                                            tokio::spawn(async move {
+                                                let wake_tx = tx_done.clone();
+                                                app::force_refresh_with_notify(
+                                                    &state_ref,
+                                                    true,
+                                                    false,
+                                                    Some(&move || {
+                                                        let _ = wake_tx.send(MainMsg::Redraw);
+                                                    }),
+                                                )
+                                                .await;
+                                                let _ = tx_done
+                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                            });
+                                        }
+                                        KeyCode::Char('a') => {
+                                            let state_ref = app_state.clone();
+                                            let tx_done = tx.clone();
+                                            tokio::spawn(async move {
+                                                let wake_tx = tx_done.clone();
+                                                app::force_refresh_with_notify(
+                                                    &state_ref,
+                                                    true,
+                                                    true,
+                                                    Some(&move || {
+                                                        let _ = wake_tx.send(MainMsg::Redraw);
+                                                    }),
+                                                )
+                                                .await;
+                                                let _ = tx_done
+                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                            });
+                                        }
+                                        KeyCode::Char('o') => {
+                                            let proj_dir = state.snapshot.project_dir.clone();
+                                            let folder_name = std::path::Path::new(&proj_dir)
+                                                .file_name()
+                                                .and_then(|n| n.to_str())
+                                                .unwrap_or(&proj_dir)
+                                                .to_string();
+                                            state.set_flash_notice(
+                                                Some(format!("+ Abierto en explorador: {folder_name}")),
+                                                4000,
+                                            );
+                                            tokio::task::spawn_blocking(move || {
+                                                app::open_folder_in_explorer(&proj_dir);
+                                            });
+                                        }
+                                        KeyCode::Char('d') => {
+                                            let state_ref = app_state.clone();
+                                            let tx_done = tx.clone();
+                                            tokio::spawn(async move {
+                                                app::release_sessions_action(&state_ref).await;
+                                                let _ = tx_done
+                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                            });
+                                        }
+                                        KeyCode::Char('x') => {
+                                            let state_ref = app_state.clone();
+                                            let tx_done = tx.clone();
+                                            tokio::spawn(async move {
+                                                app::migrate_sessions_action(&state_ref).await;
+                                                let _ = tx_done
+                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                            });
+                                        }
+                                        KeyCode::Esc => state.close_quick_peek(),
+                                        KeyCode::Char(' ') | KeyCode::Char('p') => {
+                                            state.toggle_quick_peek()
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                                        KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
+                                        _ => {}
                                     }
-                                KeyCode::Char('m') => {
-                                    state.cycle_theme();
                                 }
-                                KeyCode::Char('s') => {
-                                    let state_ref = app_state.clone();
-                                    let tx_done = tx.clone();
-                                    tokio::spawn(async move {
-                                        let wake_tx = tx_done.clone();
-                                        let notify_cb = move || {
-                                            let _ = wake_tx.send(MainMsg::Redraw);
-                                        };
-                                        app::sync_integrations_action_with_notify(
-                                            &state_ref,
-                                            Some(&notify_cb),
-                                        )
-                                        .await;
-                                        app::force_refresh_with_notify(
-                                            &state_ref,
-                                            false,
-                                            false,
-                                            Some(&notify_cb),
-                                        )
-                                        .await;
-                                        let _ = tx_done
-                                            .send(MainMsg::DataChanged { git_touched: false });
-                                    });
-                                }
-                                KeyCode::Char('r') => {
-                                    let state_ref = app_state.clone();
-                                    let tx_done = tx.clone();
-                                    tokio::spawn(async move {
-                                        let wake_tx = tx_done.clone();
-                                        app::force_refresh_with_notify(
-                                            &state_ref,
-                                            true,
-                                            false,
-                                            Some(&move || {
-                                                let _ = wake_tx.send(MainMsg::Redraw);
-                                            }),
-                                        )
-                                        .await;
-                                        let _ = tx_done
-                                            .send(MainMsg::DataChanged { git_touched: false });
-                                    });
-                                }
-                                KeyCode::Char('a') => {
-                                    let state_ref = app_state.clone();
-                                    let tx_done = tx.clone();
-                                    tokio::spawn(async move {
-                                        let wake_tx = tx_done.clone();
-                                        app::force_refresh_with_notify(
-                                            &state_ref,
-                                            true,
-                                            true,
-                                            Some(&move || {
-                                                let _ = wake_tx.send(MainMsg::Redraw);
-                                            }),
-                                        )
-                                        .await;
-                                        let _ = tx_done
-                                            .send(MainMsg::DataChanged { git_touched: false });
-                                    });
-                                }
-                                KeyCode::Char('o') => {
-                                    let proj_dir = state.snapshot.project_dir.clone();
-                                    let folder_name = std::path::Path::new(&proj_dir)
-                                        .file_name()
-                                        .and_then(|n| n.to_str())
-                                        .unwrap_or(&proj_dir)
-                                        .to_string();
-                                    state.set_flash_notice(
-                                        Some(format!("+ Abierto en explorador: {folder_name}")),
-                                        4000,
-                                    );
-                                    tokio::task::spawn_blocking(move || {
-                                        app::open_folder_in_explorer(&proj_dir);
-                                    });
-                                }
-                                KeyCode::Char('d') => {
-                                    let state_ref = app_state.clone();
-                                    let tx_done = tx.clone();
-                                    tokio::spawn(async move {
-                                        app::release_sessions_action(&state_ref).await;
-                                        let _ = tx_done
-                                            .send(MainMsg::DataChanged { git_touched: false });
-                                    });
-                                }
-                                KeyCode::Char('x') => {
-                                    let state_ref = app_state.clone();
-                                    let tx_done = tx.clone();
-                                    tokio::spawn(async move {
-                                        app::migrate_sessions_action(&state_ref).await;
-                                        let _ = tx_done
-                                            .send(MainMsg::DataChanged { git_touched: false });
-                                    });
-                                }
-                                KeyCode::Esc => state.close_quick_peek(),
-                                KeyCode::Char(' ') | KeyCode::Char('p') => {
-                                    state.toggle_quick_peek()
-                                }
-                                KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
-                                KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
-                                _ => {}
-                            }
                             }
                         }
                     }

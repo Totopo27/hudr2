@@ -265,7 +265,7 @@ pub fn format_tokens(num: i64) -> String {
 
 pub fn render_screen(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 11],
+    collapsed: &[bool; 12],
     flash_notice: Option<&str>,
     width: usize,
 ) -> RenderOutput {
@@ -275,7 +275,7 @@ pub fn render_screen(
 
 pub fn render_screen_with_diff(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 11],
+    collapsed: &[bool; 12],
     flash_notice: Option<&str>,
     selected_diff_file: Option<&str>,
     selected_diff_lines: &[String],
@@ -297,7 +297,7 @@ pub fn render_screen_with_diff(
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_with_diff_and_theme(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 11],
+    collapsed: &[bool; 12],
     flash_notice: Option<&str>,
     selected_diff_file: Option<&str>,
     selected_diff_lines: &[String],
@@ -513,6 +513,38 @@ pub fn render_screen_with_diff_and_theme(
             );
             lines.push(draw_row(&left_io, &right_cost, width));
 
+            // Fila de telemetría por petición/tarea: turnos, promedio por petición y costo del último turno
+            let turns = snap.agent_session.turn_count;
+            let avg_cost = snap.agent_session.avg_turn_cost();
+            let last_cost = snap.agent_session.last_turn_cost;
+
+            if turns > 0 || last_cost > 0.0 || avg_cost > 0.0 {
+                let left_turns = if turns > 0 {
+                    let label = if turns == 1 { "turno" } else { "turnos" };
+                    if width < 38 {
+                        format!("{TEXT_DIM}{turns}t \u{00b7} ${:.3}/r{RESET}", avg_cost)
+                    } else if width < 46 {
+                        format!("{TEXT_DIM}{turns} {label} \u{00b7} ${:.3}/req{RESET}", avg_cost)
+                    } else {
+                        format!("{TEXT_DIM}{turns} {label} \u{00b7} prom: ${:.3}/req{RESET}", avg_cost)
+                    }
+                } else {
+                    format!("{TEXT_DIM}prom: ${:.3}/req{RESET}", avg_cost)
+                };
+
+                let right_last = if last_cost > 0.0 {
+                    if width < 46 {
+                        format!("{TEXT_DIM}\u{00fa}lt: ${:.3}{RESET}", last_cost)
+                    } else {
+                        format!("{TEXT_DIM}\u{00fa}ltimo: ${:.3}{RESET}", last_cost)
+                    }
+                } else {
+                    String::new()
+                };
+
+                lines.push(draw_row(&left_turns, &right_last, width));
+            }
+
             if pct >= 50.0 {
                 lines.push(draw_row(
                     &format!(
@@ -662,20 +694,10 @@ pub fn render_screen_with_diff_and_theme(
             for acc in &snap.accounts {
                 let eff =
                     crate::quotas::evaluate_account_for_model(acc, active_model);
-                let is_local = snap
-                    .agent_session
-                    .local_prefix
-                    .as_deref()
-                    .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                    .unwrap_or(false);
-                let is_any_active = snap
-                    .agent_session
-                    .all_active_prefixes
-                    .contains(&acc.prefix.to_lowercase());
 
-                let is_api = eff.reset_5h == "api-key" || acc.reset_5h == "api-key";
+                let is_api = crate::quotas::is_api_key(acc);
                 let right_normal = if is_api {
-                    format!("{TEXT_DIM}[api-key]{RESET}")
+                    format!("{TEXT_DIM}[{}]{RESET}", eff.reset_5h)
                 } else {
                     format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h)
                 };
@@ -719,18 +741,6 @@ pub fn render_screen_with_diff_and_theme(
                             format!("{AMBER}[AVISO 70%]{RESET}")
                         },
                     )
-                } else if is_local {
-                    (
-                        format!("{accent_secondary}>{RESET}"),
-                        MINT,
-                        right_normal,
-                    )
-                } else if is_any_active {
-                    (
-                        format!("{accent_primary}\u{25cf}{RESET}"),
-                        MINT,
-                        right_normal,
-                    )
                 } else {
                     (
                         format!("{MINT}\u{25cf}{RESET}"),
@@ -747,24 +757,47 @@ pub fn render_screen_with_diff_and_theme(
                     7
                 };
                 let pfx_clean = format!("{:<width$}", acc.prefix, width = pfx_w);
-                let pfx_disp = if is_local {
-                    format!("{BOLD}{TEXT_PRIMARY}{pfx_clean}{RESET}")
-                } else if is_any_active {
-                    format!("{TEXT_PRIMARY}{pfx_clean}{RESET}")
-                } else {
-                    format!("{TEXT_MUTED}{pfx_clean}{RESET}")
-                };
-                let bar_len = if width < 38 { 2 } else { 3 };
-                let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
+                let pfx_disp = format!("{TEXT_PRIMARY}{pfx_clean}{RESET}");
                 let left = if is_api {
-                    let budget = crate::quotas::cliproxy::resolve_api_key_budget(&acc.prefix);
-                    let rem_balance = (budget * (eff.rem_5h as f64) / 100.0).max(0.0);
-                    if width < 38 {
-                        format!("{status_glyph} {pfx_disp} {bar} ${rem_balance:.2}")
+                    let cost_to_apply = if snap
+                        .agent_session
+                        .local_prefix
+                        .as_deref()
+                        .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                        .unwrap_or(false)
+                    {
+                        snap.agent_session.cost
                     } else {
-                        format!("{status_glyph} {pfx_disp} {bar} ${rem_balance:.2} disp")
+                        0.0
+                    };
+                    let (_budget, rem_balance, _, _) =
+                        crate::quotas::cliproxy::calculate_api_key_balance(
+                            &acc.prefix,
+                            cost_to_apply,
+                            snap.agent_session.session_id.as_deref(),
+                        );
+
+                    match rem_balance {
+                        Some(rem) => {
+                            let bar_len = if width < 38 { 2 } else { 3 };
+                            let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
+                            if width < 38 {
+                                format!("{status_glyph} {pfx_disp} {bar} ${rem:.2}")
+                            } else {
+                                format!("{status_glyph} {pfx_disp} {bar} ${rem:.2} disp")
+                            }
+                        }
+                        None => {
+                            if width < 38 {
+                                format!("{status_glyph} {pfx_disp} ${cost_to_apply:.2}")
+                            } else {
+                                format!("{status_glyph} {pfx_disp} ${cost_to_apply:.2} sesi\u{00f3}n")
+                            }
+                        }
                     }
                 } else {
+                    let bar_len = if width < 38 { 2 } else { 3 };
+                    let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
                     let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
                     let wk_color = if eff.is_critical {
                         CORAL
@@ -790,38 +823,12 @@ pub fn render_screen_with_diff_and_theme(
         }
     }
 
-    // Alertas de cuentas críticas activas + Flash notice dentro de Integraciones
-    let active_critical_accs: Vec<&crate::models::AccountQuota> = snap
-        .accounts
-        .iter()
-        .filter(|a| {
-            let eff = crate::quotas::evaluate_account_for_model(a, active_model);
-            (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
-                && snap
-                    .agent_session
-                    .all_active_prefixes
-                    .contains(&a.prefix.to_lowercase())
-        })
-        .collect();
-
-    if !active_critical_accs.is_empty() || flash_notice.is_some() {
+    // Flash notice dentro de Integraciones
+    if let Some(notice) = flash_notice {
         if !collapsed[3] {
             lines.push(draw_divider(width));
         }
-        if let Some(notice) = flash_notice {
-            lines.push(draw_row(&format!("{BOLD}{MINT}{notice}{RESET}"), "", width));
-        }
-        for ca in active_critical_accs {
-            let action_label = format!("[presion\u{00e1} 'x' -> migrar a {target_healthy}]");
-            lines.push(draw_row(
-                &format!(
-                    "{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activa) {action_label}{RESET}",
-                    ca.prefix
-                ),
-                "",
-                width,
-            ));
-        }
+        lines.push(draw_row(&format!("{BOLD}{MINT}{notice}{RESET}"), "", width));
     }
 
         lines.push(draw_bottom(width));
@@ -834,7 +841,126 @@ pub fn render_screen_with_diff_and_theme(
         });
     }
 
-    // 6. Pool de Modelos / Cuotas Breakdown Card (4)
+    // 5. Orquestadores Card (4)
+    if !hidden_cards.contains("orquestadores") {
+        let orch_start = lines.len();
+        let total_count = snap.orchestrators.len();
+        let critical_count = snap.orchestrators.iter().filter(|o| o.is_critical).count();
+        let count_str = format!("{TEXT_DIM}{total_count} perfiles{RESET}");
+        let orch_title = if critical_count > 0 {
+            format!(
+                "{title_color}Orquestadores{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
+            )
+        } else {
+            format!("{title_color}Orquestadores{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
+        };
+        lines.push(draw_top(&orch_title, collapsed[4], width));
+        if !collapsed[4] {
+            if snap.orchestrators.is_empty() {
+                lines.push(draw_row(
+                    &format!("{TEXT_DIM}Sin perfiles de orquestador configurados{RESET}"),
+                    &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                    width,
+                ));
+            } else {
+                for orch in &snap.orchestrators {
+                    let (status_glyph, name_disp, status_right) = match orch.status {
+                        crate::models::OrchestratorStatus::Working => {
+                            let glyph = format!("{accent_secondary}>{RESET}");
+                            let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch.name);
+                            let right = format!("{MINT}\u{25cf} trabajando{RESET}");
+                            (glyph, name, right)
+                        }
+                        crate::models::OrchestratorStatus::Idle => {
+                            let glyph = format!("{AMBER}\u{25cf}{RESET}");
+                            let name = format!("{TEXT_PRIMARY}{}{RESET}", orch.name);
+                            let right = format!("{TEXT_DIM}-- en espera{RESET}");
+                            (glyph, name, right)
+                        }
+                        crate::models::OrchestratorStatus::Offline => {
+                            let glyph = format!("{TEXT_DIM}\u{25cb}{RESET}");
+                            let name = format!("{TEXT_MUTED}{}{RESET}", orch.name);
+                            let right = format!("{TEXT_DIM}\u{25cb} apagado{RESET}");
+                            (glyph, name, right)
+                        }
+                    };
+
+                    let model_label = if let Some(ref t) = orch.thinking {
+                        format!("{} [{t}]", orch.model_short)
+                    } else {
+                        orch.model_short.clone()
+                    };
+
+                    let left = if width < 42 {
+                        format!("{status_glyph} {name_disp}")
+                    } else {
+                        format!("{status_glyph} {name_disp} {TEXT_DIM}({model_label}){RESET}")
+                    };
+
+                    let final_right = if orch.is_critical {
+                        format!("{BOLD}{CORAL}[CUOTA CR\u{00cd}TICA]{RESET}")
+                    } else if orch.is_warning {
+                        format!("{BOLD}{AMBER}[AVISO CUOTA]{RESET}")
+                    } else {
+                        status_right
+                    };
+
+                    lines.push(draw_row(&left, &final_right, width));
+                }
+            }
+
+            let active_critical_orch = snap
+                .orchestrators
+                .iter()
+                .find(|o| o.status == crate::models::OrchestratorStatus::Working && o.is_critical);
+
+            let has_idle_sessions = snap
+                .orchestrators
+                .iter()
+                .any(|o| o.status == crate::models::OrchestratorStatus::Idle);
+
+            if active_critical_orch.is_some() || has_idle_sessions {
+                lines.push(draw_divider(width));
+            }
+
+            if let Some(co) = active_critical_orch {
+                let target_orch = snap
+                    .orchestrators
+                    .iter()
+                    .find(|o| !o.is_critical && o.name != co.name)
+                    .map(|o| o.name.as_str())
+                    .unwrap_or("alternativo");
+
+                lines.push(draw_row(
+                    &format!(
+                        "{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activo) [presion\u{00e1} 'x' -> migrar a {target_orch}]{RESET}",
+                        co.name
+                    ),
+                    "",
+                    width,
+                ));
+            }
+
+            if has_idle_sessions {
+                lines.push(draw_row(
+                    &format!("{TEXT_DIM}>> Sesiones en espera detectadas [presion\u{00e1} 'd' -> liberar]{RESET}"),
+                    "",
+                    width,
+                ));
+            }
+        }
+
+        lines.push(draw_bottom(width));
+        bounds.push(CardBounds {
+            id: "orquestadores",
+            start_line: orch_start,
+            end_line: lines.len() - 1,
+            action_type: None,
+            action_path: None,
+        });
+    }
+
+    // 6. Pool de Modelos / Cuotas Breakdown Card (5)
     if !hidden_cards.contains("pools") {
         let pools_start = lines.len();
     let default_prefix = snap
@@ -859,8 +985,8 @@ pub fn render_screen_with_diff_and_theme(
         "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} {accent_secondary}*{RESET}"
     );
 
-    lines.push(draw_top(&pool_title, collapsed[4], width));
-    if !collapsed[4] {
+    lines.push(draw_top(&pool_title, collapsed[5], width));
+    if !collapsed[5] {
         if snap.accounts.is_empty() {
             lines.push(draw_row(
                 &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
@@ -869,46 +995,189 @@ pub fn render_screen_with_diff_and_theme(
             ));
         } else if let Some(acc) = target_account {
             let is_acc_api = crate::quotas::is_api_key(acc);
-            for p in &acc.pools {
-                let pool_color = if is_acc_api {
-                    if p.percent <= 8 {
+            if is_acc_api {
+                let is_local = snap
+                    .agent_session
+                    .local_prefix
+                    .as_deref()
+                    .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                    .unwrap_or(false);
+                let is_any_active = snap
+                    .agent_session
+                    .all_active_prefixes
+                    .contains(&acc.prefix.to_lowercase());
+                let session_cost = if is_local || is_any_active {
+                    snap.agent_session.cost
+                } else {
+                    0.0
+                };
+                let maybe_budget = crate::quotas::cliproxy::get_user_configured_budget(&acc.prefix);
+                let (_, rem_balance, rem_pct, cost_since_set) =
+                    crate::quotas::cliproxy::calculate_api_key_balance(
+                        &acc.prefix,
+                        session_cost,
+                        snap.agent_session.session_id.as_deref(),
+                    );
+
+                let api_label = acc
+                    .pools
+                    .first()
+                    .map(|p| p.label.as_str())
+                    .unwrap_or("API");
+
+                // 1. Fila de API y gasto sesión (sin etiqueta repetitiva [api-key])
+                let pool_color = if maybe_budget.is_some() {
+                    if rem_pct <= 8 {
                         CORAL
-                    } else if p.percent <= 20 {
+                    } else if rem_pct <= 20 {
                         AMBER
                     } else {
                         MINT
                     }
-                } else if p.percent <= 15 {
-                    CORAL
-                } else if p.percent <= 50 {
-                    AMBER
                 } else {
                     MINT
                 };
-
-                let bar_len = if width < 42 { 3 } else { 6 };
-                let bar = render_gauge_inline(p.percent, bar_len, pool_color);
-                let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
                 let pfx_w = if width < 42 { 8 } else { 12 };
-                let p_label = format!("{:<width$}", p.label, width = pfx_w);
-                let left = format!(
-                    "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
-                );
-                let right = if p.reset == "api-key" {
-                    if width < 40 {
-                        format!("{pool_color}{}{RESET}", p.pace)
-                    } else {
-                        format!("{pool_color}{}{RESET} {TEXT_DIM}[api-key]{RESET}", p.pace)
-                    }
-                } else if width < 40 {
-                    format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+                let p_label = format!("{:<width$}", api_label, width = pfx_w);
+                let row1_left = if maybe_budget.is_some() {
+                    let bar_len = if width < 42 { 3 } else { 6 };
+                    let bar = render_gauge_inline(rem_pct, bar_len, pool_color);
+                    let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", rem_pct);
+                    format!("{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}")
+                } else {
+                    format!("{MINT}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET}")
+                };
+                let avg_cost = snap.agent_session.avg_turn_cost();
+                let display_cost = if maybe_budget.is_some() {
+                    cost_since_set
+                } else {
+                    session_cost
+                };
+                let row1_right = if width < 42 {
+                    format!("{BOLD}{TEXT_PRIMARY}${:.3}{RESET}", display_cost)
+                } else if avg_cost > 0.0 {
+                    format!(
+                        "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET} {TEXT_DIM}\u{00b7} ${:.3}/req{RESET}",
+                        display_cost, avg_cost
+                    )
                 } else {
                     format!(
-                        "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
-                        p.pace, p.reset
+                        "{TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET}",
+                        display_cost
                     )
                 };
-                lines.push(draw_row(&left, &right, width));
+                lines.push(draw_row(&row1_left, &row1_right, width));
+
+                // 2. Fila de Saldo (definir / editar / saldo agotado)
+                let saldo_row_idx = lines.len();
+                let is_editing = snap.is_editing_balance
+                    && snap
+                        .editing_balance_prefix
+                        .as_deref()
+                        .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                        .unwrap_or(false);
+
+                if is_editing {
+                    let input_display = if snap.balance_input_buffer.is_empty() {
+                        format!("{TEXT_DIM}_ (ingresa saldo ej: 50.00){RESET}")
+                    } else {
+                        format!(
+                            "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
+                            snap.balance_input_buffer
+                        )
+                    };
+                    let left = format!("{accent_secondary}> {RESET}{BOLD}Saldo $: {input_display}");
+                    let right = format!("{AMBER}[Enter|Esc]{RESET}");
+                    lines.push(draw_row(&left, &right, width));
+                } else if let (Some(_b), Some(rem)) = (maybe_budget, rem_balance) {
+                    let saldo_color = if rem <= 0.0 || rem_pct <= 8 {
+                        CORAL
+                    } else if rem_pct <= 20 {
+                        AMBER
+                    } else {
+                        MINT
+                    };
+                    let bar_len = if width < 42 { 3 } else { 6 };
+                    let bar = render_gauge_inline(rem_pct, bar_len, saldo_color);
+                    let pfx_w = if width < 42 { 6 } else { 8 };
+                    let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
+                    let left = format!(
+                        "{saldo_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {BOLD}{saldo_color}${rem:.2}{RESET}"
+                    );
+                    let right = if rem <= 0.0 {
+                        format!("{BOLD}{CORAL}[AGOTADO]{RESET} {TEXT_DIM}[editar]{RESET}")
+                    } else if avg_cost > 0.0 && width >= 42 {
+                        let count = (rem / avg_cost).round() as u64;
+                        let count_str = if count >= 1000 {
+                            format!("~{:.1}k", count as f64 / 1000.0)
+                        } else {
+                            format!("~{count}")
+                        };
+                        format!("{TEXT_DIM}{count_str} reqs{RESET} {TEXT_DIM}[editar]{RESET}")
+                    } else {
+                        format!("{TEXT_DIM}disp{RESET} {TEXT_DIM}[editar]{RESET}")
+                    };
+                    lines.push(draw_row(&left, &right, width));
+                } else {
+                    let pfx_w = if width < 42 { 6 } else { 8 };
+                    let p_label = format!("{:<width$}", "Saldo", width = pfx_w);
+                    let left = format!("{TEXT_MUTED}\u{25cf}{RESET} {TEXT_MUTED}{p_label}{RESET}");
+                    let right = format!("{MINT}[definir saldo]{RESET}");
+                    lines.push(draw_row(&left, &right, width));
+                }
+                bounds.push(CardBounds {
+                    id: "edit_balance",
+                    start_line: saldo_row_idx,
+                    end_line: saldo_row_idx,
+                    action_type: Some("edit_balance"),
+                    action_path: Some(acc.prefix.clone()),
+                });
+
+                // 3. Fila de Facturación oficial con [ver ->]
+                let portal_row_idx = lines.len();
+                let billing_url = crate::quotas::cliproxy::provider_billing_url(&acc.prefix);
+                let portal_left = if width < 40 {
+                    format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n{RESET}")
+                } else {
+                    format!("{TEXT_DIM}\u{00bb} Facturaci\u{00f3}n oficial{RESET}")
+                };
+                let portal_right = format!("{MINT}[ver ->]{RESET}");
+                lines.push(draw_row(&portal_left, &portal_right, width));
+                bounds.push(CardBounds {
+                    id: "open_billing_url",
+                    start_line: portal_row_idx,
+                    end_line: portal_row_idx,
+                    action_type: Some("open_billing_url"),
+                    action_path: Some(billing_url.to_string()),
+                });
+            } else {
+                for p in &acc.pools {
+                    let pool_color = if p.percent <= 15 {
+                        CORAL
+                    } else if p.percent <= 50 {
+                        AMBER
+                    } else {
+                        MINT
+                    };
+
+                    let bar_len = if width < 42 { 3 } else { 6 };
+                    let bar = render_gauge_inline(p.percent, bar_len, pool_color);
+                    let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
+                    let pfx_w = if width < 42 { 8 } else { 12 };
+                    let p_label = format!("{:<width$}", p.label, width = pfx_w);
+                    let left = format!(
+                        "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
+                    );
+                    let right = if width < 40 {
+                        format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+                    } else {
+                        format!(
+                            "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                            p.pace, p.reset
+                        )
+                    };
+                    lines.push(draw_row(&left, &right, width));
+                }
             }
         }
     }
@@ -938,10 +1207,10 @@ pub fn render_screen_with_diff_and_theme(
     };
     lines.push(draw_top(
         &format!("{BOLD}{title_color}Cambios{RESET} {ag_changes}"),
-        collapsed[5],
+        collapsed[6],
         width,
     ));
-    if !collapsed[5] {
+    if !collapsed[6] {
         if !snap.git.cross_session_conflicts.is_empty() {
             let files_joined = snap.git.cross_session_conflicts.join(", ");
             lines.push(draw_row(
@@ -1094,15 +1363,15 @@ pub fn render_screen_with_diff_and_theme(
         });
     }
 
-    // 8. Engram Card (6)
+    // 8. Engram Card (7)
     if !hidden_cards.contains("engram") {
         let engram_start = lines.len();
     lines.push(draw_top(
         &format!("{ACCENT_PRIMARY}Engram:{RESET} {CYAN}{folder}{RESET} {TEXT_DIM}^{RESET}"),
-        collapsed[6],
+        collapsed[7],
         width,
     ));
-    if !collapsed[6] {
+    if !collapsed[7] {
         let online = if snap.engram.online {
             format!("{MINT}\u{25cf} En linea{RESET}")
         } else {
@@ -1182,8 +1451,8 @@ pub fn render_screen_with_diff_and_theme(
             "{BOLD}{title_color}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
             snap.agent_session.tool_total
         );
-        lines.push(draw_top(&tool_title, collapsed[7], width));
-        if !collapsed[7] {
+        lines.push(draw_top(&tool_title, collapsed[8], width));
+        if !collapsed[8] {
             let p_read = format!("{MAGENTA}@ {} lecturas{RESET}", snap.agent_session.tool_reads);
             let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
             let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
@@ -1203,7 +1472,7 @@ pub fn render_screen_with_diff_and_theme(
         });
     }
 
-    // 9. MCP Card (idx 8)
+    // 9. MCP Card (idx 9)
     if !hidden_cards.contains("mcp") {
         let mcp_start = lines.len();
         lines.push(draw_top(
@@ -1211,10 +1480,10 @@ pub fn render_screen_with_diff_and_theme(
                 "{BOLD}{title_color}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
                 snap.mcps.len()
             ),
-            collapsed[8],
+            collapsed[9],
             width,
         ));
-        if !collapsed[8] {
+        if !collapsed[9] {
             for m in &snap.mcps {
                 let dot = if m.enabled {
                     format!("{MINT}\u{25cf}{RESET}")
@@ -1260,8 +1529,8 @@ pub fn render_screen_with_diff_and_theme(
         } else {
             format!("{BOLD}{title_color}Stack{RESET} {text_dim}\u{00b7}{RESET} {title_color}Ecosistema{RESET}")
         };
-        lines.push(draw_top(&eco_title, collapsed[9], width));
-        if !collapsed[9] {
+        lines.push(draw_top(&eco_title, collapsed[10], width));
+        if !collapsed[10] {
             if snap.ecosystem.tools.is_empty() {
                 lines.push(draw_row(
                     &format!("{text_dim}escaneando ecosistema...{RESET}"),
@@ -1362,13 +1631,14 @@ pub fn render_screen_with_diff_and_theme(
     // 11. Personalizar Card (10) — Selector interactivo de visibilidad, nombre y tema
     let personalizar_start = lines.len();
     let personalizar_title = format!("{BOLD}{title_color}Personalizar{RESET}");
-    lines.push(draw_top(&personalizar_title, collapsed[10], width));
-    if !collapsed[10] {
-        let cards_info: [(&str, &str); 10] = [
+    lines.push(draw_top(&personalizar_title, collapsed[11], width));
+    if !collapsed[11] {
+        let cards_info: [(&str, &str); 11] = [
             ("estado", "Estado"),
             ("contexto", "Contexto"),
             ("proyecto", "Proyecto"),
             ("integraciones", "Integraciones"),
+            ("orquestadores", "Orquestadores"),
             ("pools", "Cuota de Modelos"),
             ("git", "Cambios (Git)"),
             ("engram", "Engram"),
@@ -1496,7 +1766,9 @@ pub fn render_screen_with_diff_and_theme(
             width,
         ));
     }
-    let has_active_critical = snap.accounts.iter().any(|a| {
+    let has_active_critical = snap.orchestrators.iter().any(|o| {
+        o.status == crate::models::OrchestratorStatus::Working && o.is_critical
+    }) || snap.accounts.iter().any(|a| {
         let eff = crate::quotas::evaluate_account_for_model(a, active_model);
         (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
             && snap

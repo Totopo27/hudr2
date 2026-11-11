@@ -7,6 +7,7 @@ pub mod git;
 pub mod herdr;
 pub mod models;
 pub mod opencode;
+pub mod orchestrators;
 pub mod paths;
 pub mod pi;
 pub mod quotas;

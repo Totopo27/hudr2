@@ -173,7 +173,12 @@ impl PiTail {
                     } else if inp + outp + c_read + c_write > 0 {
                         self.session.active_turn_tokens = inp + outp + c_read + c_write;
                     }
-                    self.session.cost += u["cost"]["total"].as_f64().unwrap_or(0.0);
+                    let step_cost = u["cost"]["total"].as_f64().unwrap_or(0.0);
+                    self.session.cost += step_cost;
+                    if step_cost > 0.0 {
+                        self.session.last_turn_cost = step_cost;
+                    }
+                    self.session.turn_count += 1;
 
                     if let Some(mod_str) = m["model"].as_str().filter(|x| !x.is_empty()) {
                         self.raw_model_id = mod_str.to_string();

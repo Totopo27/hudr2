@@ -131,18 +131,29 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
                     .map(|lp| lp.eq_ignore_ascii_case(&acc.prefix))
                     .unwrap_or(false);
                 let cost_to_apply = if is_current { session_cost } else { 0.0 };
-                let (_budget, rem_balance, rem_pct) =
-                    quotas::calculate_api_key_balance(&acc.prefix, cost_to_apply);
+                let (budget, rem_balance, rem_pct, cost_since_set) =
+                    quotas::calculate_api_key_balance(
+                        &acc.prefix,
+                        cost_to_apply,
+                        state.snapshot.agent_session.session_id.as_deref(),
+                    );
                 acc.rem_5h = rem_pct;
                 acc.rem_wk = rem_pct;
-                acc.is_critical = rem_pct <= 8;
-                acc.is_warning = rem_pct > 8 && rem_pct <= 20;
+                acc.is_critical = budget.is_some()
+                    && (rem_pct <= 8 || rem_balance.map(|b| b <= 0.0).unwrap_or(false));
+                acc.is_warning = budget.is_some() && (rem_pct > 8 && rem_pct <= 20);
                 for p in &mut acc.pools {
                     p.percent = rem_pct;
-                    if p.label.ends_with("API") {
-                        p.pace = format!("${:.3}", cost_to_apply);
+                    if p.label.ends_with("API")
+                        || (p.label.starts_with("Codex ") && !p.label.contains("Saldo"))
+                    {
+                        p.pace = format!("${:.3}", cost_since_set);
                     } else if p.label.ends_with("Saldo") {
-                        p.pace = format!("${:.2}", rem_balance);
+                        p.pace = match rem_balance {
+                            Some(b) if b > 0.0 => format!("${:.2}", b),
+                            Some(_) => "[SALDO AGOTADO]".to_string(),
+                            None => "[definir saldo]".to_string(),
+                        };
                     }
                 }
             }
@@ -155,6 +166,12 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         state.snapshot.accounts = accounts_copy;
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
+        state.snapshot.orchestrators = crate::orchestrators::discover_orchestrators(
+            &state.snapshot.project_dir,
+            &state.snapshot.accounts,
+            &state.snapshot.agent_session,
+            &panes,
+        );
 
         if state.snapshot != prev_snapshot {
             state.needs_redraw = true;
@@ -559,6 +576,63 @@ pub fn open_folder_in_explorer(target_path: &str) {
     {
         let _ = std::process::Command::new("xdg-open")
             .arg(&resolved_path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+pub fn open_url_in_browser(url: &str) {
+    if url.is_empty() {
+        return;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let mut wide_url: Vec<u16> = std::ffi::OsStr::new(url).encode_wide().collect();
+        wide_url.push(0);
+
+        let mut wide_op: Vec<u16> = std::ffi::OsStr::new("open").encode_wide().collect();
+        wide_op.push(0);
+
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lpOperation: *const u16,
+                lpFile: *const u16,
+                lpParameters: *const u16,
+                lpDirectory: *const u16,
+                nShowCmd: i32,
+            ) -> isize;
+        }
+
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                wide_op.as_ptr(),
+                wide_url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(url)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

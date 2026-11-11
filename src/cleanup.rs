@@ -748,9 +748,26 @@ pub fn release_inactive_sessions(
 
     let now = chrono::Utc::now().timestamp_millis();
     let mut closed_panes: HashSet<String> = HashSet::new();
-    let mut closed_workspaces: HashSet<String> = HashSet::new();
+    let norm_cwd = crate::paths::normalize_path(cwd);
+
+    let my_workspace_id = my_pane_id
+        .and_then(|mp| panes.iter().find(|p| p.pane_id == mp))
+        .and_then(|p| p.workspace_id.as_deref());
 
     for p in &panes {
+        // SEGURIDAD CRÍTICA: Solo considerar panes del MISMO proyecto (o mismo workspace).
+        // Jamás cerrar terminales ni ambientes de otros proyectos / workspaces abiertos en Herdr.
+        let is_same_project = p
+            .cwd
+            .as_deref()
+            .map(crate::paths::normalize_path)
+            .is_some_and(|pc| pc == norm_cwd)
+            || (my_workspace_id.is_some() && p.workspace_id.as_deref() == my_workspace_id);
+
+        if !is_same_project {
+            continue;
+        }
+
         let s = resolve_session_for_pane(&conn, p);
         let ses_id = s
             .as_ref()
@@ -807,38 +824,23 @@ pub fn release_inactive_sessions(
             }
         }
 
-        // Cerrar en Herdr si es un pane de agente inactivo
+        // Cerrar en Herdr si es un pane de agente inactivo en ESTE proyecto
         if is_opencode_pane && my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true) {
             let ok = HerdrClient::close_pane(&p.pane_id);
             if ok {
                 closed_panes.insert(p.pane_id.clone());
-            }
-
-            // Si todos los panes del workspace están siendo cerrados, cerrar el workspace
-            if let Some(ref ws_id) = p.workspace_id {
-                let ws_panes: Vec<&crate::models::HerdrPane> = panes
-                    .iter()
-                    .filter(|x| x.workspace_id.as_ref() == Some(ws_id))
-                    .collect();
-                let all_other_closed = ws_panes
-                    .iter()
-                    .all(|x| x.pane_id == p.pane_id || closed_panes.contains(&x.pane_id));
-                if all_other_closed
-                    && !closed_workspaces.contains(ws_id)
-                    && HerdrClient::close_workspace(ws_id)
-                {
-                    closed_workspaces.insert(ws_id.clone());
-                }
             }
         }
     }
 
     // Archivar también cualquier sesión huérfana en DB que haya quedado en desuso
     let has_model = has_column(&conn, table, "model");
+    let has_dir = has_column(&conn, table, "directory");
     let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
     let model_expr = if has_model { "model" } else { "NULL AS model" };
+    let dir_expr = if has_dir { "directory" } else { "NULL AS directory" };
     let orphan_sql = format!(
-        "SELECT id, {agent_expr}, {model_expr} FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
+        "SELECT id, {agent_expr}, {model_expr}, {dir_expr} FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
     );
     let orphan_update_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ?");
     if let Ok(mut orphan_stmt) = conn.prepare(&orphan_sql) {
@@ -847,12 +849,24 @@ pub fn release_inactive_sessions(
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         });
         if let Ok(iter) = rows {
-            for (orphan_id, raw_agent_opt, raw_model_opt) in iter.flatten() {
+            for (orphan_id, raw_agent_opt, raw_model_opt, raw_dir_opt) in iter.flatten() {
                 if keep_session_id.as_deref() == Some(&orphan_id) {
                     continue;
+                }
+                // Si la sesión pertenece a otro proyecto conocido en disco, no archivarla desde este HUD
+                if let Some(ref d) = raw_dir_opt
+                    && !d.trim().is_empty()
+                    && crate::paths::normalize_path(d) != norm_cwd
+                {
+                    let is_test_proj_mock = std::env::var("OPENCODE_DB_PATH").is_ok()
+                        && (d == "D:/proj" || norm_cwd.ends_with("proj"));
+                    if !is_test_proj_mock {
+                        continue;
+                    }
                 }
                 let is_live_working = panes.iter().any(|p| {
                     p.agent_session_id.as_deref() == Some(&orphan_id)

@@ -31,6 +31,7 @@ pub struct SessionTodo {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentSession {
+    pub session_id: Option<String>,
     pub provider_name: String, // "opencode", "pi", "gentle-shell"
     pub agent: String,
     pub model: String,
@@ -42,6 +43,8 @@ pub struct AgentSession {
     pub active_turn_tokens: i64,
     pub context_limit: i64,
     pub cost: f64,
+    pub last_turn_cost: f64,
+    pub turn_count: usize,
     pub tool_reads: usize,
     pub tool_writes: usize,
     pub tool_bash: usize,
@@ -54,6 +57,15 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
+    /// Devuelve el costo promedio por turno/petición en dólares ($).
+    pub fn avg_turn_cost(&self) -> f64 {
+        if self.turn_count > 0 {
+            self.cost / self.turn_count as f64
+        } else {
+            0.0
+        }
+    }
+
     /// Devuelve el identificador del modelo activo (`model` si no está vacío, sino `model_short`).
     pub fn effective_model(&self) -> &str {
         if !self.model.is_empty() {
@@ -177,6 +189,28 @@ pub struct EcosystemTelemetry {
     pub tools: Vec<ToolVersionInfo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum OrchestratorStatus {
+    Working, // Siendo usado y trabajando (en ejecución activa)
+    Idle,    // Pausado / en espera / entre turnos
+    #[default]
+    Offline, // En desuso / apagado (sin sesión viva)
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct OrchestratorProfile {
+    pub name: String,             // e.g. "fleet-codex", "fleet-tavo", "fleet-gianni"
+    pub model: String,            // e.g. "gpt-5.6-sol", "tavoclaude/claude-opus-5-5"
+    pub model_short: String,      // e.g. "gpt-5.6-sol", "claude-opus-5-5"
+    pub prefix: Option<String>,   // e.g. "codex", "tavoclaude", "gianniclaude"
+    pub thinking: Option<String>, // e.g. "high", "medium"
+    pub is_default: bool,
+    pub status: OrchestratorStatus,
+    pub is_critical: bool, // Evaluado estrictamente con el modelo soberano del orquestador
+    pub is_warning: bool,
+    pub rem_pct: u8,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TelemetrySnapshot {
     pub project_dir: String,
@@ -184,6 +218,7 @@ pub struct TelemetrySnapshot {
     pub engram: EngramTelemetry,
     pub git: GitTelemetry,
     pub accounts: Vec<AccountQuota>,
+    pub orchestrators: Vec<OrchestratorProfile>,
     pub mcps: Vec<McpServer>,
     pub tree: ProjectTreeData,
     pub ecosystem: EcosystemTelemetry,
@@ -194,4 +229,7 @@ pub struct TelemetrySnapshot {
     pub is_editing_name: bool,
     pub name_input_buffer: String,
     pub check_updates: bool,
+    pub is_editing_balance: bool,
+    pub editing_balance_prefix: Option<String>,
+    pub balance_input_buffer: String,
 }
