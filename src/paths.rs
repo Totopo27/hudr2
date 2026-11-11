@@ -224,6 +224,15 @@ pub fn cliproxy_config_candidates_for(target_dir: &str) -> Vec<PathBuf> {
 
 /// Candidatos para archivos de perfiles de orquestador de Gentle AI / Pi (`profiles.json`)
 pub fn gentle_ai_profiles_candidates(target_dir: &str) -> Vec<PathBuf> {
+    for env_key in ["GENTLE_AI_PROFILES_PATH", "PI_PROFILES_PATH"] {
+        if let Ok(path_str) = std::env::var(env_key) {
+            let p = PathBuf::from(path_str.trim());
+            if p.exists() {
+                return vec![p];
+            }
+        }
+    }
+
     let mut candidates = Vec::new();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
@@ -430,6 +439,13 @@ pub fn resolve_engram_binary() -> Option<PathBuf> {
 
 /// Candidatos para archivos de configuración de OpenCode (mcp servers, etc.)
 pub fn opencode_config_candidates(target_dir: &str) -> Vec<PathBuf> {
+    if let Ok(config_path) = std::env::var("OPENCODE_CONFIG_PATH") {
+        let p = PathBuf::from(config_path.trim());
+        if p.exists() {
+            return vec![p];
+        }
+    }
+
     let mut candidates = Vec::new();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 

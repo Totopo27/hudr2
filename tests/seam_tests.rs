@@ -5153,4 +5153,177 @@ api-keys:
             std::env::remove_var("ENGRAM_BIN");
         }
     }
+
+    #[test]
+    fn test_orquestadores_card_discovery_sovereign_quota_and_status() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorStatus};
+        use hudr2::orchestrators::discover_orchestrators;
+        use hudr2::state::{AppState, ClickAction};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().to_str().unwrap();
+
+        // 1. Crear estructura de configuración para Gentle AI profiles.json
+        let gentle_dir = tmp.path().join(".gentle-ai");
+        std::fs::create_dir_all(&gentle_dir).unwrap();
+        let profiles_json = serde_json::json!({
+            "default": "fleet-codex",
+            "profiles": {
+                "fleet-codex": {
+                    "orchestrator": {
+                        "model": "gpt-5.6-sol",
+                        "thinking": "high"
+                    },
+                    "agents": {
+                        "researcher": {
+                            "model": "google/gemini-2.5-pro"
+                        }
+                    }
+                },
+                "fleet-tavo": {
+                    "orchestrator": {
+                        "model": "tavoclaude/claude-opus-5-5"
+                    },
+                    "agents": {
+                        "coder": {
+                            "model": "google/gemini-2.5-flash"
+                        }
+                    }
+                }
+            }
+        });
+        let profiles_file = gentle_dir.join("profiles.json");
+        std::fs::write(
+            &profiles_file,
+            serde_json::to_string_pretty(&profiles_json).unwrap(),
+        )
+        .unwrap();
+
+        // 2. Crear opencode.json con un orquestador adicional
+        let opencode_json = serde_json::json!({
+            "agent": {
+                "gentle-orchestrator": {
+                    "model": "cliproxy/clasclaude/claude-opus-5-5",
+                    "permission": {
+                        "task": true
+                    }
+                }
+            }
+        });
+        let opencode_file = tmp.path().join("opencode.json");
+        std::fs::write(
+            &opencode_file,
+            serde_json::to_string_pretty(&opencode_json).unwrap(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_file.to_str().unwrap());
+            std::env::set_var("OPENCODE_CONFIG_PATH", opencode_file.to_str().unwrap());
+        }
+
+        // 3. Cuentas: tavocodex saludable (100%), tavoclaude CRÍTICA (0%), y clasclaude (80%)
+        let codex_acc = AccountQuota {
+            prefix: "tavocodex".to_string(),
+            auth_file: "tavocodex.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "plus".to_string(),
+            rem_wk: 100,
+            reset_wk: "plus".to_string(),
+            ..Default::default()
+        };
+        let claude_acc = AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            rem_5h: 0,
+            reset_5h: "1h 10m".to_string(),
+            rem_wk: 0,
+            reset_wk: "1d 2h".to_string(),
+            is_critical: true,
+            ..Default::default()
+        };
+        let clas_acc = AccountQuota {
+            prefix: "clasclaude".to_string(),
+            auth_file: "config.yaml#clasclaude".to_string(),
+            rem_5h: 80,
+            reset_5h: "3h 00m".to_string(),
+            rem_wk: 80,
+            reset_wk: "4d 10h".to_string(),
+            ..Default::default()
+        };
+
+        let accounts = vec![codex_acc, claude_acc, clas_acc];
+
+        // Sesión activa ejecutando fleet-tavo en estado working
+        let active_session = AgentSession {
+            agent: "fleet-tavo".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("tavoclaude".to_string()),
+            model_short: "claude-opus-5-5".to_string(),
+            model: "tavoclaude/claude-opus-5-5".to_string(),
+            ..Default::default()
+        };
+
+        let panes = vec![];
+
+        let discovered = discover_orchestrators(target_dir, &accounts, &active_session, &panes);
+        assert!(discovered.len() >= 3);
+
+        // fleet-tavo está Working y con cuota crítica (0%) pues su modelo de orquestador usa tavoclaude
+        let tavo = discovered.iter().find(|o| o.name == "fleet-tavo").expect("fleet-tavo debe existir");
+        assert_eq!(tavo.status, OrchestratorStatus::Working);
+        assert!(tavo.is_critical, "La cuota del orquestador debe reflejar la del modelo principal tavoclaude (0%)");
+        assert_eq!(tavo.rem_pct, 0);
+
+        // fleet-codex está Offline (no hay sesión ni pane activo para él) y saludable (100%)
+        let codex = discovered.iter().find(|o| o.name == "fleet-codex").expect("fleet-codex debe existir");
+        assert_eq!(codex.status, OrchestratorStatus::Offline);
+        assert!(!codex.is_critical);
+        assert_eq!(codex.thinking.as_deref(), Some("high"));
+        assert!(codex.is_default);
+
+        // gentle-orchestrator está Offline y saludable (80%)
+        let gentle = discovered.iter().find(|o| o.name == "gentle-orchestrator").expect("gentle-orchestrator debe existir");
+        assert_eq!(gentle.status, OrchestratorStatus::Offline);
+        assert_eq!(gentle.rem_pct, 80);
+
+        // 4. Renderizado en AppState con Orquestadores expandido (card index 4)
+        let mut state = AppState::new();
+        state.collapsed_cards[4] = false; // Expandir Orquestadores
+        state.snapshot.orchestrators = discovered;
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        assert!(screen.contains("Orquestadores"));
+        assert!(screen.contains("fleet-tavo"));
+        assert!(screen.contains("fleet-codex"));
+        assert!(screen.contains("gentle-orchestrator"));
+        assert!(screen.contains("apagado"));
+        assert!(screen.contains("[CUOTA CR\u{00cd}TICA]"));
+        assert!(screen.contains("! CR\u{00cd}TICO: fleet-tavo [x -> migrar]"));
+
+        // En ancho amplio (80 cols), debe mostrar el banner extendido con la sugerencia de migración
+        let render_wide = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 80);
+        let screen_wide = ui::strip_ansi(&render_wide.lines.join("\n"));
+        assert!(screen_wide.contains("! CR\u{00cd}TICO: fleet-tavo (activo) [presion\u{00e1} 'x' -> migrar a fleet-codex]"));
+
+        // 5. Interacción del mouse: clic en el header de Orquestadores (card 4)
+        state.card_bounds = render_out.bounds;
+        let orch_bound = state
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "orquestadores")
+            .expect("bound de la card orquestadores debe existir");
+
+        let click = state.handle_mouse_click(orch_bound.start_line, 0);
+        assert_eq!(click, Some(ClickAction::ToggledCard(4)));
+        assert!(state.collapsed_cards[4]);
+
+        unsafe {
+            std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+            std::env::remove_var("OPENCODE_CONFIG_PATH");
+        }
+    }
 }

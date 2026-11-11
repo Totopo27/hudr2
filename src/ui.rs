@@ -931,22 +931,30 @@ pub fn render_screen_with_diff_and_theme(
                     .map(|o| o.name.as_str())
                     .unwrap_or("alternativo");
 
-                lines.push(draw_row(
-                    &format!(
+                let mig_text = if width < 46 {
+                    format!("{BOLD}{CORAL}! CR\u{00cd}TICO: {} [x: migrar]{RESET}", co.name)
+                } else if width < 56 {
+                    format!("{BOLD}{CORAL}! CR\u{00cd}TICO: {} [x -> migrar]{RESET}", co.name)
+                } else {
+                    format!(
                         "{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activo) [presion\u{00e1} 'x' -> migrar a {target_orch}]{RESET}",
                         co.name
-                    ),
-                    "",
-                    width,
-                ));
+                    )
+                };
+
+                lines.push(draw_row(&mig_text, "", width));
             }
 
             if has_idle_sessions {
-                lines.push(draw_row(
-                    &format!("{TEXT_DIM}>> Sesiones en espera detectadas [presion\u{00e1} 'd' -> liberar]{RESET}"),
-                    "",
-                    width,
-                ));
+                let idle_text = if width < 46 {
+                    format!("{TEXT_DIM}>> En espera [d: liberar]{RESET}")
+                } else if width < 56 {
+                    format!("{TEXT_DIM}>> Sesiones en espera [d: liberar]{RESET}")
+                } else {
+                    format!("{TEXT_DIM}>> Sesiones en espera detectadas [presion\u{00e1} 'd' -> liberar]{RESET}")
+                };
+
+                lines.push(draw_row(&idle_text, "", width));
             }
         }
 

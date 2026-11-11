@@ -1,6 +1,6 @@
 # HUDR2 Card Catalog
 
-`hudr2` renders 11 collapsible cards (toggled via keys `1..9`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
+`hudr2` renders 12 collapsible cards (toggled via keys `1..9`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
 
 | Index | Key | `CardBounds.id` | Title in `src/ui.rs` | Default State |
 | :---: | :---: | :--- | :--- | :--- |
@@ -8,13 +8,14 @@
 | `1` | `2` | `contexto` | `Contexto` | Expanded |
 | `2` | `3` | `proyecto` | `~ Proyecto` | **Collapsed** |
 | `3` | `4` | `integraciones` | `Integraciones` | Expanded |
-| `4` | `5` | `pools` | `Cuota de Modelos` | Expanded |
-| `5` | `6` | `git` | `Cambios` | Expanded |
-| `6` | `7` | `engram` | `Engram` | Expanded |
-| `7` | `8` | `tools` | `Herramientas` | Expanded |
-| `8` | `9` | `mcp` | `MCP` | Expanded |
-| `9` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
-| `10` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
+| `4` | `5` | `orquestadores` | `Orquestadores` | Expanded |
+| `5` | `6` | `pools` | `Cuota de Modelos` | Expanded |
+| `6` | `7` | `git` | `Cambios` | Expanded |
+| `7` | `8` | `engram` | `Engram` | Expanded |
+| `8` | `9` | `tools` | `Herramientas` | Expanded |
+| `9` | `9` | `mcp` | `MCP` | Expanded |
+| `10` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
+| `11` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
 
 ---
 
@@ -48,15 +49,28 @@
   - Glyph: `●` (`MINT`) if available and healthy, `!` (`AMBER`/`CORAL`) if warning/critical, `?` (`AMBER`) if HTTP or credential error/expired. No active-session glyphs (`>`, colored bullets) or prefix dimming; all integrations render cleanly with uniform `TEXT_PRIMARY`.
   - For OAuth accounts: inline `5h` gauge + `rem_5h%` + `Wk:rem_wk%` + `en <reset_5h>` (or `[AGOTÁNDOSE]` / `[AVISO 70%]`).
   - For API key and subscription accounts (Claude, Codex): inline gauge reflecting remaining balance percentage or session cost + `$XX.XX disp` / `$X.XX sesión` + plan or key badge (`[plus]`, `[pro]`, `[team]`, `[codex]`, `[api-key]`) (or `[SALDO AGOTADO]` when `<= 8%` / `[AVISO SALDO]` when `<= 20%`). Bypasses HTTP quota network sweeps to Google endpoints and validates credentials locally.
-- **Alert block:** Shows `flash_notice` (when active). Active-account migration alerts (`(activa) [presioná 'x' -> migrar]`) are decoupled from this card and reserved for session-scoped quota telemetry.
+- **Alert block:** Shows `flash_notice` (when active). Active-account migration alerts (`(activa) [presioná 'x' -> migrar]`) are decoupled from this card and reserved for session-scoped quota telemetry and the `Orquestadores` card.
 
-## 4. `Cuota de Modelos` (`id: "pools"`, index `4`)
+## 4. `Orquestadores` (`id: "orquestadores"`, index `4`)
+- **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `CORAL` when an orchestrator's sovereign model has exhausted quota).
+- **Discovery:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json`) profiles/orchestrator agents. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
+- **Status Lifecycle:**
+  - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session or Herdr pane.
+  - `Idle` (`-- en espera`, `AMBER` `●`): Orchestrator paused, session active but idle with completed turns or active pane.
+  - `Offline` (`○ apagado`, `TEXT_DIM` `○`): Orchestrator configured but dormant / unused.
+- **Sovereign Quota Governance:** Migration urgency is governed **strictly** by the sovereign orchestrator model (`orchestrator.model` in `profiles.json`), ignoring secondary subagent models.
+- **Interactive Actions & Migration:**
+  - Migration banner: When the active working orchestrator has depleted its sovereign quota (`is_critical`), renders responsive migration alert `! CRÍTICO: <name> (activo) [presioná 'x' -> migrar a <target>]` (adapting dynamically to `[x -> migrar]` or `[x: migrar]` on narrower widths).
+  - Idle session release banner: When paused/idle sessions are detected, renders `>> Sesiones en espera detectadas [presioná 'd' -> liberar]`.
+  - Keybindings: `5` toggles collapse, `x` triggers orchestrator migration, `d` triggers confined idle session liberation.
+
+## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)
 - **Header:** `Cuota de Modelos · <active_acc_prefix> *` (scoped to `snap.agent_session.local_prefix`, fallback to first account).
 - **Pool rows:**
   - For OAuth accounts (Antigravity): renders every `QuotaPool` in `target_account.pools` (`Gemini Wk`, `Gemini 5h`, `Claude Wk`, `Claude 5h`, plus dynamic `Argon`, `GPT`, `DeepSeek`, `Qwen` pools) with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`).
   - For API key and subscription accounts (Claude, Codex): renders truthful financial/session pools (`<Provider> API` or `Codex <Plan>` with active session cost `$X.XXX` and `<Provider> Saldo` with remaining balance `$XX.XX`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
 
-## 5. `Cambios` (`id: "git"`, index `5`)
+## 6. `Cambios` (`id: "git"`, index `6`)
 - **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).
 - **Rows:**
   - Optional conflict radar alert (`! CONFLICTO: <files>` + `[colisión]` in `CORAL`) when two or more active sessions/worktrees modify the same tracked file concurrently.
@@ -66,14 +80,20 @@
   - Up to 6 clickable file rows (`action_type: Some("git_file_diff")`): `> [M|A|D|?] <path>` with `+<added> -<deleted>`.
   - Clicking a file toggles an inline diff preview underneath (guarded by `is_sensitive_file`) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) that opens the centered floating **Quick Peek** modal (`Space` / `p` to toggle, `↑`/`↓` or wheel to scroll, `Esc` or click header to close).
 
-## 6. `Engram` (`id: "engram"`, index `6`)
+## 7. `Engram` (`id: "engram"`, index `7`)
 - **Header:** `Engram: <project> ^` (`^` green if daemon `:7437` is online, `v` dim if offline).
 - **Rows:**
   - `Local (engram.db)` + `● En linea · <N> obs` (or `Desconectado`).
   - `Cloud: <sync_status>`.
   - Optional `Handoff #<id> (<updated_at>)` block showing extracted lines from the latest `session_summary` observation.
 
-## 7. `Stack · Ecosistema` (`id: "ecosystem"`, index `7`)
+## 8. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `8` & `9`)
+- `Herramientas` is index `8` (key `9`).
+- `MCP` is index `9` (key `9`).
+- **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
+- **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
+
+## 10. `Stack · Ecosistema` (`id: "ecosystem"`, index `10`, key `e`)
 - **Header:** `Stack · Ecosistema` (or `Stack · Ecosistema ↑<N>` in `AMBER` when updates are available).
 - **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
   - Up-to-date: `● <name> <version>` (`MINT`).
@@ -82,12 +102,17 @@
   - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
 - **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 
-## 8. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `8`)
-- Both cards share collapse slot `collapsed[8]` (key `9`).
-- **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
-- **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
-
-## 10. `Personalizar` (`id: "personalizar"`, index `10`, key `0` / `t`)
+## 11. `Personalizar` (`id: "personalizar"`, index `11`, key `0` / `t`)
+- **Header:** `Personalizar` (collapsed by default).
+- **Rows:**
+  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Orquestadores`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
+  - `[x] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`). Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
+  - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
+  - Redundant fixed row was eliminated to prevent vertical waste (`personalizar` can never hide itself).
+  - **Divider & Settings section:**
+    - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
+    - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
+    - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`), controlling online version checks.
 - **Header:** `Personalizar` (collapsed by default).
 - **Rows:**
   - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
