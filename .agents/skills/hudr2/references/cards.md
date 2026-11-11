@@ -1,22 +1,16 @@
-# HUDR2 Card Catalog
+# HUDR2 Card Catalog & Tab System
 
-`hudr2` renders 13 collapsible cards (toggled via keys `1..9`, `$`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
+`hudr2` organiza sus 13 tarjetas en un sistema de navegación por pestañas temáticas (`1..5`, `0`/`t`/`,`/`g` para Ajustes, o `Tab`/`Shift+Tab` para ciclar), renderizadas mediante la barra interactiva `draw_tab_bar_theme` y navegables también mediante clic directo con ratón. En modo legado o vertical continuo (`[ vertical ]`), soporta renderizado completo en cascada pasando `tab: None` (alternable con `v` o desde Personalizar).
 
-| Index | Key | `CardBounds.id` | Title in `src/ui.rs` | Default State |
-| :---: | :---: | :--- | :--- | :--- |
-| `0` | `1` | `estado` | `Estado` | Expanded |
-| `1` | `2` | `contexto` | `Contexto` | Expanded |
-| `2` | `3` | `proyecto` | `~ Proyecto` | **Collapsed** |
-| `3` | `4` | `integraciones` | `Integraciones` | Expanded |
-| `4` | `5` | `orquestadores` | `Orquestadores` | Expanded |
-| `5` | `6` | `pools` | `Cuota de Modelos` | Expanded |
-| `6` | `$` | `saldos` | `Saldos API` | Expanded (Auto) |
-| `7` | `7` | `git` | `Cambios` | Expanded |
-| `8` | `8` | `engram` | `Engram` | Expanded |
-| `9` | `9` | `tools` | `Herramientas` | Expanded |
-| `10` | `p` | `mcp` | `MCP` | Expanded |
-| `11` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
-| `12` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
+## Distribución de Tarjetas por Pestaña
+
+| Pestaña | Tecla / Clic | Orden en Pantalla | `CardBounds.id` | Título en `src/ui.rs` | Estado por Defecto |
+| :--- | :---: | :---: | :--- | :--- | :--- |
+| **`[ 1:Ses ]`** | `1` / `Tab` | 1<br>2<br>3 | `estado`<br>`contexto`<br>`mcp` | `Estado`<br>`Contexto`<br>`MCP` | Expanded<br>Expanded<br>Expanded |
+| **`[ 2:Cód ]`** | `2` / `Tab` | 4<br>5<br>6 | `proyecto`<br>`git`<br>`tools` | `~ Proyecto`<br>`Cambios`<br>`Herramientas` | Expanded<br>Expanded<br>Expanded |
+| **`[ 3:Mod ]`** | `3` / `Tab` | 7<br>8<br>9<br>10 | `integraciones`<br>`orquestadores`<br>`pools`<br>`saldos` | `Integraciones`<br>`Orquestadores`<br>`Cuota de Modelos`<br>`Saldos API` | Expanded<br>Expanded<br>Expanded<br>Expanded (Auto) |
+| **`[ 4:Stk ]`** | `4` / `Tab` | 11<br>12 | `engram`<br>`ecosystem` | `Engram`<br>`Stack · Ecosistema` | Expanded<br>Expanded |
+| **`[ ☼ Aju ]`** | `5` / `0` / `t` / `v` | 13 | `personalizar` | `Personalizar` | **Expanded** (vista de ajustes) |
 
 ---
 

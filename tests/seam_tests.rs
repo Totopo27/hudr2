@@ -1850,7 +1850,7 @@ mod tests {
         // Recargar en un nuevo AppState y comprobar que recuerda las tarjetas colapsadas
         let st2 = AppState::with_config(Some(cfg_path), None);
         assert!(st2.collapsed_cards[0]);
-        assert!(st2.collapsed_cards[2]); // proyecto venía colapsado por defecto
+        assert!(!st2.collapsed_cards[2]); // arranca expandido por defecto
         assert!(st2.collapsed_cards[5]);
         assert!(!st2.collapsed_cards[1]);
     }
@@ -2537,7 +2537,9 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         st.toggle_card_visibility("ecosystem");
         st.toggle_card_visibility("engram");
-        st.toggle_card(12); // expandir tarjetas
+        if st.collapsed_cards[12] {
+            st.toggle_card(12);
+        }
         st.set_sidebar_name(Some("Mi Proyecto HUD".to_string()));
         st.cycle_theme(); // avanza a "linear"
 
@@ -4323,8 +4325,10 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         assert!(st.check_updates); // default true
 
-        // Expandir tarjeta personalizar (idx 12) y renderizar
-        st.toggle_card(12);
+        // Asegurar que la tarjeta personalizar (idx 12) esté expandida y renderizar
+        if st.collapsed_cards[12] {
+            st.toggle_card(12);
+        }
         let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
         st.card_bounds = render_out.bounds;
 
@@ -6217,5 +6221,211 @@ api-keys:
         unsafe {
             std::env::remove_var("HUDR2_CONFIG_PATH");
         }
+    }
+
+    #[test]
+    fn test_tabbed_sidebar_rendering_and_card_distribution() {
+        use hudr2::state::ActiveTab;
+        let mut state = AppState::new();
+        state.collapsed_cards = [false; 13];
+
+        // 1. Pestaña 1: Sesión -> Estado, Contexto, MCP
+        let out_sesion = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Sesion),
+        );
+        let text_sesion = out_sesion.lines.join("\n");
+        assert!(text_sesion.contains("Estado"), "Sesión debe incluir Estado");
+        assert!(text_sesion.contains("Contexto"), "Sesión debe incluir Contexto");
+        assert!(text_sesion.contains("MCP"), "Sesión debe incluir MCP");
+        assert!(!text_sesion.contains("Integraciones"), "Sesión no debe incluir Integraciones");
+        assert!(!text_sesion.contains("Orquestadores"), "Sesión no debe incluir Orquestadores");
+        assert!(!text_sesion.contains("Cambios"), "Sesión no debe incluir Cambios (Git)");
+        assert!(!text_sesion.contains("Engram"), "Sesión no debe incluir Engram");
+
+        // 2. Pestaña 2: Código -> Proyecto, Cambios, Herramientas en ese orden exacto
+        let out_codigo = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Codigo),
+        );
+        let text_codigo = out_codigo.lines.join("\n");
+        assert!(text_codigo.contains("Proyecto"), "Código debe incluir Proyecto");
+        assert!(text_codigo.contains("Cambios"), "Código debe incluir Cambios (Git)");
+        assert!(text_codigo.contains("Herramientas"), "Código debe incluir Herramientas");
+        assert!(!text_codigo.contains("Estado"), "Código no debe incluir Estado");
+        assert!(!text_codigo.contains("Integraciones"), "Código no debe incluir Integraciones");
+        assert!(!text_codigo.contains("Orquestadores"), "Código no debe incluir Orquestadores");
+
+        // Verificar orden relativo en Código: Proyecto < Cambios < Herramientas
+        let pos_proj = text_codigo.find("Proyecto").unwrap();
+        let pos_git = text_codigo.find("Cambios").unwrap();
+        let pos_tools = text_codigo.find("Herramientas").unwrap();
+        assert!(pos_proj < pos_git, "Proyecto debe aparecer antes de Cambios");
+        assert!(pos_git < pos_tools, "Cambios debe aparecer antes de Herramientas");
+
+        // 3. Pestaña 3: Modelos -> Integraciones, Orquestadores, Cuota de Modelos, Saldos API
+        state.snapshot.accounts.push(hudr2::models::AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "tavoclaude.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "api-key".to_string(),
+            rem_wk: 100,
+            reset_wk: "api-key".to_string(),
+            ..Default::default()
+        });
+        let out_modelos = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Modelos),
+        );
+        let text_modelos = out_modelos.lines.join("\n");
+        assert!(text_modelos.contains("Integraciones"), "Modelos debe incluir Integraciones");
+        assert!(text_modelos.contains("Orquestadores"), "Modelos debe incluir Orquestadores");
+        assert!(text_modelos.contains("Cuota de Modelos"), "Modelos debe incluir Cuota de Modelos");
+        assert!(text_modelos.contains("Saldos API"), "Modelos debe incluir Saldos API");
+        assert!(!text_modelos.contains("Estado"), "Modelos no debe incluir Estado");
+        assert!(!text_modelos.contains("Proyecto"), "Modelos no debe incluir Proyecto");
+        assert!(!text_modelos.contains("Cambios"), "Modelos no debe incluir Cambios");
+
+        let pos_int = text_modelos.find("Integraciones").unwrap();
+        let pos_orch = text_modelos.find("Orquestadores").unwrap();
+        let pos_pools = text_modelos.find("Cuota de Modelos").unwrap();
+        let pos_saldos = text_modelos.find("Saldos API").unwrap();
+        assert!(pos_int < pos_orch, "Integraciones debe aparecer antes de Orquestadores");
+        assert!(pos_orch < pos_pools, "Orquestadores debe aparecer antes de Cuota de Modelos");
+        assert!(pos_pools < pos_saldos, "Cuota de Modelos debe aparecer antes de Saldos API");
+
+        // 4. Pestaña 4: Stack -> Engram, Stack · Ecosistema
+        let out_stack = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Stack),
+        );
+        let text_stack = out_stack.lines.join("\n");
+        assert!(text_stack.contains("Engram"), "Stack debe incluir Engram");
+        assert!(text_stack.contains("Stack"), "Stack debe incluir Stack · Ecosistema");
+        assert!(!text_stack.contains("Estado"), "Stack no debe incluir Estado");
+        assert!(!text_stack.contains("Proyecto"), "Stack no debe incluir Proyecto");
+
+        // 5. Pestaña 5: Ajustes -> Personalizar (siempre expandida)
+        let out_ajustes = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Ajustes),
+        );
+        let text_ajustes = out_ajustes.lines.join("\n");
+        assert!(text_ajustes.contains("Personalizar"), "Ajustes debe incluir Personalizar");
+        assert!(text_ajustes.contains("Nombre"), "Ajustes debe mostrar la fila Nombre");
+        assert!(text_ajustes.contains("Tema"), "Ajustes debe mostrar la fila Tema");
+        assert!(text_ajustes.contains("Updates"), "Ajustes debe mostrar la fila Updates");
+    }
+
+    #[test]
+    fn test_tabbed_sidebar_mouse_click_switching() {
+        use hudr2::state::ActiveTab;
+        let mut state = AppState::new();
+        assert_eq!(state.active_tab, ActiveTab::Sesion);
+
+        // Renderizar pestaña Sesión en ancho 48
+        let out = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(state.active_tab),
+        );
+        state.tab_bounds = out.tab_bounds;
+        state.card_bounds = out.bounds;
+
+        // Encontrar bound de pestaña Código
+        let codigo_bound = state
+            .tab_bounds
+            .iter()
+            .find(|b| b.tab == ActiveTab::Codigo)
+            .expect("bound para Código debe existir");
+
+        // Simular clic en la columna media de Código
+        let click_col = (codigo_bound.col_start + codigo_bound.col_end) / 2;
+        let switched = state.handle_tab_click(click_col, codigo_bound.line, 0);
+        assert_eq!(switched, Some(ActiveTab::Codigo));
+        assert_eq!(state.active_tab, ActiveTab::Codigo);
+        assert!(state.needs_redraw);
+
+        // Encontrar bound de Modelos
+        let modelos_bound = state
+            .tab_bounds
+            .iter()
+            .find(|b| b.tab == ActiveTab::Modelos)
+            .expect("bound para Modelos debe existir");
+        let click_modelos = (modelos_bound.col_start + modelos_bound.col_end) / 2;
+        let switched_modelos = state.handle_tab_click(click_modelos, modelos_bound.line, 0);
+        assert_eq!(switched_modelos, Some(ActiveTab::Modelos));
+        assert_eq!(state.active_tab, ActiveTab::Modelos);
+
+        // Encontrar bound de Ajustes
+        let ajustes_bound = state
+            .tab_bounds
+            .iter()
+            .find(|b| b.tab == ActiveTab::Ajustes)
+            .expect("bound para Ajustes debe existir");
+        let click_ajustes = (ajustes_bound.col_start + ajustes_bound.col_end) / 2;
+        let switched_ajustes = state.handle_tab_click(click_ajustes, ajustes_bound.line, 0);
+        assert_eq!(switched_ajustes, Some(ActiveTab::Ajustes));
+        assert_eq!(state.active_tab, ActiveTab::Ajustes);
+    }
+
+    #[test]
+    fn test_tabbed_sidebar_cycle_next_prev() {
+        use hudr2::state::ActiveTab;
+        let mut state = AppState::new();
+        assert_eq!(state.active_tab, ActiveTab::Sesion);
+
+        assert_eq!(state.next_tab(), ActiveTab::Codigo);
+        assert_eq!(state.next_tab(), ActiveTab::Modelos);
+        assert_eq!(state.next_tab(), ActiveTab::Stack);
+        assert_eq!(state.next_tab(), ActiveTab::Ajustes);
+        assert_eq!(state.next_tab(), ActiveTab::Sesion); // wrap around
+
+        assert_eq!(state.prev_tab(), ActiveTab::Ajustes);
+        assert_eq!(state.prev_tab(), ActiveTab::Stack);
+        assert_eq!(state.prev_tab(), ActiveTab::Modelos);
+        assert_eq!(state.prev_tab(), ActiveTab::Codigo);
+        assert_eq!(state.prev_tab(), ActiveTab::Sesion);
     }
 }

@@ -1,5 +1,5 @@
 use hudr2::herdr::{HerdrClient, HerdrWireEvent};
-use hudr2::{app, state, ui};
+use hudr2::{app, state, theme, ui};
 
 use crossterm::ExecutableCommand;
 use crossterm::event::{
@@ -460,7 +460,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let mut render_out = {
                 let state = app_state.read().await;
-                ui::render_screen_with_diff(
+                ui::render_screen_tabbed(
                     &state.snapshot,
                     &state.collapsed_cards,
                     state.flash_notice.as_deref(),
@@ -468,6 +468,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &state.selected_diff_lines,
                     &state.hidden_cards,
                     width,
+                    theme::active_theme(),
+                    Some(state.active_tab),
                 )
             };
             let base_total_lines = render_out.lines.len();
@@ -483,6 +485,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     ui::apply_quick_peek_overlay(&mut render_out, peek, offset, width, max_visible);
                 }
                 state.card_bounds = render_out.bounds;
+                state.tab_bounds = render_out.tab_bounds;
                 state.needs_redraw = false;
                 offset
             };
@@ -597,7 +600,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let mut state = app_state.write().await;
-                            if let Some(action) =
+                            if let Some(switched_tab) = state.handle_tab_click(
+                                mouse.column as usize,
+                                mouse.row as usize,
+                                last_rendered_offset,
+                            ) {
+                                if switched_tab == state::ActiveTab::Codigo
+                                    && !state.collapsed_cards[2]
+                                    && state.snapshot.tree.root_path.is_empty()
+                                {
+                                    refresh_needed = true;
+                                }
+                            } else if let Some(action) =
                                 state.handle_mouse_click(mouse.row as usize, last_rendered_offset)
                             {
                                 match action {
@@ -735,25 +749,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 refresh_needed = true;
                                             }
                                         }
-                                        KeyCode::Char('1') => state.toggle_card(0), // Estado
-                                        KeyCode::Char('2') => state.toggle_card(1), // Contexto
-                                        KeyCode::Char('3') => {
-                                            state.toggle_card(2); // Proyecto
+                                        KeyCode::Tab => {
+                                            let next = state.next_tab();
+                                            if next == state::ActiveTab::Codigo
+                                                && !state.collapsed_cards[2]
+                                                && state.snapshot.tree.root_path.is_empty()
+                                            {
+                                                refresh_needed = true;
+                                            }
+                                        }
+                                        KeyCode::BackTab => {
+                                            let prev = state.prev_tab();
+                                            if prev == state::ActiveTab::Codigo
+                                                && !state.collapsed_cards[2]
+                                                && state.snapshot.tree.root_path.is_empty()
+                                            {
+                                                refresh_needed = true;
+                                            }
+                                        }
+                                        KeyCode::Char('1') => {
+                                            state.switch_tab(state::ActiveTab::Sesion);
+                                        }
+                                        KeyCode::Char('2') => {
+                                            state.switch_tab(state::ActiveTab::Codigo);
                                             if !state.collapsed_cards[2]
                                                 && state.snapshot.tree.root_path.is_empty()
                                             {
                                                 refresh_needed = true;
                                             }
                                         }
-                                        KeyCode::Char('4') => state.toggle_card(3), // Integraciones
-                                        KeyCode::Char('5') => state.toggle_card(4), // Orquestadores
-                                        KeyCode::Char('6') => state.toggle_card(5), // Cuotas de Modelos
-                                        KeyCode::Char('$') => state.toggle_card(6), // Saldos API
-                                        KeyCode::Char('7') => state.toggle_card(7), // Cambios
-                                        KeyCode::Char('8') => state.toggle_card(8), // Engram
-                                        KeyCode::Char('9') => state.toggle_card(9), // Herramientas
-                                        KeyCode::Char('e') => state.toggle_card(11), // Stack · Ecosistema
-                                        KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(12), // Personalizar
+                                        KeyCode::Char('3') => {
+                                            state.switch_tab(state::ActiveTab::Modelos);
+                                        }
+                                        KeyCode::Char('4') => {
+                                            state.switch_tab(state::ActiveTab::Stack);
+                                        }
+                                        KeyCode::Char('5')
+                                        | KeyCode::Char('0')
+                                        | KeyCode::Char('t')
+                                        | KeyCode::Char(',')
+                                        | KeyCode::Char('g') => {
+                                            state.switch_tab(state::ActiveTab::Ajustes);
+                                        }
                                         KeyCode::Char('n') => {
                                             state.start_edit_sidebar_name();
                                         }

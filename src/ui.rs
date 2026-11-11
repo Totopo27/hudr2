@@ -3,6 +3,7 @@ use crate::config::{
     TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::models::TelemetrySnapshot;
+use crate::state::{ActiveTab, TabBounds};
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
@@ -17,6 +18,7 @@ pub struct CardBounds {
 pub struct RenderOutput {
     pub lines: Vec<String>,
     pub bounds: Vec<CardBounds>,
+    pub tab_bounds: Vec<TabBounds>,
 }
 
 /// Devuelve la longitud en bytes de la secuencia de escape ANSI que empieza en `s`
@@ -232,6 +234,122 @@ pub fn draw_row_theme(
     )
 }
 
+pub fn draw_tab_bar_theme(
+    active: ActiveTab,
+    width: usize,
+    theme: &crate::theme::Theme,
+    line_idx: usize,
+) -> (String, Vec<TabBounds>) {
+    let border = theme.border;
+    let accent_secondary = theme.accent_secondary;
+    let text_primary = theme.text_primary;
+    let text_muted = theme.text_muted;
+    let text_dim = theme.text_dim;
+
+    let tabs = [
+        ActiveTab::Sesion,
+        ActiveTab::Codigo,
+        ActiveTab::Modelos,
+        ActiveTab::Stack,
+        ActiveTab::Ajustes,
+    ];
+
+    let labels: [&str; 5] = if width >= 56 {
+        ["1: Sesión", "2: Código", "3: Modelos", "4: Stack", "☼ Ajustes"]
+    } else if width >= 44 {
+        ["1:Ses", "2:Cód", "3:Mod", "4:Stk", "☼ Aju"]
+    } else {
+        ["1", "2", "3", "4", "☼"]
+    };
+
+    let mut line = String::new();
+    let mut visual_col = 0;
+    let mut tab_bounds = Vec::new();
+
+    // Borde izquierdo ╭─
+    line.push_str(border);
+    line.push_str("\u{256d}\u{2500}");
+    line.push_str(RESET);
+    visual_col += 2;
+
+    let total_tabs_len: usize = labels.iter().map(|l| string_width(l) + 2).sum();
+    let remaining = width.saturating_sub(4 + total_tabs_len);
+    let gap_count = tabs.len().saturating_sub(1);
+    let gap_size = remaining.checked_div(gap_count).unwrap_or(1);
+    let extra_spaces = remaining.checked_rem(gap_count).unwrap_or(0);
+
+    for (i, (&t, label)) in tabs.iter().zip(labels.iter()).enumerate() {
+        if i > 0 {
+            let current_gap = gap_size + if i <= extra_spaces { 1 } else { 0 };
+            if current_gap >= 3 {
+                let dashes = current_gap - 2;
+                line.push(' ');
+                line.push_str(border);
+                line.push_str(&"\u{2500}".repeat(dashes));
+                line.push_str(RESET);
+                line.push(' ');
+            } else if current_gap == 2 {
+                line.push_str(border);
+                line.push_str("\u{2500}\u{2500}");
+                line.push_str(RESET);
+            } else if current_gap == 1 {
+                line.push_str(border);
+                line.push('\u{2500}');
+                line.push_str(RESET);
+            }
+            visual_col += current_gap;
+        }
+
+        let col_start = visual_col;
+        let is_active = t == active;
+
+        if is_active {
+            line.push_str(&format!(
+                "{BOLD}{accent_secondary}[{RESET}{BOLD}{text_primary}{}{RESET}{BOLD}{accent_secondary}]{RESET}",
+                label
+            ));
+        } else {
+            line.push_str(&format!("{text_dim}[{text_muted}{}{text_dim}]{RESET}", label));
+        }
+        let tab_w = string_width(label) + 2;
+        visual_col += tab_w;
+        let col_end = visual_col.saturating_sub(1);
+
+        tab_bounds.push(TabBounds {
+            tab: t,
+            line: line_idx,
+            col_start,
+            col_end,
+        });
+    }
+
+    // Borde derecho ─╮
+    line.push_str(border);
+    line.push_str("\u{2500}\u{256e}");
+    line.push_str(RESET);
+    visual_col += 2;
+
+    if visual_col < width {
+        let pad = width - visual_col;
+        line.push_str(&" ".repeat(pad));
+    }
+
+    (line, tab_bounds)
+}
+
+fn should_render_card(card_id: &str, tab: Option<ActiveTab>) -> bool {
+    match tab {
+        None => true,
+        Some(t) => match t {
+            ActiveTab::Sesion => matches!(card_id, "estado" | "contexto" | "mcp"),
+            ActiveTab::Codigo => matches!(card_id, "proyecto" | "git" | "tools"),
+            ActiveTab::Modelos => matches!(card_id, "integraciones" | "orquestadores" | "pools" | "saldos"),
+            ActiveTab::Stack => matches!(card_id, "engram" | "ecosystem"),
+            ActiveTab::Ajustes => matches!(card_id, "personalizar"),
+        },
+    }
+}
+
 pub fn render_gauge_inline(percent: u8, available_cells: usize, color: &str) -> String {
     let p = percent.clamp(0, 100) as usize;
     let mut filled = (p * available_cells) / 100;
@@ -373,6 +491,31 @@ pub fn render_screen_with_diff_and_theme(
     width: usize,
     theme: &crate::theme::Theme,
 ) -> RenderOutput {
+    render_screen_tabbed(
+        snap,
+        collapsed,
+        flash_notice,
+        selected_diff_file,
+        selected_diff_lines,
+        hidden_cards,
+        width,
+        theme,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_screen_tabbed(
+    snap: &TelemetrySnapshot,
+    collapsed: &[bool; 12],
+    flash_notice: Option<&str>,
+    selected_diff_file: Option<&str>,
+    selected_diff_lines: &[String],
+    hidden_cards: &std::collections::HashSet<String>,
+    width: usize,
+    theme: &crate::theme::Theme,
+    tab: Option<ActiveTab>,
+) -> RenderOutput {
     let mut lines = Vec::new();
     let mut bounds = Vec::new();
 
@@ -421,8 +564,16 @@ pub fn render_screen_with_diff_and_theme(
     };
     lines.push(format!("{}{accent_primary}{safe_banner}{RESET}", " ".repeat(banner_pad)));
 
+    let mut tab_bounds = Vec::new();
+    if let Some(active) = tab {
+        let tab_line_idx = lines.len();
+        let (tab_line, bounds_for_tabs) = draw_tab_bar_theme(active, width, theme, tab_line_idx);
+        lines.push(tab_line);
+        tab_bounds = bounds_for_tabs;
+    }
+
     // 2. Estado Card (0)
-    if !hidden_cards.contains("estado") {
+    if !hidden_cards.contains("estado") && should_render_card("estado", tab) {
         let estado_start = lines.len();
         let is_working = snap.agent_session.agent_status == "working";
         let petal = if is_working {
@@ -530,7 +681,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 3. Contexto Card (1)
-    if !hidden_cards.contains("contexto") {
+    if !hidden_cards.contains("contexto") && should_render_card("contexto", tab) {
         let ctx_start = lines.len();
         lines.push(draw_top(
             &format!("{BOLD}{title_color}Contexto{RESET}"),
@@ -634,7 +785,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 4. Proyecto Card (Árbol 2 niveles) (2)
-    if !hidden_cards.contains("proyecto") {
+    if !hidden_cards.contains("proyecto") && should_render_card("proyecto", tab) {
         let proj_start = lines.len();
         let stats_badge = format!(
             "{TEXT_DIM}{}d \u{00b7} {}f{RESET}",
@@ -733,7 +884,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 5. Integraciones Card (3)
-    if !hidden_cards.contains("integraciones") {
+    if !hidden_cards.contains("integraciones") && should_render_card("integraciones", tab) {
         let int_start = lines.len();
         let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
     let critical_count = snap
@@ -911,7 +1062,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 5. Orquestadores Card (4)
-    if !hidden_cards.contains("orquestadores") {
+    if !hidden_cards.contains("orquestadores") && should_render_card("orquestadores", tab) {
         let orch_start = lines.len();
         let total_count = snap.orchestrators.len();
         let critical_count = snap.orchestrators.iter().filter(|o| o.is_critical).count();
@@ -1047,7 +1198,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 6. Pool de Modelos / Cuotas Breakdown Card (5)
-    if !hidden_cards.contains("pools") {
+    if !hidden_cards.contains("pools") && should_render_card("pools", tab) {
         let pools_start = lines.len();
 
         // Afinidad con la sesión del espacio actual:
@@ -1463,7 +1614,7 @@ pub fn render_screen_with_diff_and_theme(
         .filter(|a| crate::quotas::is_api_key(a))
         .collect();
 
-    if !hidden_cards.contains("saldos") && !api_accounts.is_empty() {
+    if !hidden_cards.contains("saldos") && should_render_card("saldos", tab) && !api_accounts.is_empty() {
         let saldos_start = lines.len();
         let num_profiles = api_accounts.len();
         let p_label = if num_profiles == 1 {
@@ -1639,7 +1790,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 7. Cambios / Git Card (5)
-    if !hidden_cards.contains("git") {
+    if !hidden_cards.contains("git") && should_render_card("git", tab) {
         let git_start = lines.len();
     let ag_changes = if !snap.git.cross_session_conflicts.is_empty() {
         format!(
@@ -1811,7 +1962,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 8. Engram Card (7)
-    if !hidden_cards.contains("engram") {
+    if !hidden_cards.contains("engram") && should_render_card("engram", tab) {
         let engram_start = lines.len();
     lines.push(draw_top(
         &format!("{ACCENT_PRIMARY}Engram:{RESET} {CYAN}{folder}{RESET} {TEXT_DIM}^{RESET}"),
@@ -1892,7 +2043,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 8. Herramientas Card (idx 7)
-    if !hidden_cards.contains("tools") {
+    if !hidden_cards.contains("tools") && should_render_card("tools", tab) {
         let tools_start = lines.len();
         let tool_title = format!(
             "{BOLD}{title_color}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
@@ -1920,7 +2071,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 9. MCP Card (idx 9)
-    if !hidden_cards.contains("mcp") {
+    if !hidden_cards.contains("mcp") && should_render_card("mcp", tab) {
         let mcp_start = lines.len();
         lines.push(draw_top(
             &format!(
@@ -1958,7 +2109,7 @@ pub fn render_screen_with_diff_and_theme(
     }
 
     // 10. Stack · Ecosistema Card (idx 9, tecla 'e')
-    if !hidden_cards.contains("ecosystem") {
+    if !hidden_cards.contains("ecosystem") && should_render_card("ecosystem", tab) {
         let eco_start = lines.len();
         let update_count = if snap.check_updates {
             snap.ecosystem
@@ -2075,117 +2226,132 @@ pub fn render_screen_with_diff_and_theme(
         });
     }
 
-    // 11. Personalizar Card (10) — Selector interactivo de visibilidad, nombre y tema
-    let personalizar_start = lines.len();
-    let personalizar_title = format!("{BOLD}{title_color}Personalizar{RESET}");
-    lines.push(draw_top(&personalizar_title, collapsed[12], width));
-    if !collapsed[12] {
-        let cards_info: [(&str, &str); 12] = [
-            ("estado", "Estado"),
-            ("contexto", "Contexto"),
-            ("proyecto", "Proyecto"),
-            ("integraciones", "Integraciones"),
-            ("orquestadores", "Orquestadores"),
-            ("pools", "Cuota de Modelos"),
-            ("saldos", "Saldos API"),
-            ("git", "Cambios (Git)"),
-            ("engram", "Engram"),
-            ("tools", "Herramientas"),
-            ("mcp", "MCP"),
-            ("ecosystem", "Stack \u{00b7} Ecosistema"),
-        ];
+    // 12. Personalizar Card (12) — Selector interactivo de visibilidad, nombre y tema
+    if should_render_card("personalizar", tab) {
+        let personalizar_start = lines.len();
+        let personalizar_title = format!("{BOLD}{title_color}Personalizar{RESET}");
+        let is_personalizar_collapsed = if tab == Some(ActiveTab::Ajustes) {
+            false
+        } else {
+            collapsed[12]
+        };
+        lines.push(draw_top(&personalizar_title, is_personalizar_collapsed, width));
+        if !is_personalizar_collapsed {
+            let cards_info: [(&str, &str); 12] = [
+                ("estado", "Estado"),
+                ("contexto", "Contexto"),
+                ("proyecto", "Proyecto"),
+                ("integraciones", "Integraciones"),
+                ("orquestadores", "Orquestadores"),
+                ("pools", "Cuota de Modelos"),
+                ("saldos", "Saldos API"),
+                ("git", "Cambios (Git)"),
+                ("engram", "Engram"),
+                ("tools", "Herramientas"),
+                ("mcp", "MCP"),
+                ("ecosystem", "Stack \u{00b7} Ecosistema"),
+            ];
 
-        for (id, label) in cards_info {
-            let is_hidden = hidden_cards.contains(id);
-            let row_line_idx = lines.len();
-            let (left_box, right_status) = if is_hidden {
-                (
-                    format!("{TEXT_DIM}[ ]{RESET} {TEXT_MUTED}{label}{RESET}"),
-                    format!("{TEXT_DIM}oculta{RESET}"),
-                )
+            for (id, label) in cards_info {
+                let is_hidden = hidden_cards.contains(id);
+                let row_line_idx = lines.len();
+                let (left_box, right_status) = if is_hidden {
+                    (
+                        format!("{TEXT_DIM}[ ]{RESET} {TEXT_MUTED}{label}{RESET}"),
+                        format!("{TEXT_DIM}oculta{RESET}"),
+                    )
+                } else {
+                    (
+                        format!("{MINT}[x]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
+                        format!("{MINT}visible{RESET}"),
+                    )
+                };
+                lines.push(draw_row(&left_box, &right_status, width));
+                bounds.push(CardBounds {
+                    id: "toggle_card_visibility",
+                    start_line: row_line_idx,
+                    end_line: row_line_idx,
+                    action_type: Some("toggle_card_visibility"),
+                    action_path: Some(id.to_string()),
+                });
+            }
+
+            // Divisor para opciones de personalización (Nombre + Tema)
+            lines.push(draw_divider(width));
+
+            // 1. Fila de Nombre personalizado del Sidebar (editable en línea)
+            let name_row_idx = lines.len();
+            if snap.is_editing_name {
+                let input_display = if snap.name_input_buffer.is_empty() {
+                    format!("{TEXT_DIM}_ (escribe nombre){RESET}")
+                } else {
+                    format!(
+                        "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
+                        snap.name_input_buffer
+                    )
+                };
+                let name_left = format!("{label_color}Nombre{RESET}  > {input_display}");
+                let name_right = format!("{AMBER}[Enter|Esc]{RESET}");
+                lines.push(draw_row(&name_left, &name_right, width));
             } else {
-                (
-                    format!("{MINT}[x]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
-                    format!("{MINT}visible{RESET}"),
-                )
-            };
-            lines.push(draw_row(&left_box, &right_status, width));
+                let (name_val, badge_text, badge_color) = match snap
+                    .sidebar_name
+                    .as_deref()
+                    .filter(|s| !s.trim().is_empty())
+                {
+                    Some(n) => (n, "[editar >]", accent_primary),
+                    None => ("HUDR2", "[editar >]", accent_primary),
+                };
+                let name_left = format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{name_val}{RESET}");
+                let name_right = format!("{badge_color}{badge_text}{RESET}");
+                lines.push(draw_row(&name_left, &name_right, width));
+            }
             bounds.push(CardBounds {
-                id: "toggle_card_visibility",
-                start_line: row_line_idx,
-                end_line: row_line_idx,
-                action_type: Some("toggle_card_visibility"),
-                action_path: Some(id.to_string()),
+                id: "edit_sidebar_name",
+                start_line: name_row_idx,
+                end_line: name_row_idx,
+                action_type: Some("edit_sidebar_name"),
+                action_path: None,
+            });
+
+            // 2. Fila interactiva para ciclar temas visuales
+            let theme_label = crate::theme::theme_display_label(snap.theme_name.as_deref());
+            let theme_left = format!("{label_color}Tema{RESET}    {TEXT_PRIMARY}{theme_label}{RESET}");
+            let theme_right = format!("{accent_primary}[cambiar >]{RESET}");
+            let theme_row_idx = lines.len();
+            lines.push(draw_row(&theme_left, &theme_right, width));
+            bounds.push(CardBounds {
+                id: "cycle_theme",
+                start_line: theme_row_idx,
+                end_line: theme_row_idx,
+                action_type: Some("cycle_theme"),
+                action_path: None,
+            });
+
+            // 3. Fila interactiva para activar/desactivar chequeo online de versiones del stack
+            let updates_left = format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}");
+            let (updates_badge, updates_color) = if snap.check_updates {
+                ("[x] activo (3h)", mint)
+            } else {
+                ("[ ] apagado", text_dim)
+            };
+            let updates_right = format!("{updates_color}{updates_badge}{RESET}");
+            let updates_row_idx = lines.len();
+            lines.push(draw_row(&updates_left, &updates_right, width));
+            bounds.push(CardBounds {
+                id: "toggle_check_updates",
+                start_line: updates_row_idx,
+                end_line: updates_row_idx,
+                action_type: Some("toggle_check_updates"),
+                action_path: None,
             });
         }
-
-        // Divisor para opciones de personalización (Nombre + Tema)
-        lines.push(draw_divider(width));
-
-        // 1. Fila de Nombre personalizado del Sidebar (editable en línea)
-        let name_row_idx = lines.len();
-        if snap.is_editing_name {
-            let input_display = if snap.name_input_buffer.is_empty() {
-                format!("{TEXT_DIM}_ (escribe nombre){RESET}")
-            } else {
-                format!(
-                    "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
-                    snap.name_input_buffer
-                )
-            };
-            let name_left = format!("{label_color}Nombre{RESET}  > {input_display}");
-            let name_right = format!("{AMBER}[Enter|Esc]{RESET}");
-            lines.push(draw_row(&name_left, &name_right, width));
-        } else {
-            let (name_val, badge_text, badge_color) = match snap
-                .sidebar_name
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-            {
-                Some(n) => (n, "[editar >]", accent_primary),
-                None => ("HUDR2", "[editar >]", accent_primary),
-            };
-            let name_left = format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{name_val}{RESET}");
-            let name_right = format!("{badge_color}{badge_text}{RESET}");
-            lines.push(draw_row(&name_left, &name_right, width));
-        }
+        lines.push(draw_bottom(width));
         bounds.push(CardBounds {
-            id: "edit_sidebar_name",
-            start_line: name_row_idx,
-            end_line: name_row_idx,
-            action_type: Some("edit_sidebar_name"),
-            action_path: None,
-        });
-
-        // 2. Fila interactiva para ciclar temas visuales
-        let theme_label = crate::theme::theme_display_label(snap.theme_name.as_deref());
-        let theme_left = format!("{label_color}Tema{RESET}    {TEXT_PRIMARY}{theme_label}{RESET}");
-        let theme_right = format!("{accent_primary}[cambiar >]{RESET}");
-        let theme_row_idx = lines.len();
-        lines.push(draw_row(&theme_left, &theme_right, width));
-        bounds.push(CardBounds {
-            id: "cycle_theme",
-            start_line: theme_row_idx,
-            end_line: theme_row_idx,
-            action_type: Some("cycle_theme"),
-            action_path: None,
-        });
-
-        // 3. Fila interactiva para activar/desactivar chequeo online de versiones del stack
-        let updates_left = format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}");
-        let (updates_badge, updates_color) = if snap.check_updates {
-            ("[x] activo (3h)", mint)
-        } else {
-            ("[ ] apagado", text_dim)
-        };
-        let updates_right = format!("{updates_color}{updates_badge}{RESET}");
-        let updates_row_idx = lines.len();
-        lines.push(draw_row(&updates_left, &updates_right, width));
-        bounds.push(CardBounds {
-            id: "toggle_check_updates",
-            start_line: updates_row_idx,
-            end_line: updates_row_idx,
-            action_type: Some("toggle_check_updates"),
+            id: "personalizar",
+            start_line: personalizar_start,
+            end_line: lines.len() - 1,
+            action_type: None,
             action_path: None,
         });
 
@@ -2204,14 +2370,6 @@ pub fn render_screen_with_diff_and_theme(
             action_path: None,
         });
     }
-    lines.push(draw_bottom(width));
-    bounds.push(CardBounds {
-        id: "personalizar",
-        start_line: personalizar_start,
-        end_line: lines.len() - 1,
-        action_type: None,
-        action_path: None,
-    });
 
     // Footer de atajos
     if snap.is_editing_name {
@@ -2221,6 +2379,22 @@ pub fn render_screen_with_diff_and_theme(
             ),
             width,
         ));
+    } else if let Some(current_tab) = tab {
+        if current_tab == ActiveTab::Ajustes {
+            lines.push(truncate_to_width(
+                &format!(
+                    "{TEXT_DIM} n: nombre \u{00b7} m: tema \u{00b7} u: updates \u{00b7} [1-4]: volver{RESET}"
+                ),
+                width,
+            ));
+        } else {
+            lines.push(truncate_to_width(
+                &format!(
+                    "{TEXT_DIM} 1-4: pestañas \u{00b7} ☼/0: ajustes \u{00b7} Tab: ciclo \u{00b7} c: colapso{RESET}"
+                ),
+                width,
+            ));
+        }
     } else {
         lines.push(truncate_to_width(
             &format!(
@@ -2254,7 +2428,7 @@ pub fn render_screen_with_diff_and_theme(
         width,
     ));
 
-    RenderOutput { lines, bounds }
+    RenderOutput { lines, bounds, tab_bounds }
 }
 
 /// Renderiza el modal flotante Quick Peek usando las primitivas ANSI/Unicode seguras de `hudr2`.
@@ -2334,7 +2508,7 @@ pub fn render_quick_peek_modal(
     ));
     lines.push(draw_bottom(width));
 
-    RenderOutput { lines, bounds }
+    RenderOutput { lines, bounds, tab_bounds: Vec::new() }
 }
 
 /// Superpone el modal flotante Quick Peek centrado sobre el viewport activo sin deformar las tarjetas de fondo.

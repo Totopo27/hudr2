@@ -20,9 +20,76 @@ pub const CARD_KEYS: [&str; 13] = [
     "personalizar",
 ];
 
-pub const DEFAULT_COLLAPSED: [bool; 13] = [
-    false, false, true, false, false, false, false, false, false, false, false, false, true,
-];
+pub const DEFAULT_COLLAPSED: [bool; 13] = [false; 13];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActiveTab {
+    #[default]
+    Sesion,
+    Codigo,
+    Modelos,
+    Stack,
+    Ajustes,
+}
+
+impl ActiveTab {
+    pub fn all() -> [ActiveTab; 5] {
+        [
+            ActiveTab::Sesion,
+            ActiveTab::Codigo,
+            ActiveTab::Modelos,
+            ActiveTab::Stack,
+            ActiveTab::Ajustes,
+        ]
+    }
+
+    pub fn index(self) -> usize {
+        match self {
+            ActiveTab::Sesion => 0,
+            ActiveTab::Codigo => 1,
+            ActiveTab::Modelos => 2,
+            ActiveTab::Stack => 3,
+            ActiveTab::Ajustes => 4,
+        }
+    }
+
+    pub fn from_index(idx: usize) -> Self {
+        match idx % 5 {
+            0 => ActiveTab::Sesion,
+            1 => ActiveTab::Codigo,
+            2 => ActiveTab::Modelos,
+            3 => ActiveTab::Stack,
+            4 => ActiveTab::Ajustes,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self::from_index(self.index() + 1)
+    }
+
+    pub fn prev(self) -> Self {
+        Self::from_index((self.index() + 4) % 5)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ActiveTab::Sesion => "1: Sesión",
+            ActiveTab::Codigo => "2: Código",
+            ActiveTab::Modelos => "3: Modelos",
+            ActiveTab::Stack => "4: Stack",
+            ActiveTab::Ajustes => "☼ Ajustes",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabBounds {
+    pub tab: ActiveTab,
+    pub line: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigData {
@@ -249,6 +316,8 @@ pub struct AppState {
     pub last_click_instant: Option<std::time::Instant>,
     pub last_click_row: Option<usize>,
     pub orch_trackers: std::collections::HashMap<String, OrchestratorTrackState>,
+    pub active_tab: ActiveTab,
+    pub tab_bounds: Vec<TabBounds>,
 }
 
 impl AppState {
@@ -265,7 +334,7 @@ impl AppState {
                 ..Default::default()
             },
             // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem, personalizar]
-            // proyecto (idx 2) y personalizar (idx 10) vienen colapsados por defecto
+            // Todas las cards expandidas por omisión
             collapsed_cards: DEFAULT_COLLAPSED,
             hidden_cards: HashSet::new(),
             scroll_offset: 0,
@@ -289,6 +358,8 @@ impl AppState {
             last_click_instant: None,
             last_click_row: None,
             orch_trackers: std::collections::HashMap::new(),
+            active_tab: ActiveTab::default(),
+            tab_bounds: Vec::new(),
         }
     }
 
@@ -577,6 +648,51 @@ impl AppState {
             self.collapsed_cards[index] = !self.collapsed_cards[index];
             self.needs_redraw = true;
             self.persist_config_if_configured();
+        }
+    }
+
+    pub fn switch_tab(&mut self, tab: ActiveTab) -> bool {
+        if self.active_tab != tab {
+            self.active_tab = tab;
+            self.needs_redraw = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn next_tab(&mut self) -> ActiveTab {
+        let next = self.active_tab.next();
+        self.switch_tab(next);
+        next
+    }
+
+    pub fn prev_tab(&mut self) -> ActiveTab {
+        let prev = self.active_tab.prev();
+        self.switch_tab(prev);
+        prev
+    }
+
+    pub fn handle_tab_click(
+        &mut self,
+        clicked_col: usize,
+        clicked_row: usize,
+        scroll_offset: usize,
+    ) -> Option<ActiveTab> {
+        let visual_row = clicked_row.saturating_sub(scroll_offset);
+        let target_tab = self
+            .tab_bounds
+            .iter()
+            .find(|tb| {
+                tb.line == visual_row && clicked_col >= tb.col_start && clicked_col <= tb.col_end
+            })
+            .map(|tb| tb.tab);
+
+        if let Some(tab) = target_tab {
+            self.switch_tab(tab);
+            Some(tab)
+        } else {
+            None
         }
     }
 
