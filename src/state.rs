@@ -100,9 +100,10 @@ pub struct ConfigData {
     pub check_updates: bool,
     pub sound_mode: crate::sound::SoundMode,
     pub account_budgets: std::collections::HashMap<String, f64>,
+    pub tabbed: bool,
 }
 
-/// Carga la configuración (tarjetas colapsadas y ocultas, tema, nombre, updates y modo de sonido) desde un archivo JSON.
+/// Carga la configuración (tarjetas colapsadas y ocultas, tema, nombre, updates, modo de sonido y vista por pestañas) desde un archivo JSON.
 pub fn load_config(path: &Path) -> ConfigData {
     let Ok(bytes) = std::fs::read(path) else {
         return ConfigData {
@@ -113,6 +114,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             check_updates: true,
             sound_mode: crate::sound::SoundMode::Bell,
             account_budgets: std::collections::HashMap::new(),
+            tabbed: true,
         };
     };
     let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
@@ -124,6 +126,7 @@ pub fn load_config(path: &Path) -> ConfigData {
             check_updates: true,
             sound_mode: crate::sound::SoundMode::Bell,
             account_budgets: std::collections::HashMap::new(),
+            tabbed: true,
         };
     };
 
@@ -182,6 +185,12 @@ pub fn load_config(path: &Path) -> ConfigData {
         }
     }
 
+    let tabbed = v
+        .get("tabbed")
+        .or_else(|| v.get("tabs"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
     ConfigData {
         collapsed,
         hidden,
@@ -190,10 +199,12 @@ pub fn load_config(path: &Path) -> ConfigData {
         check_updates,
         sound_mode,
         account_budgets,
+        tabbed,
     }
 }
 
-/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre, updates y modo de sonido.
+/// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre, updates, modo de sonido y vista por pestañas.
+#[allow(clippy::too_many_arguments)]
 pub fn save_config(
     path: &Path,
     collapsed: &[bool; 13],
@@ -202,6 +213,7 @@ pub fn save_config(
     sidebar_name: Option<&str>,
     check_updates: bool,
     sound_mode: crate::sound::SoundMode,
+    tabbed: bool,
 ) -> Result<(), String> {
     let collapsed_names: Vec<&str> = CARD_KEYS
         .iter()
@@ -226,6 +238,7 @@ pub fn save_config(
     payload["hidden"] = json!(hidden_names);
     payload["check_updates"] = json!(check_updates);
     payload["sound_mode"] = json!(sound_mode.as_str());
+    payload["tabbed"] = json!(tabbed);
     if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
         payload["theme"] = json!(t);
     }
@@ -318,6 +331,7 @@ pub struct AppState {
     pub orch_trackers: std::collections::HashMap<String, OrchestratorTrackState>,
     pub active_tab: ActiveTab,
     pub tab_bounds: Vec<TabBounds>,
+    pub tabbed: bool,
 }
 
 impl AppState {
@@ -331,6 +345,7 @@ impl AppState {
                 project_dir: cwd,
                 check_updates: true,
                 sound_mode: crate::sound::SoundMode::Bell,
+                tabbed_view: true,
                 ..Default::default()
             },
             // [estado, contexto, proyecto, integraciones, pools, git, engram, tools, mcp, ecosystem, personalizar]
@@ -360,6 +375,7 @@ impl AppState {
             orch_trackers: std::collections::HashMap::new(),
             active_tab: ActiveTab::default(),
             tab_bounds: Vec::new(),
+            tabbed: true,
         }
     }
 
@@ -376,10 +392,12 @@ impl AppState {
             s.sidebar_name = cfg.sidebar_name.clone();
             s.check_updates = cfg.check_updates;
             s.sound_mode = cfg.sound_mode;
+            s.tabbed = cfg.tabbed;
             s.snapshot.theme_name = cfg.theme;
             s.snapshot.sidebar_name = cfg.sidebar_name;
             s.snapshot.check_updates = cfg.check_updates;
             s.snapshot.sound_mode = cfg.sound_mode;
+            s.snapshot.tabbed_view = cfg.tabbed;
         }
         s.config_path = config_path;
         s
@@ -395,8 +413,17 @@ impl AppState {
                 self.sidebar_name.as_deref(),
                 self.check_updates,
                 self.sound_mode,
+                self.tabbed,
             );
         }
+    }
+
+    pub fn toggle_tabbed(&mut self) -> bool {
+        self.tabbed = !self.tabbed;
+        self.snapshot.tabbed_view = self.tabbed;
+        self.needs_redraw = true;
+        self.persist_config_if_configured();
+        self.tabbed
     }
 
     pub fn cycle_sound_mode(&mut self) -> crate::sound::SoundMode {
@@ -910,6 +937,15 @@ impl AppState {
                 let (badge, _) = next_sm.display_badge();
                 self.set_flash_notice(Some(format!("+ Alertas sonoras: {badge}")), 2500);
                 return Some(ClickAction::CycleSoundMode(next_sm));
+            } else if action == "toggle_tabbed_view" {
+                let now_tabbed = self.toggle_tabbed();
+                let msg = if now_tabbed {
+                    "+ Vista: Navegación por pestañas activada".to_string()
+                } else {
+                    "+ Vista: Modo vertical en cascada activado".to_string()
+                };
+                self.set_flash_notice(Some(msg), 2500);
+                return Some(ClickAction::ToggleTabbedView(now_tabbed));
             }
         }
 
@@ -963,4 +999,5 @@ pub enum ClickAction {
     StartEditBalance(String),
     OpenBillingUrl(String),
     CycleSoundMode(crate::sound::SoundMode),
+    ToggleTabbedView(bool),
 }

@@ -460,6 +460,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let mut render_out = {
                 let state = app_state.read().await;
+                let active_tab_param = if state.tabbed {
+                    Some(state.active_tab)
+                } else {
+                    None
+                };
                 ui::render_screen_tabbed(
                     &state.snapshot,
                     &state.collapsed_cards,
@@ -469,7 +474,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     &state.hidden_cards,
                     width,
                     theme::active_theme(),
-                    Some(state.active_tab),
+                    active_tab_param,
                 )
             };
             let base_total_lines = render_out.lines.len();
@@ -661,7 +666,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     | state::ClickAction::CycleTheme(_)
                                     | state::ClickAction::StartEditSidebarName
                                     | state::ClickAction::StartEditBalance(_)
-                                    | state::ClickAction::CycleSoundMode(_) => {}
+                                    | state::ClickAction::CycleSoundMode(_)
+                                    | state::ClickAction::ToggleTabbedView(_) => {}
                                 }
                             }
                         }
@@ -749,47 +755,129 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 refresh_needed = true;
                                             }
                                         }
+                                        KeyCode::Char('v') => {
+                                            state.toggle_tabbed();
+                                            let msg = if state.tabbed {
+                                                "+ Vista: Navegación por pestañas activada".to_string()
+                                            } else {
+                                                "+ Vista: Modo vertical en cascada activado".to_string()
+                                            };
+                                            state.set_flash_notice(Some(msg), 2500);
+                                        }
                                         KeyCode::Tab => {
-                                            let next = state.next_tab();
-                                            if next == state::ActiveTab::Codigo
-                                                && !state.collapsed_cards[2]
-                                                && state.snapshot.tree.root_path.is_empty()
-                                            {
-                                                refresh_needed = true;
+                                            if state.tabbed {
+                                                let next = state.next_tab();
+                                                if next == state::ActiveTab::Codigo
+                                                    && !state.collapsed_cards[2]
+                                                    && state.snapshot.tree.root_path.is_empty()
+                                                {
+                                                    refresh_needed = true;
+                                                }
                                             }
                                         }
                                         KeyCode::BackTab => {
-                                            let prev = state.prev_tab();
-                                            if prev == state::ActiveTab::Codigo
-                                                && !state.collapsed_cards[2]
-                                                && state.snapshot.tree.root_path.is_empty()
-                                            {
-                                                refresh_needed = true;
+                                            if state.tabbed {
+                                                let prev = state.prev_tab();
+                                                if prev == state::ActiveTab::Codigo
+                                                    && !state.collapsed_cards[2]
+                                                    && state.snapshot.tree.root_path.is_empty()
+                                                {
+                                                    refresh_needed = true;
+                                                }
                                             }
                                         }
                                         KeyCode::Char('1') => {
-                                            state.switch_tab(state::ActiveTab::Sesion);
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Sesion);
+                                            } else {
+                                                state.toggle_card(0);
+                                            }
                                         }
                                         KeyCode::Char('2') => {
-                                            state.switch_tab(state::ActiveTab::Codigo);
-                                            if !state.collapsed_cards[2]
-                                                && state.snapshot.tree.root_path.is_empty()
-                                            {
-                                                refresh_needed = true;
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Codigo);
+                                                if !state.collapsed_cards[2]
+                                                    && state.snapshot.tree.root_path.is_empty()
+                                                {
+                                                    refresh_needed = true;
+                                                }
+                                            } else {
+                                                state.toggle_card(1);
                                             }
                                         }
                                         KeyCode::Char('3') => {
-                                            state.switch_tab(state::ActiveTab::Modelos);
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Modelos);
+                                            } else {
+                                                state.toggle_card(2);
+                                                if !state.collapsed_cards[2]
+                                                    && state.snapshot.tree.root_path.is_empty()
+                                                {
+                                                    refresh_needed = true;
+                                                }
+                                            }
                                         }
                                         KeyCode::Char('4') => {
-                                            state.switch_tab(state::ActiveTab::Stack);
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Stack);
+                                            } else {
+                                                state.toggle_card(3);
+                                            }
                                         }
-                                        KeyCode::Char('5')
-                                        | KeyCode::Char('0')
-                                        | KeyCode::Char('t')
+                                        KeyCode::Char('5') => {
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Ajustes);
+                                            } else {
+                                                state.toggle_card(4);
+                                            }
+                                        }
+                                        KeyCode::Char('6') => {
+                                            if !state.tabbed {
+                                                state.toggle_card(5);
+                                            }
+                                        }
+                                        KeyCode::Char('$') => {
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Modelos);
+                                            } else {
+                                                state.toggle_card(6);
+                                            }
+                                        }
+                                        KeyCode::Char('7') => {
+                                            if !state.tabbed {
+                                                state.toggle_card(7);
+                                            }
+                                        }
+                                        KeyCode::Char('8') => {
+                                            if !state.tabbed {
+                                                state.toggle_card(8);
+                                            }
+                                        }
+                                        KeyCode::Char('9') => {
+                                            if !state.tabbed {
+                                                state.toggle_card(9);
+                                            }
+                                        }
+                                        KeyCode::Char('0') => {
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Ajustes);
+                                            } else {
+                                                state.toggle_card(12);
+                                            }
+                                        }
+                                        KeyCode::Char('t')
                                         | KeyCode::Char(',')
                                         | KeyCode::Char('g') => {
-                                            state.switch_tab(state::ActiveTab::Ajustes);
+                                            if state.tabbed {
+                                                state.switch_tab(state::ActiveTab::Ajustes);
+                                            } else {
+                                                state.toggle_card(12);
+                                            }
+                                        }
+                                        KeyCode::Char('e') => {
+                                            if !state.tabbed {
+                                                state.toggle_card(11);
+                                            }
                                         }
                                         KeyCode::Char('n') => {
                                             state.start_edit_sidebar_name();

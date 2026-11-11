@@ -259,4 +259,5 @@ pub struct TelemetrySnapshot {
     pub editing_balance_prefix: Option<String>,
     pub balance_input_buffer: String,
     pub sound_mode: crate::sound::SoundMode,
+    pub tabbed_view: bool,
 }

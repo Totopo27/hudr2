@@ -4378,8 +4378,10 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         assert_eq!(st.sound_mode, SoundMode::Bell); // default Bell
 
-        // Expandir tarjeta personalizar (idx 12) y renderizar
-        st.toggle_card(12);
+        // Asegurar tarjeta personalizar (idx 12) expandida y renderizar
+        if st.collapsed_cards[12] {
+            st.toggle_card(12);
+        }
         let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
         st.card_bounds = render_out.bounds;
 
@@ -6428,5 +6430,50 @@ api-keys:
         assert_eq!(state.prev_tab(), ActiveTab::Modelos);
         assert_eq!(state.prev_tab(), ActiveTab::Codigo);
         assert_eq!(state.prev_tab(), ActiveTab::Sesion);
+    }
+
+    #[test]
+    fn test_tabbed_view_config_persistence_and_toggle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        let mut st = AppState::with_config(Some(cfg_path.clone()), None);
+        assert!(st.tabbed, "Tabbed mode debe ser true por omisión");
+        assert!(st.snapshot.tabbed_view);
+
+        // Asegurar tarjeta personalizar expandida
+        if st.collapsed_cards[12] {
+            st.toggle_card(12);
+        }
+        let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
+        st.card_bounds = render_out.bounds;
+
+        let toggle_line = st
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "toggle_tabbed_view")
+            .map(|b| b.start_line)
+            .expect("bound para toggle_tabbed_view debe existir en Personalizar");
+
+        // Simular clic en toggle_tabbed_view: true -> false (modo vertical)
+        let action = st.handle_mouse_click(toggle_line, 0);
+        assert_eq!(action, Some(ClickAction::ToggleTabbedView(false)));
+        assert!(!st.tabbed);
+        assert!(!st.snapshot.tabbed_view);
+
+        // Verificar persistencia en disco
+        let st2 = AppState::with_config(Some(cfg_path.clone()), None);
+        assert!(!st2.tabbed, "El modo vertical (tabbed: false) debe persistir en hudr2.json");
+        assert!(!st2.snapshot.tabbed_view);
+
+        // Simular segundo clic: false -> true (modo pestañas)
+        let action2 = st.handle_mouse_click(toggle_line, 0);
+        assert_eq!(action2, Some(ClickAction::ToggleTabbedView(true)));
+        assert!(st.tabbed);
+        assert!(st.snapshot.tabbed_view);
+
+        let st3 = AppState::with_config(Some(cfg_path), None);
+        assert!(st3.tabbed, "El modo pestañas (tabbed: true) debe persistir en hudr2.json");
+        assert!(st3.snapshot.tabbed_view);
     }
 }

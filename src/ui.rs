@@ -2328,7 +2328,40 @@ pub fn render_screen_tabbed(
                 action_path: None,
             });
 
-            // 3. Fila interactiva para activar/desactivar chequeo online de versiones del stack
+            // 3. Fila interactiva para alternar entre vista por pestañas y vista vertical clásica
+            let vista_left = format!("{label_color}Vista{RESET}    {text_primary}Diseño{RESET}");
+            let (vista_badge, vista_color) = if snap.tabbed_view {
+                ("[ pestañas ]", accent_primary)
+            } else {
+                ("[ vertical ]", cyan)
+            };
+            let vista_right = format!("{vista_color}{vista_badge}{RESET}");
+            let vista_row_idx = lines.len();
+            lines.push(draw_row(&vista_left, &vista_right, width));
+            bounds.push(CardBounds {
+                id: "toggle_tabbed_view",
+                start_line: vista_row_idx,
+                end_line: vista_row_idx,
+                action_type: Some("toggle_tabbed_view"),
+                action_path: None,
+            });
+
+            // 4. Fila interactiva para configurar alertas sonoras de orquestación
+            let sound_left = format!("{label_color}Avisos{RESET}  {text_primary}Alertas sonoras{RESET}");
+            let (sound_badge, is_active) = snap.sound_mode.display_badge();
+            let sound_color = if is_active { mint } else { text_dim };
+            let sound_right = format!("{sound_color}{sound_badge}{RESET}");
+            let sound_row_idx = lines.len();
+            lines.push(draw_row(&sound_left, &sound_right, width));
+            bounds.push(CardBounds {
+                id: "cycle_sound_mode",
+                start_line: sound_row_idx,
+                end_line: sound_row_idx,
+                action_type: Some("cycle_sound_mode"),
+                action_path: None,
+            });
+
+            // 5. Fila interactiva para activar/desactivar chequeo online de versiones del stack
             let updates_left = format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}");
             let (updates_badge, updates_color) = if snap.check_updates {
                 ("[x] activo (3h)", mint)
@@ -2354,21 +2387,6 @@ pub fn render_screen_tabbed(
             action_type: None,
             action_path: None,
         });
-
-        // 4. Fila interactiva para configurar alertas sonoras de orquestación
-        let sound_left = format!("{label_color}Avisos{RESET}  {text_primary}Alertas sonoras{RESET}");
-        let (sound_badge, is_active) = snap.sound_mode.display_badge();
-        let sound_color = if is_active { mint } else { text_dim };
-        let sound_right = format!("{sound_color}{sound_badge}{RESET}");
-        let sound_row_idx = lines.len();
-        lines.push(draw_row(&sound_left, &sound_right, width));
-        bounds.push(CardBounds {
-            id: "cycle_sound_mode",
-            start_line: sound_row_idx,
-            end_line: sound_row_idx,
-            action_type: Some("cycle_sound_mode"),
-            action_path: None,
-        });
     }
 
     // Footer de atajos
@@ -2383,14 +2401,14 @@ pub fn render_screen_tabbed(
         if current_tab == ActiveTab::Ajustes {
             lines.push(truncate_to_width(
                 &format!(
-                    "{TEXT_DIM} n: nombre \u{00b7} m: tema \u{00b7} u: updates \u{00b7} [1-4]: volver{RESET}"
+                    "{TEXT_DIM} n: nombre \u{00b7} m: tema \u{00b7} v: vista \u{00b7} u: updates \u{00b7} [1-4]: volver{RESET}"
                 ),
                 width,
             ));
         } else {
             lines.push(truncate_to_width(
                 &format!(
-                    "{TEXT_DIM} 1-4: pestañas \u{00b7} ☼/0: ajustes \u{00b7} Tab: ciclo \u{00b7} c: colapso{RESET}"
+                    "{TEXT_DIM} 1-4: pest \u{00b7} ☼/0: aju \u{00b7} v: vista \u{00b7} Tab: ciclo \u{00b7} c: colapso{RESET}"
                 ),
                 width,
             ));
@@ -2398,7 +2416,7 @@ pub fn render_screen_tabbed(
     } else {
         lines.push(truncate_to_width(
             &format!(
-                "{TEXT_DIM} 0-9: colap \u{00b7} p: pers \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: liberar \u{00b7} o: abrir{RESET}"
+                "{TEXT_DIM} 0-9: colap \u{00b7} v: pestañas \u{00b7} p: pers \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: lib{RESET}"
             ),
             width,
         ));
