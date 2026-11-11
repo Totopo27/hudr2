@@ -5059,8 +5059,8 @@ api-keys:
         assert!(screen.contains("Cuota de Modelos · codex *"));
         assert!(screen.contains("Codex Plus"));
         assert!(screen.contains("Suscripción"));
-        // Codex es cuenta de suscripción mensual/semanal, NO debe aparecer en Saldos API
-        assert!(!screen.contains("Saldos API"));
+        // Codex es cuenta de suscripción mensual/semanal, NO debe renderizar la card Saldos API
+        assert!(!screen.contains("Saldos API ·"));
     }
 
     #[test]

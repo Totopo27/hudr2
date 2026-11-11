@@ -507,7 +507,7 @@ pub fn render_screen_with_diff_and_theme(
 #[allow(clippy::too_many_arguments)]
 pub fn render_screen_tabbed(
     snap: &TelemetrySnapshot,
-    collapsed: &[bool; 12],
+    collapsed: &[bool; 13],
     flash_notice: Option<&str>,
     selected_diff_file: Option<&str>,
     selected_diff_lines: &[String],
