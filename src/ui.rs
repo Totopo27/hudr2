@@ -263,8 +263,49 @@ pub fn format_tokens(num: i64) -> String {
     }
 }
 
+pub fn compact_model_label(model: &str) -> String {
+    let clean = crate::opencode::normalize_model_str(model);
+    let base = clean.rsplit('/').next().unwrap_or(&clean).to_lowercase();
+
+    if base.contains("sonnet") {
+        "sonnet-5-5".to_string()
+    } else if base.contains("opus") {
+        "opus-5-5".to_string()
+    } else if base.contains("haiku") {
+        "haiku-5-5".to_string()
+    } else if base.contains("5.6-sol") || base.contains("sol") {
+        "5.6-sol".to_string()
+    } else if base.contains("5.6-terra") || base.contains("terra") {
+        "5.6-terra".to_string()
+    } else if base.contains("5.6-luna") || base.contains("luna") {
+        "5.6-luna".to_string()
+    } else if base.contains("codex-auto-review") || base.contains("codex-review") || (base.contains("codex") && base.contains("review")) {
+        "codex-review".to_string()
+    } else if base.contains("gemini-3.8-flash") || base.contains("3.8-flash") || (base.contains("3.8") && base.contains("flash")) || base.contains("flash") {
+        "3.8-flash".to_string()
+    } else if base.contains("gemini-3.8-pro") || base.contains("3.8-pro") || (base.contains("3.8") && base.contains("pro")) {
+        "3.8-pro".to_string()
+    } else {
+        base.trim_start_matches("gpt-")
+            .trim_start_matches("claude-")
+            .trim_start_matches("gemini-")
+            .to_string()
+    }
+}
+
 pub fn clean_subagent_role(role: &str) -> String {
     let s = role.to_lowercase();
+    // Roles de suite SDD: "sdd-explore-agy3" -> "explore", "sdd-tasks-agy" -> "tasks"
+    if let Some(rest) = s.strip_prefix("sdd-") {
+        if let Some((phase, _pfx)) = rest.split_once('-') {
+            return phase.to_string();
+        }
+        if let Some((phase, _pfx)) = rest.split_once('_') {
+            return phase.to_string();
+        }
+        return rest.to_string();
+    }
+
     let s = s.trim_start_matches("gentle-ai-");
     let s = s.trim_start_matches("gentle-");
     let s = s.trim_start_matches("agent-");
@@ -891,38 +932,40 @@ pub fn render_screen_with_diff_and_theme(
                 ));
             } else {
                 for orch in &snap.orchestrators {
+                    let orch_disp = orch.display_name();
                     let (status_glyph, name_disp, status_right) = match orch.status {
                         crate::models::OrchestratorStatus::Working => {
                             let glyph = format!("{accent_secondary}>{RESET}");
-                            let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch.name);
+                            let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch_disp);
                             let right = format!("{MINT}\u{25cf} trabajando{RESET}");
                             (glyph, name, right)
                         }
                         crate::models::OrchestratorStatus::Idle => {
                             if orch.recently_finished {
                                 let glyph = format!("{MINT}\u{25cf}{RESET}");
-                                let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch.name);
+                                let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch_disp);
                                 let right = format!("{BOLD}{MINT}\u{2713} finalizado{RESET}");
                                 (glyph, name, right)
                             } else {
                                 let glyph = format!("{AMBER}\u{25cf}{RESET}");
-                                let name = format!("{TEXT_PRIMARY}{}{RESET}", orch.name);
+                                let name = format!("{TEXT_PRIMARY}{}{RESET}", orch_disp);
                                 let right = format!("{TEXT_DIM}-- en espera{RESET}");
                                 (glyph, name, right)
                             }
                         }
                         crate::models::OrchestratorStatus::Offline => {
                             let glyph = format!("{TEXT_DIM}\u{25cb}{RESET}");
-                            let name = format!("{TEXT_MUTED}{}{RESET}", orch.name);
+                            let name = format!("{TEXT_MUTED}{}{RESET}", orch_disp);
                             let right = format!("{TEXT_DIM}\u{25cb} apagado{RESET}");
                             (glyph, name, right)
                         }
                     };
 
+                    let compact = compact_model_label(&orch.model_short);
                     let model_label = if let Some(ref t) = orch.thinking {
-                        format!("{} [{t}]", orch.model_short)
+                        format!("{} [{t}]", compact)
                     } else {
-                        orch.model_short.clone()
+                        compact
                     };
 
                     let left = if width < 42 {
@@ -1021,17 +1064,18 @@ pub fn render_screen_with_diff_and_theme(
         if let Some(orch) = active_orch {
             let pool_title = format!(
                 "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{}{RESET} {accent_secondary}*{RESET}",
-                orch.name
+                orch.display_name()
             );
 
             lines.push(draw_top(&pool_title, collapsed[5], width));
             if !collapsed[5] {
                 struct FleetRow<'a> {
                     role_label: String,
-                    full_role: &'a str,
+                    _full_role: &'a str,
                     prefix: Option<&'a str>,
                     model_short: &'a str,
                     is_orch: bool,
+                    all_roles: Vec<&'a str>,
                 }
 
                 let mut fleet_rows: Vec<FleetRow> = Vec::new();
@@ -1039,26 +1083,69 @@ pub fn render_screen_with_diff_and_theme(
                 // Fila soberana del Orquestador
                 fleet_rows.push(FleetRow {
                     role_label: "orch".to_string(),
-                    full_role: orch.name.as_str(),
+                    _full_role: orch.name.as_str(),
                     prefix: orch.prefix.as_deref(),
                     model_short: &orch.model_short,
                     is_orch: true,
+                    all_roles: vec![orch.name.as_str(), orch.display_name(), "orchestrator"],
                 });
 
-                // Opción B: Fila individual por cada subagente (trazabilidad absoluta)
+                // Agrupar subagentes y colapsar las 4 revisiones (review-risk, readability, reliability, resilience) en 'rev-4r'
+                let review_roles = [
+                    "review-risk",
+                    "review-readability",
+                    "review-reliability",
+                    "review-resilience",
+                ];
+                let mut has_review_group = false;
+                let mut review_prefix: Option<&str> = None;
+                let mut review_model: &str = "claude-sonnet-5-5";
+
                 for sub in &orch.subagents {
-                    let clean_r = clean_subagent_role(&sub.role);
+                    let r_low = sub.role.to_lowercase();
+                    if review_roles.iter().any(|&rr| r_low == rr || r_low.contains(rr)) {
+                        has_review_group = true;
+                        if review_prefix.is_none() {
+                            review_prefix = sub.prefix.as_deref();
+                        }
+                        review_model = &sub.model_short;
+                    } else {
+                        let clean_r = clean_subagent_role(&sub.role);
+                        let pfx = sub.prefix.as_deref().or(orch.prefix.as_deref());
+                        fleet_rows.push(FleetRow {
+                            role_label: clean_r,
+                            _full_role: sub.role.as_str(),
+                            prefix: pfx,
+                            model_short: &sub.model_short,
+                            is_orch: false,
+                            all_roles: vec![sub.role.as_str()],
+                        });
+                    }
+                }
+
+                if has_review_group {
+                    let pfx = review_prefix.or(orch.prefix.as_deref());
                     fleet_rows.push(FleetRow {
-                        role_label: clean_r,
-                        full_role: sub.role.as_str(),
-                        prefix: sub.prefix.as_deref(),
-                        model_short: &sub.model_short,
+                        role_label: "rev-4r".to_string(),
+                        _full_role: "review-4r",
+                        prefix: pfx,
+                        model_short: review_model,
                         is_orch: false,
+                        all_roles: vec![
+                            "review-risk",
+                            "review-readability",
+                            "review-reliability",
+                            "review-resilience",
+                            "review-read",
+                            "review-rel",
+                            "review-res",
+                            "rev-4r",
+                        ],
                     });
                 }
 
                 for row in &fleet_rows {
-                    let pfx_str = row.prefix.unwrap_or("local");
+                    let pfx_str = row.prefix.or(orch.prefix.as_deref()).unwrap_or("local");
                     let target_acc = snap
                         .accounts
                         .iter()
@@ -1068,43 +1155,74 @@ pub fn render_screen_with_diff_and_theme(
                     // 1. Activo (Working):
                     let is_active = if row.is_orch {
                         orch.status == crate::models::OrchestratorStatus::Working
-                            && (snap.agent_session.agent_status == "working"
+                            && ((snap.agent_session.agent_status == "working"
                                 && (snap.agent_session.agent.eq_ignore_ascii_case(&orch.name)
+                                    || snap.agent_session.agent.eq_ignore_ascii_case(orch.display_name())
                                     || snap.agent_session.agent.eq_ignore_ascii_case("orchestrator")
                                     || snap.agent_session.agent.eq_ignore_ascii_case("gentle-orchestrator")
                                     || snap.agent_session.agent.eq_ignore_ascii_case("pi")
                                     || snap.agent_session.agent.eq_ignore_ascii_case("gentle-shell")
                                     || (snap.agent_session.local_prefix.as_deref() == orch.prefix.as_deref()
                                         && snap.agent_session.model_short.eq_ignore_ascii_case(&orch.model_short))))
-                    } else if snap.agent_session.agent_status != "working" {
-                        false
+                                || snap.panes.iter().any(|p| {
+                                    let p_working = p.agent_status.as_deref() == Some("working")
+                                        || p.tokens.get("agent_status").map(|s| s.as_str()) == Some("working");
+                                    let hit_name = p.agent.as_deref().map(|ag| ag.eq_ignore_ascii_case(&orch.name) || ag.eq_ignore_ascii_case(orch.display_name())).unwrap_or(false)
+                                        || p.tokens.get("profile").map(|pr| pr.eq_ignore_ascii_case(&orch.name) || pr.eq_ignore_ascii_case(orch.display_name())).unwrap_or(false);
+                                    p_working && hit_name
+                                }))
                     } else {
-                        let sess_agent = snap.agent_session.agent.to_lowercase();
-                        let full_lower = row.full_role.to_lowercase();
                         let clean_lower = row.role_label.to_lowercase();
-                        let sess_clean = clean_subagent_role(&sess_agent);
+                        let check_subagent_hit = |agent_str: &str, pfx_opt: Option<&str>, model_str: &str| {
+                            let sess_agent = agent_str.to_lowercase();
+                            let sess_clean = clean_subagent_role(&sess_agent);
 
-                        // 1. Verificación estricta de rol para este subagente en particular:
-                        let role_matches = sess_agent == full_lower
-                            || sess_agent == clean_lower
-                            || sess_clean == clean_lower
-                            || sess_agent.contains(&full_lower)
-                            || sess_agent.contains(&clean_lower);
+                            let role_matches = row.all_roles.iter().any(|&r| {
+                                let rl = r.to_lowercase();
+                                sess_agent == rl
+                                    || sess_clean == rl
+                                    || sess_agent.contains(&rl)
+                                    || sess_clean.contains(&rl)
+                            }) || sess_agent == clean_lower || sess_clean == clean_lower;
 
-                        // 2. Verificación de coincidencia de modelo / prefijo configurado en este perfil:
-                        let model_matches = if let Some(pfx) = row.prefix {
-                            snap.agent_session
-                                .local_prefix
-                                .as_deref()
-                                .map(|lp| lp.eq_ignore_ascii_case(pfx))
-                                .unwrap_or(false)
-                                || snap.agent_session.model.to_lowercase().contains(&pfx.to_lowercase())
-                        } else {
-                            snap.agent_session.model_short.eq_ignore_ascii_case(row.model_short)
-                                || snap.agent_session.model.eq_ignore_ascii_case(row.model_short)
+                            let model_matches = if let Some(pfx) = row.prefix {
+                                pfx_opt.map(|lp| lp.eq_ignore_ascii_case(pfx)).unwrap_or(false)
+                                    || model_str.to_lowercase().contains(&pfx.to_lowercase())
+                                    || true
+                            } else {
+                                model_str.is_empty()
+                                    || model_str.eq_ignore_ascii_case(row.model_short)
+                                    || model_str.to_lowercase().contains(&row.model_short.to_lowercase())
+                            };
+
+                            role_matches && model_matches
                         };
 
-                        role_matches && model_matches
+                        let session_active = snap.agent_session.agent_status == "working"
+                            && check_subagent_hit(
+                                &snap.agent_session.agent,
+                                snap.agent_session.local_prefix.as_deref(),
+                                &snap.agent_session.model_short,
+                            );
+
+                        let pane_active = snap.panes.iter().any(|p| {
+                            let p_working = p.agent_status.as_deref() == Some("working")
+                                || p.tokens.get("agent_status").map(|s| s.as_str()) == Some("working");
+                            if !p_working {
+                                return false;
+                            }
+                            let p_agent = p.agent.as_deref()
+                                .or_else(|| p.tokens.get("agent").map(|s| s.as_str()))
+                                .unwrap_or("");
+                            if p_agent.is_empty() {
+                                return false;
+                            }
+                            let p_model = p.tokens.get("model").map(|s| s.as_str()).unwrap_or("");
+                            let p_pfx = p.tokens.get("profile").map(|s| s.as_str());
+                            check_subagent_hit(p_agent, p_pfx, p_model)
+                        });
+
+                        session_active || pane_active
                     };
 
                     // 2. Pasivo (recién dejó de trabajar / presente en all_active_prefixes / idle):
@@ -1126,17 +1244,14 @@ pub fn render_screen_with_diff_and_theme(
                         (format!("{TEXT_DIM}\u{25cb}{RESET}"), TEXT_MUTED.to_string())
                     };
 
-                    let pfx_w = if width < 42 { 5 } else { 7 };
-                    let role_w = if width < 42 { 8 } else { 11 };
+                    let compact_model = compact_model_label(row.model_short);
+                    let role_w = if width < 42 { 8 } else { 9 };
                     let role_truncated = truncate_to_width(&row.role_label, role_w);
                     let role_disp = format!("{:<width$}", role_truncated, width = role_w);
-                    let pfx_disp = format!("{:<width$}", pfx_str, width = pfx_w);
 
-                    let left = if width >= 68 {
-                        format!("{status_glyph} {text_color}{role_disp}{RESET} {pfx_disp} {TEXT_DIM}({}){RESET}", row.model_short)
-                    } else {
-                        format!("{status_glyph} {text_color}{role_disp}{RESET} {pfx_disp}")
-                    };
+                    let left = format!(
+                        "{status_glyph} {text_color}{role_disp}{RESET} {TEXT_DIM}({compact_model}){RESET}"
+                    );
 
                     // Proyección de cuota / saldo para esta cuenta y modelo:
                     let bar_len = if width < 42 { 2 } else { 3 };

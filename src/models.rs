@@ -208,10 +208,12 @@ pub struct SubAgentProfile {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OrchestratorProfile {
-    pub name: String,             // e.g. "fleet-codex", "fleet-tavo", "fleet-gianni"
+    pub name: String,             // e.g. "fleet-codex", "fleet-tavo", "sdd-orchestrator-agy3"
+    #[serde(default)]
+    pub display_name: String,     // e.g. "tavocodex", "tavoclaude", "sdd-agy3"
     pub model: String,            // e.g. "gpt-5.6-sol", "tavoclaude/claude-opus-5-5"
     pub model_short: String,      // e.g. "gpt-5.6-sol", "claude-opus-5-5"
-    pub prefix: Option<String>,   // e.g. "codex", "tavoclaude", "gianniclaude"
+    pub prefix: Option<String>,   // e.g. "tavocodex", "tavoclaude", "gianniclaude"
     pub thinking: Option<String>, // e.g. "high", "medium"
     pub is_default: bool,
     pub status: OrchestratorStatus,
@@ -222,6 +224,16 @@ pub struct OrchestratorProfile {
     pub subagents: Vec<SubAgentProfile>,
     #[serde(default)]
     pub recently_finished: bool,
+}
+
+impl OrchestratorProfile {
+    pub fn display_name(&self) -> &str {
+        if !self.display_name.is_empty() {
+            &self.display_name
+        } else {
+            &self.name
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -235,6 +247,7 @@ pub struct TelemetrySnapshot {
     pub mcps: Vec<McpServer>,
     pub tree: ProjectTreeData,
     pub ecosystem: EcosystemTelemetry,
+    pub panes: Vec<HerdrPane>,
     pub my_pane_id: Option<String>,
     pub my_tab_id: Option<String>,
     pub sidebar_name: Option<String>,

@@ -4422,6 +4422,7 @@ mod tests {
         // 1. Orquestador trabajando
         st.snapshot.orchestrators = vec![OrchestratorProfile {
             name: orch_name.clone(),
+            display_name: orch_name.clone(),
             model: "claude-3-7-sonnet".to_string(),
             model_short: "claude-3-7".to_string(),
             prefix: Some("claude".to_string()),
@@ -5395,9 +5396,9 @@ api-keys:
         let screen = ui::strip_ansi(&render_out.lines.join("\n"));
 
         assert!(screen.contains("Orquestadores"));
-        assert!(screen.contains("fleet-tavo"));
-        assert!(screen.contains("fleet-codex"));
-        assert!(screen.contains("gentle-orchestrator"));
+        assert!(screen.contains("tavoclaude"));
+        assert!(screen.contains("tavocodex"));
+        assert!(screen.contains("clasclaude"));
         assert!(screen.contains("apagado"));
         assert!(screen.contains("[CUOTA CR\u{00cd}TICA]"));
         assert!(screen.contains("! CR\u{00cd}TICO: fleet-tavo [x -> migrar]"));
@@ -5437,6 +5438,7 @@ api-keys:
         // 1. Configurar un perfil de orquestador activo con subagentes
         let orch = OrchestratorProfile {
             name: "fleet-tavo".to_string(),
+            display_name: "tavoclaude".to_string(),
             model: "tavoclaude/claude-opus-5-5".to_string(),
             model_short: "claude-opus-5-5".to_string(),
             prefix: Some("tavoclaude".to_string()),
@@ -5532,7 +5534,7 @@ api-keys:
         let raw = render_out.lines.join("\n");
 
         // Header contiene el nombre del orquestador activo
-        assert!(screen.contains("Cuota de Modelos · fleet-tavo *"));
+        assert!(screen.contains("Cuota de Modelos · tavoclaude *"));
 
         // Orquestador activo tiene '>'
         assert!(screen.contains("> orch"));
@@ -5544,13 +5546,13 @@ api-keys:
         assert!(screen.contains("agy"));
         assert!(screen.contains("80%"));
 
-        // Subagentes inactivos individuales: worker (agy2), fix (agy2), review-risk (agy3) tienen '○' en gris
+        // Subagentes inactivos individuales: worker (agy2), fix (agy2), rev-4r (agy3) tienen '○' en gris
         assert!(screen.contains("○ worker"));
         assert!(screen.contains("○ fix"));
         assert!(screen.contains("agy2"));
         assert!(screen.contains("95%"));
 
-        assert!(screen.contains("○ review-risk"));
+        assert!(screen.contains("○ rev-4r"));
         assert!(screen.contains("agy3"));
         assert!(screen.contains("100%"));
 
@@ -5797,5 +5799,196 @@ api-keys:
         unsafe {
             std::env::remove_var("GENTLE_AI_PROFILES_PATH");
         }
+    }
+
+    #[test]
+    fn test_sdd_orchestrator_discovery_and_role_cleaning() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::orchestrators::discover_orchestrators;
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorStatus};
+        use hudr2::state::AppState;
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Configurar opencode.json con SDD orchestrator y subagentes en "agents" (plural)
+        let opencode_json = serde_json::json!({
+            "agents": {
+                "sdd-orchestrator-agy3": {
+                    "mode": "primary",
+                    "model": "cliproxy/agy3/gemini-3.8-flash-thinking",
+                    "thinking": "high"
+                },
+                "sdd-explore-agy3": {
+                    "mode": "subagent",
+                    "model": "cliproxy/agy3/gemini-3.8-flash"
+                },
+                "sdd-apply-agy3": {
+                    "mode": "subagent",
+                    "model": "cliproxy/agy3/gemini-3.8-flash"
+                },
+                "sdd-verify-agy3": {
+                    "mode": "subagent",
+                    "model": "cliproxy/agy3/gemini-3.8-flash"
+                }
+            }
+        });
+        let opencode_file = tmp.path().join("opencode.json");
+        std::fs::write(&opencode_file, serde_json::to_string_pretty(&opencode_json).unwrap()).unwrap();
+
+        let empty_profiles = tmp.path().join("empty_profiles.json");
+        std::fs::write(&empty_profiles, "{}").unwrap();
+
+        unsafe {
+            std::env::set_var("OPENCODE_CONFIG_PATH", opencode_file.to_str().unwrap());
+            std::env::set_var("GENTLE_AI_PROFILES_PATH", empty_profiles.to_str().unwrap());
+        }
+
+        let agy3_acc = AccountQuota {
+            prefix: "agy3".to_string(),
+            auth_file: "agy3.json".to_string(),
+            rem_5h: 92,
+            reset_5h: "4h 10m".to_string(),
+            rem_wk: 88,
+            reset_wk: "3d 05h".to_string(),
+            ..Default::default()
+        };
+        let accounts = vec![agy3_acc];
+
+        // Sesión activa que coincide con Sdd-Orchestrator-Agy3
+        let session = AgentSession {
+            agent: "Sdd-Orchestrator-Agy3".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy3".to_string()),
+            model_short: "gemini-3.8-flash".to_string(),
+            model: "cliproxy/agy3/gemini-3.8-flash".to_string(),
+            ..Default::default()
+        };
+
+        let panes = vec![];
+        let discovered = discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
+
+        assert_eq!(discovered.len(), 1, "Debe descubrir exactamente el orquestador sdd-agy3 y descartar los subagentes");
+        let orch = &discovered[0];
+        assert_eq!(orch.name, "sdd-orchestrator-agy3");
+        assert_eq!(orch.display_name(), "sdd-agy3");
+        assert_eq!(orch.prefix.as_deref(), Some("agy3"));
+        assert_eq!(orch.status, OrchestratorStatus::Working);
+        assert_eq!(orch.subagents.len(), 3, "Debe tener los 3 subagentes de la suite sdd");
+
+        let mut state = AppState::new();
+        state.collapsed_cards[4] = false; // Orquestadores
+        state.collapsed_cards[5] = false; // Cuota de Modelos
+        state.snapshot.orchestrators = discovered;
+        state.snapshot.accounts = accounts;
+        state.snapshot.agent_session = session;
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // Card Orquestadores muestra sdd-agy3
+        assert!(screen.contains("> sdd-agy3"));
+        assert!(screen.contains("trabajando"));
+
+        // Card Cuota de Modelos muestra el breakdown limpio con 3.8-flash y roles limpios
+        assert!(screen.contains("Cuota de Modelos · sdd-agy3 *"));
+        assert!(screen.contains("> orch"));
+        assert!(screen.contains("explore"));
+        assert!(screen.contains("apply"));
+        assert!(screen.contains("verify"));
+        assert!(screen.contains("3.8-flash"));
+
+        unsafe {
+            std::env::remove_var("OPENCODE_CONFIG_PATH");
+            std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+        }
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_multiple_simultaneous_active_subagents() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::state::AppState;
+
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+
+        let orch = OrchestratorProfile {
+            name: "fleet-codex".to_string(),
+            display_name: "tavocodex".to_string(),
+            model: "tavocodex/gpt-5.6-sol".to_string(),
+            model_short: "5.6-sol".to_string(),
+            prefix: Some("tavocodex".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "gentle-ai-worker".to_string(),
+                    model: "tavocodex/gpt-5.6-terra".to_string(),
+                    model_short: "5.6-terra".to_string(),
+                    prefix: Some("tavocodex".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+                SubAgentProfile {
+                    role: "gentle-ai-explore".to_string(),
+                    model: "tavocodex/gpt-5.6-luna".to_string(),
+                    model_short: "5.6-luna".to_string(),
+                    prefix: Some("tavocodex".to_string()),
+                    thinking: Some("medium".to_string()),
+                },
+                SubAgentProfile {
+                    role: "review-risk".to_string(),
+                    model: "gianniclaude/claude-sonnet-5-5".to_string(),
+                    model_short: "claude-sonnet-5-5".to_string(),
+                    prefix: Some("gianniclaude".to_string()),
+                    thinking: Some("high".to_string()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        state.snapshot.orchestrators = vec![orch];
+        let acc = AccountQuota {
+            prefix: "tavocodex".to_string(),
+            auth_file: "codex.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "plus".to_string(),
+            rem_wk: 100,
+            reset_wk: "plus".to_string(),
+            ..Default::default()
+        };
+        state.snapshot.accounts = vec![acc];
+
+        // Sesión activa ejecutando worker en working
+        state.snapshot.agent_session = AgentSession {
+            agent: "gentle-ai-worker".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("tavocodex".to_string()),
+            model_short: "5.6-terra".to_string(),
+            model: "tavocodex/gpt-5.6-terra".to_string(),
+            ..Default::default()
+        };
+
+        // Y simultáneamente un pane subordinado en Herdr ejecutando explore en working
+        let mut pane_tokens = std::collections::HashMap::new();
+        pane_tokens.insert("agent".to_string(), "gentle-ai-explore".to_string());
+        pane_tokens.insert("agent_status".to_string(), "working".to_string());
+        pane_tokens.insert("model".to_string(), "5.6-luna".to_string());
+
+        let explore_pane = HerdrPane {
+            pane_id: "pane_explore_1".to_string(),
+            agent: Some("gentle-ai-explore".to_string()),
+            agent_status: Some("working".to_string()),
+            tokens: pane_tokens,
+            ..Default::default()
+        };
+        state.snapshot.panes = vec![explore_pane];
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // AMBOS subagentes activos deben mostrar '>' simultáneamente
+        assert!(screen.contains("> worker"), "Worker debe estar activo con '>'");
+        assert!(screen.contains("> explore"), "Explore debe estar activo simultáneamente con '>'");
+        // El subagente inactivo debe permanecer en '○'
+        assert!(screen.contains("○ rev-4r"), "rev-4r debe permanecer inactivo en '○'");
     }
 }

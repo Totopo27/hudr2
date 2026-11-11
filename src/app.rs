@@ -166,6 +166,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         state.snapshot.accounts = accounts_copy;
         state.snapshot.my_pane_id = my_pane_id;
         state.snapshot.my_tab_id = my_tab_id;
+        state.snapshot.panes = panes.clone();
         state.snapshot.orchestrators = crate::orchestrators::discover_orchestrators(
             &state.snapshot.project_dir,
             &state.snapshot.accounts,

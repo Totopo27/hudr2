@@ -53,7 +53,9 @@
 
 ## 4. `Orquestadores` (`id: "orquestadores"`, index `4`)
 - **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `CORAL` when an orchestrator's sovereign model has exhausted quota).
-- **Discovery:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json`) profiles/orchestrator agents. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
+- **Discovery & Subagent Exclusion:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json` `"agent"` and `"agents"`). Filters subagents via `is_known_subagent` (`subagent`, `deny`, `gentle-ai-*`, `jd-*`, `review-*`, `sdd-explore-*`, etc.) so subagents NEVER pollute this card. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
+- **Friendly Display Names:** Maps technical fleet identifiers to user-sovereign names: `fleet-codex` / `gentle-orchestrator-codex` → `tavocodex`, `fleet-tavo` / `gentle-orchestrator` → `tavoclaude`, `fleet-gianni` → `gianniclaude`, `fleet-clas` → `clasclaude`, and `sdd-orchestrator-agy*` → `sdd-agy*`.
+- **Compact Model Format:** Formats model strings compactly (e.g. `(5.6-sol [high])`, `(opus-5-5 [high])`, `(3.8-flash)`).
 - **Status Lifecycle:**
   - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session or Herdr pane (including any of its active subagents).
   - `Idle` (`-- en espera`, `AMBER` `●`): Orchestrator paused, session active but idle with completed turns or active pane.
@@ -69,17 +71,19 @@
   - Keybindings: `5` toggles collapse, `x` triggers orchestrator migration, `d` triggers confined idle session liberation.
 
 ## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)
-- **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped to active orchestrator, fallback to `<active_acc_prefix> *` or first account).
-- **Orchestrator Fleet Breakdown (Opción B: Fila individual por subagente):**
+- **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped exclusively to the active orchestrator, fallback to `<active_acc_prefix> *` or first account).
+- **Orchestrator Fleet Breakdown (Diseño Compacto con roles limpios y colapso rev-4r):**
   - Identifies the active orchestrator from Card 4 `Orquestadores` (`Working` -> `Idle` -> `is_default` -> first profile).
-  - Inspects all subagents and orchestrator models configured for that orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`).
-  - Renders a dedicated individual row for the sovereign orchestrator plus an individual row for every configured subagent (e.g. `worker`, `fix`, `explore`, `verify`, `judge-a`, `judge-b`, `review-risk`, `review-read`, `review-rel`, `review-res`, `deep-rsch`, `news-rsch`, `ui-design`), guaranteeing 100% absolute traceability of every subagent's quota and execution state.
+  - Inspects only the subagents and orchestrator models configured for that specific orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`). Never mixes subagents from other orchestrators.
+  - Role simplification: Shortens role identifiers to eliminate redundant prefixes (`gentle-ai-*`, `sdd-*`): `orch`, `worker`, `fix`, `explore`, `verify`, `deep-rsch`, `news-rsch`, `judge-a`, `judge-b`, `ui-design`.
+  - Review consolidation: Groups the 4 review lenses (`review-risk`, `review-readability`, `review-reliability`, `review-resilience`) into a single collapsed active row: `rev-4r (sonnet-5-5)`.
+  - Model abbreviation: Formats model names cleanly: `sonnet-5-5`, `opus-5-5`, `5.6-sol`, `5.6-terra`, `5.6-luna`, `codex-review`, `3.8-flash`.
   - Runtime visual activity glyphs:
     - `>` in accent color (`ACCENT_SECONDARY`) + bright bold text (`BOLD TEXT_PRIMARY`) for the active working model/agent (`Working`).
     - `●` in purple (`MAGENTA`) + white text (`TEXT_PRIMARY`) for passive components that recently finished working / were used in the session (`all_active_prefixes`) or are in idle panes.
     - `○` in gray (`TEXT_DIM`) + gray text (`TEXT_MUTED`) for inactive / unused components in this session.
   - Quota and Balance Projections:
-    - For OAuth accounts (Antigravity): evaluates the sovereign/target pool for that model with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`) with inline gauge and `%` remaining.
+    - For OAuth accounts (Antigravity): evaluates the sovereign/target pool for that model with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`) with inline gauge and `%` remaining (`5h` and `Wk`).
     - For API key and subscription accounts (Claude, Codex): renders session cost or balance remaining (`$XX.XX disp` / `$X.XX sesión`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
   - Interactive balance editing: Allows in-place balance editing for active API key accounts (`[editar saldo]` / key `b`).
   - Legacy fallback: When no orchestrator profiles are discovered (e.g. tests or isolated environments), gracefully falls back to single-account pool breakdown.
