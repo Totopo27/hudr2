@@ -437,6 +437,27 @@ fn evaluate_orchestrator_quota_health(
     }
 }
 
+fn match_boundary(haystack: &str, needle: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        let abs_pos = start + pos;
+        let before_ok = abs_pos == 0 || {
+            let prev = haystack[..abs_pos].chars().next_back().unwrap();
+            !prev.is_alphanumeric()
+        };
+        let after_pos = abs_pos + needle.len();
+        let after_ok = after_pos == haystack.len() || {
+            let next = haystack[after_pos..].chars().next().unwrap();
+            !next.is_alphanumeric()
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs_pos + needle.len().max(1);
+    }
+    false
+}
+
 /// Determina si un perfil de orquestador está Working, Idle o Offline,
 /// evaluando tanto la identidad del orquestador como la pertenencia estricta de subagentes activos.
 #[allow(clippy::too_many_arguments)]
@@ -450,12 +471,18 @@ fn resolve_orchestrator_status(
     active_session: &AgentSession,
     panes: &[HerdrPane],
 ) -> OrchestratorStatus {
+    let name_low = profile_name.to_lowercase();
+    let disp_low = display_name.to_lowercase();
+
     // 1. Coincidencia directa con panes de Herdr (fuente de verdad si hay perfil asignado al pane)
     for p in panes {
         let pane_prof = p.tokens.get("profile").map(|s| s.as_str());
         let pane_agent = p.agent.as_deref();
-        let hit = pane_prof.map(|pr| pr.eq_ignore_ascii_case(profile_name) || pr.eq_ignore_ascii_case(display_name)).unwrap_or(false)
-            || pane_agent.map(|ag| ag.eq_ignore_ascii_case(profile_name) || ag.eq_ignore_ascii_case(display_name)).unwrap_or(false);
+        let pane_title = p.terminal_title.as_deref().unwrap_or("");
+        let hit = pane_prof.map(|pr| pr.eq_ignore_ascii_case(profile_name) || pr.eq_ignore_ascii_case(display_name) || match_boundary(&pr.to_lowercase(), &name_low) || match_boundary(&pr.to_lowercase(), &disp_low)).unwrap_or(false)
+            || pane_agent.map(|ag| ag.eq_ignore_ascii_case(profile_name) || ag.eq_ignore_ascii_case(display_name) || match_boundary(&ag.to_lowercase(), &name_low) || match_boundary(&ag.to_lowercase(), &disp_low)).unwrap_or(false)
+            || match_boundary(&pane_title.to_lowercase(), &name_low)
+            || match_boundary(&pane_title.to_lowercase(), &disp_low);
 
         if hit {
             if p.agent_status.as_deref() == Some("working") {
@@ -467,18 +494,15 @@ fn resolve_orchestrator_status(
 
     // 2. Coincidencia directa de la sesión activa con el orquestador mismo
     let sess_low = active_session.agent.to_lowercase();
-    let name_low = profile_name.to_lowercase();
-    let disp_low = display_name.to_lowercase();
 
     let is_orch_name = sess_low == name_low
         || sess_low == disp_low
-        || sess_low.contains(&name_low)
-        || sess_low.contains(&disp_low)
-        || (disp_low == "tavocodex" && (sess_low.contains("codex") || sess_low == "gentle-orchestrator-codex"))
-        || (disp_low == "tavoclaude" && (sess_low == "gentle-orchestrator" || sess_low.contains("tavo")))
-        || (disp_low == "gianniclaude" && sess_low.contains("gianni"))
-        || (disp_low == "clasclaude" && sess_low.contains("clas"))
-        || (disp_low.starts_with("sdd-") && (sess_low.contains(&disp_low) || sess_low.contains(&name_low)));
+        || match_boundary(&sess_low, &name_low)
+        || match_boundary(&sess_low, &disp_low)
+        || (disp_low == "tavocodex" && (match_boundary(&sess_low, "codex") || sess_low == "gentle-orchestrator-codex"))
+        || (disp_low == "tavoclaude" && (sess_low == "gentle-orchestrator" || match_boundary(&sess_low, "tavo")))
+        || (disp_low == "gianniclaude" && match_boundary(&sess_low, "gianni"))
+        || (disp_low == "clasclaude" && match_boundary(&sess_low, "clas"));
 
     let is_generic_orch = active_session.agent.eq_ignore_ascii_case("orchestrator")
         || active_session.agent.eq_ignore_ascii_case("gentle-orchestrator")

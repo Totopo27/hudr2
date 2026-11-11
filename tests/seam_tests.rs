@@ -1654,11 +1654,11 @@ mod tests {
         assert!(all_text.contains("v1.5.0"));
         assert!(all_text.contains("gentle-ai"));
 
-        // Clic en la tarjeta de ecosistema alterna el colapso (idx 10)
-        assert!(!state.collapsed_cards[10]);
+        // Clic en la tarjeta de ecosistema alterna el colapso (idx 11)
+        assert!(!state.collapsed_cards[11]);
         let res = state.handle_mouse_click(eco_bound.start_line, 0);
-        assert!(matches!(res, Some(ClickAction::ToggledCard(10))));
-        assert!(state.collapsed_cards[10]);
+        assert!(matches!(res, Some(ClickAction::ToggledCard(11))));
+        assert!(state.collapsed_cards[11]);
     }
 
     #[test]
@@ -2419,8 +2419,8 @@ mod tests {
     #[test]
     fn test_tarjetas_card_renders_and_toggles_visibility() {
         let mut state = AppState::new();
-        // Expandir card de Personalizar (idx 11)
-        state.collapsed_cards[11] = false;
+        // Expandir card de Personalizar (idx 12)
+        state.collapsed_cards[12] = false;
 
         let render_out = ui::render_screen_with_diff(
             &state.snapshot,
@@ -2498,7 +2498,7 @@ mod tests {
     #[test]
     fn test_tarjetas_mouse_click_toggles_visibility() {
         let mut state = AppState::new();
-        state.collapsed_cards[11] = false; // Expandir
+        state.collapsed_cards[12] = false; // Expandir
 
         let render_out = ui::render_screen_with_diff(
             &state.snapshot,
@@ -2537,7 +2537,7 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         st.toggle_card_visibility("ecosystem");
         st.toggle_card_visibility("engram");
-        st.toggle_card(11); // expandir tarjetas
+        st.toggle_card(12); // expandir tarjetas
         st.set_sidebar_name(Some("Mi Proyecto HUD".to_string()));
         st.cycle_theme(); // avanza a "linear"
 
@@ -2548,7 +2548,7 @@ mod tests {
         assert!(st2.is_card_hidden("ecosystem"));
         assert!(st2.is_card_hidden("engram"));
         assert!(!st2.is_card_hidden("estado"));
-        assert!(!st2.collapsed_cards[11]); // recuerda el estado colapsado/expandido
+        assert!(!st2.collapsed_cards[12]); // recuerda el estado colapsado/expandido
         assert_eq!(st2.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
         assert_eq!(st2.theme.as_deref(), Some("linear"));
         assert_eq!(st2.snapshot.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
@@ -2558,7 +2558,7 @@ mod tests {
     #[test]
     fn test_sidebar_name_custom_style() {
         let mut snap = TelemetrySnapshot::default();
-        let collapsed = [true; 12];
+        let collapsed = [true; 13];
 
         // 1. Fallback por defecto: HUDR2
         let out_default = ui::render_screen(&snap, &collapsed, None, 48);
@@ -2572,8 +2572,8 @@ mod tests {
         assert!(header_custom.contains(":: Gentle Shell ::"));
 
         // 3. Personalizar card muestra el nombre y el botón interactivo de edición
-        let mut collapsed_open = [true; 12];
-        collapsed_open[11] = false;
+        let mut collapsed_open = [true; 13];
+        collapsed_open[12] = false;
         let out_card = ui::render_screen(&snap, &collapsed_open, None, 48);
         let clean_card = ui::strip_ansi(&out_card.lines.join("\n"));
         assert!(clean_card.contains("Nombre  Gentle Shell"));
@@ -2589,7 +2589,7 @@ mod tests {
     #[test]
     fn test_personalizar_name_inline_editing_lifecycle() {
         let mut state = AppState::new();
-        state.collapsed_cards[11] = false; // Expandir Personalizar
+        state.collapsed_cards[12] = false; // Expandir Personalizar
 
         // 1. Estado inicial
         assert!(!state.is_editing_sidebar_name);
@@ -2660,7 +2660,7 @@ mod tests {
     #[test]
     fn test_personalizar_mouse_interaction_and_double_click() {
         let mut state = AppState::new();
-        state.collapsed_cards[11] = false;
+        state.collapsed_cards[12] = false;
 
         let render_out = ui::render_screen_with_diff(
             &state.snapshot,
@@ -2708,7 +2708,7 @@ mod tests {
     #[test]
     fn test_theme_cycle_interaction_and_persistence() {
         let mut state = AppState::new();
-        state.collapsed_cards[11] = false; // Expandir Tarjetas
+        state.collapsed_cards[12] = false; // Expandir Tarjetas
 
         let render_out = ui::render_screen_with_diff(
             &state.snapshot,
@@ -2756,8 +2756,8 @@ mod tests {
         // Expandir tarjetas clave para comprobar el layout compacto
         state.collapsed_cards[3] = false; // Integraciones
         state.collapsed_cards[5] = false; // Cuota de Modelos
-        state.collapsed_cards[7] = false; // Engram
-        state.collapsed_cards[11] = false; // Personalizar
+        state.collapsed_cards[8] = false; // Engram
+        state.collapsed_cards[12] = false; // Personalizar
 
         // Configurar cuentas con error de expirado
         let mut acc = hudr2::models::AccountQuota {
@@ -4323,8 +4323,8 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         assert!(st.check_updates); // default true
 
-        // Expandir tarjeta personalizar (idx 11) y renderizar
-        st.toggle_card(11);
+        // Expandir tarjeta personalizar (idx 12) y renderizar
+        st.toggle_card(12);
         let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
         st.card_bounds = render_out.bounds;
 
@@ -4345,8 +4345,8 @@ mod tests {
 
         // Volver a activar con clic
         let mut st3 = AppState::with_config(Some(cfg_path.clone()), None);
-        if st3.collapsed_cards[11] {
-            st3.toggle_card(11);
+        if st3.collapsed_cards[12] {
+            st3.toggle_card(12);
         }
         let render_out2 = ui::render_screen(&st3.snapshot, &st3.collapsed_cards, None, 48);
         st3.card_bounds = render_out2.bounds;
@@ -4374,8 +4374,8 @@ mod tests {
         let mut st = AppState::with_config(Some(cfg_path.clone()), None);
         assert_eq!(st.sound_mode, SoundMode::Bell); // default Bell
 
-        // Expandir tarjeta personalizar (idx 11) y renderizar
-        st.toggle_card(11);
+        // Expandir tarjeta personalizar (idx 12) y renderizar
+        st.toggle_card(12);
         let render_out = ui::render_screen(&st.snapshot, &st.collapsed_cards, None, 48);
         st.card_bounds = render_out.bounds;
 
@@ -4782,6 +4782,7 @@ api-keys:
         state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
         state.collapsed_cards[3] = false; // Integraciones expandida
         state.collapsed_cards[5] = false; // Cuota de Modelos expandida
+        state.collapsed_cards[6] = false; // Saldos API expandida
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let screen = render_out.lines.join("\n");
@@ -4795,8 +4796,10 @@ api-keys:
         assert!(!clean_screen.contains("Wk:100%"));
         assert!(clean_screen.contains("Cuota de Modelos · clasclaude *"));
         assert!(clean_screen.contains("Claude API"));
+        assert!(clean_screen.contains("Saldos API · 3 perfiles"));
         assert!(clean_screen.contains("[definir saldo]"));
-        assert!(clean_screen.contains("[ver ->]"));
+        assert!(clean_screen.contains("Anthropic Console"));
+        assert!(clean_screen.contains("[visitar ->]"));
         assert!(!clean_screen.contains("Claude Wk"));
         assert!(!clean_screen.contains("Claude 5h"));
 
@@ -4805,20 +4808,32 @@ api-keys:
             && b.action_path.as_deref() == Some("clasclaude")));
         assert!(render_out.bounds.iter().any(|b| b.action_type == Some("open_billing_url")
             && b.action_path.as_deref() == Some("https://platform.claude.com/spending")));
+        assert!(render_out.bounds.iter().any(|b| b.id == "saldos"));
 
-        // 7. Probar mapeo modular de URLs de facturación para diferentes proveedores
-        use hudr2::quotas::cliproxy::provider_billing_url;
+        // 7. Probar mapeo modular de URLs y etiquetas de facturación para diferentes proveedores
+        use hudr2::quotas::cliproxy::{provider_billing_label, provider_billing_url};
         assert_eq!(provider_billing_url("claude"), "https://platform.claude.com/spending");
+        assert_eq!(provider_billing_label("claude"), "Anthropic Console");
         assert_eq!(provider_billing_url("anthropic"), "https://platform.claude.com/spending");
+        assert_eq!(provider_billing_label("anthropic"), "Anthropic Console");
         assert_eq!(provider_billing_url("deepseek"), "https://platform.deepseek.com/top_up");
+        assert_eq!(provider_billing_label("deepseek"), "DeepSeek Platform");
         assert_eq!(provider_billing_url("google"), "https://aistudio.google.com/");
+        assert_eq!(provider_billing_label("google"), "Google AI Studio");
         assert_eq!(provider_billing_url("gemini"), "https://aistudio.google.com/");
+        assert_eq!(provider_billing_label("gemini"), "Google AI Studio");
         assert_eq!(provider_billing_url("opencode"), "https://opencode.ai/zen");
+        assert_eq!(provider_billing_label("opencode"), "OpenCode Zen");
         assert_eq!(provider_billing_url("kimi"), "https://platform.moonshot.cn/console/pay");
-        assert_eq!(provider_billing_url("moonshot"), "https://platform.moonshot.cn/console/pay");
+        assert_eq!(provider_billing_label("kimi"), "Moonshot Platform");
+        assert_eq!(provider_billing_url("codex"), "https://chatgpt.com/#settings/Subscription");
+        assert_eq!(provider_billing_label("codex"), "ChatGPT Subscription");
         assert_eq!(provider_billing_url("openai"), "https://platform.openai.com/settings/organization/billing/overview");
+        assert_eq!(provider_billing_label("openai"), "OpenAI Platform");
         assert_eq!(provider_billing_url("openrouter"), "https://openrouter.ai/credits");
+        assert_eq!(provider_billing_label("openrouter"), "OpenRouter Credits");
         assert_eq!(provider_billing_url("groq"), "https://console.groq.com/settings/billing");
+        assert_eq!(provider_billing_label("groq"), "Groq Console");
 
         // 8. Probar ciclo de vida de edición de saldo interactiva
         state.start_edit_balance("clasclaude");
@@ -4826,7 +4841,7 @@ api-keys:
         state.update_balance_input_buffer("50.00".to_string());
         let edit_render = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let edit_screen = ui::strip_ansi(&edit_render.lines.join("\n"));
-        assert!(edit_screen.contains("Saldo $: 50.00"));
+        assert!(edit_screen.contains("clasclaude Saldo $: 50.00"));
         assert!(edit_screen.contains("[Enter|Esc]"));
 
         state.cancel_edit_balance();
@@ -4970,14 +4985,14 @@ api-keys:
             .clone();
 
         assert!(is_codex_account(&codex_acc));
-        assert!(is_api_key(&codex_acc));
+        assert!(!is_api_key(&codex_acc));
         assert_eq!(codex_acc.reset_5h, "plus");
         assert!(!codex_acc.has_error);
-        assert_eq!(codex_acc.pools.len(), 2);
+        assert_eq!(codex_acc.pools.len(), 1);
         assert_eq!(codex_acc.pools[0].label, "Codex Plus");
-        assert_eq!(codex_acc.pools[1].label, "Codex Saldo");
 
         assert!(is_codex_account(&tavo_acc));
+        assert!(!is_api_key(&tavo_acc));
         assert_eq!(tavo_acc.reset_5h, "plus");
 
         // 3. Probar fetch_quota_for_account_with_cache: valida localmente sin llamar Google
@@ -5037,7 +5052,9 @@ api-keys:
         assert!(!screen.contains("? codex"));
         assert!(screen.contains("Cuota de Modelos · codex *"));
         assert!(screen.contains("Codex Plus"));
-        assert!(screen.contains("Saldo"));
+        assert!(screen.contains("Suscripción"));
+        // Codex es cuenta de suscripción mensual/semanal, NO debe aparecer en Saldos API
+        assert!(!screen.contains("Saldos API"));
     }
 
     #[test]
@@ -5990,5 +6007,215 @@ api-keys:
         assert!(screen.contains("> explore"), "Explore debe estar activo simultáneamente con '>'");
         // El subagente inactivo debe permanecer en '○'
         assert!(screen.contains("○ rev-4r"), "rev-4r debe permanecer inactivo en '○'");
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_selects_orchestrator_matching_active_session_prefix() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus};
+        use hudr2::state::AppState;
+
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false; // Expandir Cuota de Modelos
+
+        // Dos orquestadores SDD en estado Idle: sdd-agy (primero) y sdd-agy2 (segundo)
+        let orch1 = OrchestratorProfile {
+            name: "sdd-orchestrator-agy".to_string(),
+            display_name: "sdd-agy".to_string(),
+            model: "cliproxy/agy/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            prefix: Some("agy".to_string()),
+            status: OrchestratorStatus::Idle,
+            ..Default::default()
+        };
+        let orch2 = OrchestratorProfile {
+            name: "sdd-orchestrator-agy2".to_string(),
+            display_name: "sdd-agy2".to_string(),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            prefix: Some("agy2".to_string()),
+            status: OrchestratorStatus::Idle,
+            ..Default::default()
+        };
+
+        state.snapshot.orchestrators = vec![orch1, orch2];
+        state.snapshot.accounts = vec![
+            AccountQuota {
+                prefix: "agy".to_string(),
+                auth_file: "agy.json".to_string(),
+                rem_5h: 90,
+                rem_wk: 80,
+                ..Default::default()
+            },
+            AccountQuota {
+                prefix: "agy2".to_string(),
+                auth_file: "agy2.json".to_string(),
+                rem_5h: 95,
+                rem_wk: 85,
+                ..Default::default()
+            },
+        ];
+
+        // Sesión activa del espacio actual configurada con agy2 (ej. espacio UNED)
+        state.snapshot.agent_session = AgentSession {
+            agent: "sdd-orchestrator-agy2".to_string(),
+            agent_status: "idle".to_string(),
+            local_prefix: Some("agy2".to_string()),
+            model_short: "gemini-3.8-flash".to_string(),
+            model: "cliproxy/agy2/gemini-3.8-flash".to_string(),
+            ..Default::default()
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+
+        // Card Cuota de Modelos DEBE titularse sdd-agy2 por afinidad de sesión, NO sdd-agy
+        assert!(
+            screen.contains("Cuota de Modelos · sdd-agy2 *"),
+            "Debe seleccionar sdd-agy2 para Cuota de Modelos según el prefijo agy2 de la sesión activa"
+        );
+        assert!(
+            !screen.contains("Cuota de Modelos · sdd-agy *"),
+            "No debe seleccionar erróneamente sdd-agy"
+        );
+    }
+
+    #[test]
+    fn test_saldos_api_card_and_dynamic_quota_projection_with_tasks() {
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, QuotaPool};
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+
+        unsafe {
+            std::env::set_var("HUDR2_CONFIG_PATH", &cfg_path);
+        }
+
+        // 1. Guardar saldo prepago de $20.00 para tavoclaude
+        let _ = hudr2::state::save_account_budget(&cfg_path, "tavoclaude", Some(20.0), 0.0, Some("sess-01".to_string()));
+
+        let mut state = AppState::with_config(Some(cfg_path), None);
+        state.collapsed_cards[4] = false; // Orquestadores
+        state.collapsed_cards[5] = false; // Cuota de Modelos
+        state.collapsed_cards[6] = false; // Saldos API
+
+        let acc_tavo = AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            pools: vec![
+                QuotaPool {
+                    label: "Claude API".to_string(),
+                    percent: 100,
+                    reset: "api-key".to_string(),
+                    pace: "$0.000".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude Saldo".to_string(),
+                    percent: 100,
+                    reset: "api-key".to_string(),
+                    pace: "$20.00".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let acc_codex = AccountQuota {
+            prefix: "tavocodex".to_string(),
+            auth_file: "tavocodex.json".to_string(),
+            reset_5h: "plus".to_string(),
+            reset_wk: "plus".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            pools: vec![
+                QuotaPool {
+                    label: "Codex Plus".to_string(),
+                    percent: 100,
+                    reset: "plus".to_string(),
+                    pace: "Suscripción".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        state.snapshot.accounts = vec![acc_tavo, acc_codex];
+
+        let orch_tavo = OrchestratorProfile {
+            name: "fleet-tavo".to_string(),
+            display_name: "tavoclaude".to_string(),
+            model: "tavoclaude/claude-opus-5-5".to_string(),
+            model_short: "claude-opus-5-5".to_string(),
+            prefix: Some("tavoclaude".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                hudr2::models::SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "claude-opus-5-5".to_string(),
+                    model_short: "claude-opus-5-5".to_string(),
+                    prefix: Some("tavoclaude".to_string()),
+                    thinking: None,
+                },
+            ],
+            ..Default::default()
+        };
+        state.snapshot.orchestrators = vec![orch_tavo];
+
+        // Sesión activa con 10 tareas completadas y $2.50 acumulados (promedio $0.25/req)
+        state.snapshot.agent_session = AgentSession {
+            session_id: Some("sess-01".to_string()),
+            agent: "fleet-tavo".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("tavoclaude".to_string()),
+            model: "tavoclaude/claude-opus-5-5".to_string(),
+            model_short: "claude-opus-5-5".to_string(),
+            cost: 2.50,
+            last_turn_cost: 0.25,
+            turn_count: 10,
+            ..Default::default()
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 54);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+        // Verificar Card Saldos API
+        assert!(screen.contains("Saldos API · 1 perfil"));
+        assert!(screen.contains("tavoclaude"));
+        assert!(screen.contains("87%")); // (17.50 / 20.0) * 100 = 87.5% -> 87%
+        assert!(screen.contains("$17.50 disp"));
+        assert!(screen.contains("[editar]"));
+
+        // Proyección dinámica de tareas restantes: $17.50 / $0.25 = ~70 reqs
+        assert!(screen.contains("sesión: $2.500"));
+        assert!(screen.contains("$0.250/req"));
+        assert!(screen.contains("70 reqs disp"));
+
+        // Consola oficial de facturación con link
+        assert!(screen.contains("Anthropic Console"));
+        assert!(screen.contains("[visitar ->]"));
+
+        // Bounds interactivos registrados
+        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("edit_balance")
+            && b.action_path.as_deref() == Some("tavoclaude")));
+        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("open_billing_url")
+            && b.action_path.as_deref() == Some("https://platform.claude.com/spending")));
+
+        // Verificar sincronización en Cuota de Modelos
+        assert!(screen.contains("Cuota de Modelos · tavoclaude"));
+        assert!(screen.contains("$17.50 disp"));
+
+        // Ahora simular agotamiento de saldo ($21.00 de gasto superando los $20.00 de presupuesto)
+        state.snapshot.agent_session.cost = 21.00;
+        state.snapshot.agent_session.turn_count = 84;
+        let render_exhausted = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 54);
+        let screen_exhausted = ui::strip_ansi(&render_exhausted.lines.join("\n"));
+
+        assert!(screen_exhausted.contains("[SALDO AGOTADO]"));
+
+        unsafe {
+            std::env::remove_var("HUDR2_CONFIG_PATH");
+        }
     }
 }

@@ -504,6 +504,10 @@ pub fn try_read_pi_session(
         has_jsonl || is_pi_agent || !p.tokens.is_empty()
     };
 
+    let is_same_cwd = |p: &HerdrPane| -> bool {
+        p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
+    };
+
     let sibling = my_tab_id.and_then(|tid| {
         herdr_panes.iter().find(|p| {
             p.tab_id.as_deref() == Some(tid)
@@ -511,16 +515,21 @@ pub fn try_read_pi_session(
                 && is_pi_pane(p)
         })
     });
-    let focused = herdr_panes.iter().find(|p| p.focused && is_pi_pane(p));
-    let working = herdr_panes
+    let cwd_focused = herdr_panes.iter().find(|p| is_same_cwd(p) && p.focused && is_pi_pane(p));
+    let cwd_working = herdr_panes.iter().find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
+    let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p) && is_pi_pane(p));
+
+    let global_focused = herdr_panes.iter().find(|p| p.focused && is_pi_pane(p));
+    let global_working = herdr_panes
         .iter()
         .find(|p| p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
-    let by_cwd = herdr_panes.iter().find(|p| {
-        p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
-            && is_pi_pane(p)
-    });
 
-    let target_pane = sibling.or(focused).or(working).or(by_cwd)?;
+    let target_pane = sibling
+        .or(cwd_focused)
+        .or(cwd_working)
+        .or(cwd_any)
+        .or(global_focused)
+        .or(global_working)?;
     let status = target_pane.agent_status.as_deref().unwrap_or("idle");
 
     if let Some(ref raw_path) = target_pane.agent_session_id {

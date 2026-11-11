@@ -5,7 +5,9 @@
 //! y la consulta HTTP a `QUOTA_URL`.
 
 use crate::config::{QUOTA_URL, USER_AGENT};
-use crate::models::{AccountQuota, QuotaPool};
+use crate::models::{
+    AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus, QuotaPool,
+};
 use crate::paths::{
     cliproxy_config_candidates_for, gentle_ai_profiles_candidates, opencode_config_candidates,
     resolve_auths_dir_for,
@@ -350,7 +352,9 @@ pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
 
 /// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
 pub fn is_unfetched(acc: &AccountQuota) -> bool {
-    !is_api_key(acc) && !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
+    !is_api_key(acc)
+        && !acc.has_error
+        && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
 }
 
 /// Comprueba si una cuenta corresponde a una suscripción o autenticación OAuth de OpenAI Codex
@@ -360,13 +364,13 @@ pub fn is_codex_account(acc: &AccountQuota) -> bool {
         || matches!(acc.reset_5h.as_str(), "plus" | "pro" | "team" | "free" | "codex")
 }
 
-/// Comprueba si una cuenta corresponde a un perfil configurado vía API Key o suscripción financiera/balance (Codex)
+/// Comprueba si una cuenta corresponde a un perfil configurado vía API Key (prepago/saldo por tokens)
+/// en contraposición a una credencial OAuth / cuenta de suscripción periódica en auths/.
 pub fn is_api_key(acc: &AccountQuota) -> bool {
-    acc.reset_5h == "api-key"
-        || is_codex_account(acc)
-        || acc.auth_file.contains('#')
-        || acc.auth_file.contains("config.yaml")
-        || acc.auth_file.contains("config.yml")
+    acc.auth_file.contains('#')
+        || acc.auth_file.ends_with(".yaml")
+        || acc.auth_file.ends_with(".yml")
+        || acc.reset_5h == "api-key"
 }
 
 fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)> {
@@ -429,9 +433,18 @@ pub fn parse_api_key_accounts_from_yaml(content: &str) -> Vec<(String, String)> 
                         current_provider = match lower.as_str() {
                             "claude" | "anthropic" => "Claude".to_string(),
                             "gemini" | "google" => "Gemini".to_string(),
+                            "interactions" | "interactions-api" => "Interactions".to_string(),
                             "openai" | "gpt" | "codex" => "GPT".to_string(),
                             "deepseek" => "DeepSeek".to_string(),
                             "qwen" => "Qwen".to_string(),
+                            "kimi" | "moonshot" => "Kimi".to_string(),
+                            "xai" | "grok" => "xAI".to_string(),
+                            "muse" | "meta" => "Muse".to_string(),
+                            "vertex" => "Vertex".to_string(),
+                            "openai-compatibility" | "openai-compatible" => "OpenAI".to_string(),
+                            "fennoai" => "FennoAI".to_string(),
+                            "qiniu" => "Qiniu".to_string(),
+                            "alcodemirror" => "Alcodemirror".to_string(),
                             other => {
                                 let mut c = other.chars();
                                 match c.next() {
@@ -635,9 +648,159 @@ pub fn provider_billing_url(provider_or_prefix: &str) -> &'static str {
         "https://console.x.ai/"
     } else if lower.contains("cohere") {
         "https://dashboard.cohere.com/billing"
+    } else if lower.contains("muse") || lower.contains("meta") {
+        "https://developers.facebook.com/"
+    } else if lower.contains("vertex") {
+        "https://console.cloud.google.com/billing"
+    } else if lower.contains("fennoai") || lower.contains("fenno") {
+        "https://fenno.ai/"
+    } else if lower.contains("qiniu") {
+        "https://portal.qiniu.com/"
+    } else if lower.contains("alcodemirror") {
+        "https://alcodemirror.com/"
     } else {
         "https://platform.claude.com/spending"
     }
+}
+
+/// Devuelve la etiqueta legible de la consola o portal oficial de facturación según el proveedor.
+pub fn provider_billing_label(provider_or_prefix: &str) -> &'static str {
+    let lower = provider_or_prefix.to_ascii_lowercase();
+    if lower.contains("claude") || lower.contains("anthropic") {
+        "Anthropic Console"
+    } else if lower.contains("deepseek") {
+        "DeepSeek Platform"
+    } else if lower.contains("gemini") || lower.contains("google") || lower.contains("aistudio") {
+        "Google AI Studio"
+    } else if lower.contains("opencode") || lower.contains("zen") {
+        "OpenCode Zen"
+    } else if lower.contains("kimi") || lower.contains("moonshot") {
+        "Moonshot Platform"
+    } else if lower.contains("codex") {
+        "ChatGPT Subscription"
+    } else if lower.contains("openai") || lower.contains("gpt") {
+        "OpenAI Platform"
+    } else if lower.contains("openrouter") {
+        "OpenRouter Credits"
+    } else if lower.contains("groq") {
+        "Groq Console"
+    } else if lower.contains("together") {
+        "Together AI"
+    } else if lower.contains("mistral") {
+        "Mistral Console"
+    } else if lower.contains("perplexity") || lower.contains("pplx") {
+        "Perplexity API"
+    } else if lower.contains("cerebras") {
+        "Cerebras Cloud"
+    } else if lower.contains("fireworks") {
+        "Fireworks AI"
+    } else if lower.contains("xai") || lower.contains("grok") {
+        "xAI Console"
+    } else if lower.contains("cohere") {
+        "Cohere Dashboard"
+    } else if lower.contains("muse") || lower.contains("meta") {
+        "Meta Developers"
+    } else if lower.contains("vertex") {
+        "Google Cloud Billing"
+    } else if lower.contains("fennoai") || lower.contains("fenno") {
+        "FennoAI Console"
+    } else if lower.contains("qiniu") {
+        "Qiniu Cloud"
+    } else if lower.contains("alcodemirror") {
+        "Alcodemirror Console"
+    } else {
+        "Billing Console"
+    }
+}
+
+/// Determina si una cuenta API Key está siendo utilizada en la sesión activa o en
+/// alguno de los orquestadores y subagentes en ejecución o coincidentes con el espacio actual.
+pub fn is_api_account_active(
+    acc: &AccountQuota,
+    session: &AgentSession,
+    orchestrators: &[OrchestratorProfile],
+    panes: &[HerdrPane],
+) -> bool {
+    let pfx_low = acc.prefix.to_ascii_lowercase();
+
+    // 1. Coincidencia directa con local_prefix
+    if let Some(ref lp) = session.local_prefix
+        && lp.eq_ignore_ascii_case(&acc.prefix)
+    {
+        return true;
+    }
+
+    // 2. Coincidencia en all_active_prefixes
+    if session.all_active_prefixes.contains(&pfx_low) {
+        return true;
+    }
+
+    // 3. Coincidencia en el modelo de la sesión activa
+    let model_low = session.effective_model().to_ascii_lowercase();
+    if model_low.starts_with(&format!("{pfx_low}/"))
+        || model_low.contains(&format!("{pfx_low}:"))
+        || model_low.starts_with(&format!("{pfx_low}-"))
+    {
+        return true;
+    }
+
+    // 4. Coincidencia con orquestadores activos o asociados al espacio
+    for orch in orchestrators {
+        let orch_pfx_match = orch
+            .prefix
+            .as_deref()
+            .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+            .unwrap_or(false)
+            || orch.display_name().eq_ignore_ascii_case(&acc.prefix)
+            || orch.name.eq_ignore_ascii_case(&acc.prefix);
+
+        if orch_pfx_match {
+            if orch.status != OrchestratorStatus::Idle {
+                return true;
+            }
+            if let Some(ref lp) = session.local_prefix
+                && (orch.display_name().eq_ignore_ascii_case(lp)
+                    || orch.name.eq_ignore_ascii_case(lp))
+            {
+                return true;
+            }
+        }
+
+        for sub in &orch.subagents {
+            if sub
+                .prefix
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
+                .unwrap_or(false)
+            {
+                let sub_model_low = sub.model.to_ascii_lowercase();
+                if sub_model_low.starts_with(&format!("{pfx_low}/")) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // 5. Coincidencia en paneles de Herdr activos
+    for pane in panes {
+        if pane.agent_status.as_deref() == Some("working") {
+            if let Some(ref title) = pane.terminal_title {
+                let t_low = title.to_ascii_lowercase();
+                if t_low.contains(&pfx_low) {
+                    return true;
+                }
+            }
+            for (k, v) in &pane.tokens {
+                if k.to_ascii_lowercase().contains(&pfx_low)
+                    || v.to_ascii_lowercase().contains(&pfx_low)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 /// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.
@@ -785,20 +948,26 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     .get("type")
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                let is_codex = cred_type.eq_ignore_ascii_case("codex")
-                    || raw_stem.to_ascii_lowercase().starts_with("codex")
-                    || raw_stem.to_ascii_lowercase().ends_with("codex");
+                let is_antigravity = cred_type.eq_ignore_ascii_case("antigravity")
+                    || raw_stem.to_ascii_lowercase().contains("antigravity")
+                    || raw_stem.to_ascii_lowercase().contains("google")
+                    || clean_stem.to_ascii_lowercase().starts_with("agy");
 
                 let prefix = val
                     .get("prefix")
                     .and_then(|p| p.as_str())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| {
-                        if is_codex {
-                            let mut cand = "codex".to_string();
+                        if !is_antigravity {
+                            let base_cand = if !cred_type.is_empty() {
+                                cred_type.to_lowercase()
+                            } else {
+                                clean_stem.to_lowercase()
+                            };
+                            let mut cand = base_cand.clone();
                             let mut idx = 2;
                             while seen_prefixes.contains(&cand.to_lowercase()) {
-                                cand = format!("codex{idx}");
+                                cand = format!("{base_cand}{idx}");
                                 idx += 1;
                             }
                             cand
@@ -815,42 +984,71 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                 seen_files.insert(path_str.clone());
                 seen_prefixes.insert(prefix.to_lowercase());
 
-                if is_codex {
+                if !is_antigravity {
+                    // Cuentas OAuth de suscripción o plataforma (Codex, Claude OAuth, Kimi, Muse, xAI, Devin, Vertex AI)
+                    let provider_name = match cred_type.to_ascii_lowercase().as_str() {
+                        "codex" => "Codex".to_string(),
+                        "claude" => "Claude".to_string(),
+                        "kimi" => "Kimi".to_string(),
+                        "xai" => "xAI".to_string(),
+                        "muse" => "Muse".to_string(),
+                        "devin" => "Devin".to_string(),
+                        "vertex" => "Vertex AI".to_string(),
+                        other if !other.is_empty() => {
+                            let mut c = other.chars();
+                            match c.next() {
+                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                                None => "OAuth".to_string(),
+                            }
+                        }
+                        _ => {
+                            if raw_stem.to_ascii_lowercase().contains("codex") {
+                                "Codex".to_string()
+                            } else if raw_stem.to_ascii_lowercase().contains("claude") {
+                                "Claude".to_string()
+                            } else if raw_stem.to_ascii_lowercase().contains("kimi") {
+                                "Kimi".to_string()
+                            } else {
+                                "OAuth".to_string()
+                            }
+                        }
+                    };
+
                     let plan = val
                         .get("plan_type")
                         .and_then(|p| p.as_str())
-                        .unwrap_or("plus");
+                        .unwrap_or(if provider_name == "Codex" { "plus" } else { "sub" });
+
                     let badge = if plan.is_empty() {
-                        "codex".to_string()
+                        provider_name.to_lowercase()
                     } else {
                         plan.to_lowercase()
                     };
+
                     let plan_display = match badge.as_str() {
                         "plus" => "Plus",
                         "pro" => "Pro",
                         "team" => "Team",
                         "free" => "Free",
-                        _ => "Plus",
+                        "sub" => "Sub",
+                        _ => plan,
                     };
-                    let user_budget = get_user_configured_budget(&prefix);
-                    let saldo_pace = match user_budget {
-                        Some(b) => format!("${:.2}", b),
-                        None => "[definir saldo]".to_string(),
-                    };
-                    let pools = vec![
-                        QuotaPool {
-                            label: format!("Codex {plan_display}"),
+
+                    let mut pools = vec![QuotaPool {
+                        label: format!("{provider_name} {plan_display}"),
+                        percent: 100,
+                        reset: badge.clone(),
+                        pace: "Suscripción".to_string(),
+                    }];
+
+                    if let Some(user_budget) = get_user_configured_budget(&prefix) {
+                        pools.push(QuotaPool {
+                            label: format!("{provider_name} Saldo"),
                             percent: 100,
                             reset: badge.clone(),
-                            pace: "$0.000".to_string(),
-                        },
-                        QuotaPool {
-                            label: "Codex Saldo".to_string(),
-                            percent: 100,
-                            reset: badge.clone(),
-                            pace: saldo_pace,
-                        },
-                    ];
+                            pace: format!("${user_budget:.2}"),
+                        });
+                    }
 
                     let is_disabled = val
                         .get("disabled")
@@ -1052,7 +1250,23 @@ pub async fn fetch_quota_for_account_with_cache(
     acc: &mut AccountQuota,
     cache_path: Option<&Path>,
 ) -> u16 {
+    // 1. Cuentas de tipo API Key: no consultan endpoint remoto
     if is_api_key(acc) {
+        acc.has_error = false;
+        acc.error_msg.clear();
+        acc.rem_5h = 100;
+        acc.rem_wk = 100;
+        if acc.reset_5h.is_empty() || acc.reset_5h == UNFETCHED_RESET {
+            acc.reset_5h = "api-key".to_string();
+            acc.reset_wk = "api-key".to_string();
+        }
+        return 200;
+    }
+
+    // 2. Cuentas OAuth de plataforma / suscripción (Codex, Claude OAuth, Kimi, Muse, xAI, etc.):
+    // Tienen pools asignados y reset propio (no UNFETCHED_RESET), validan vigencia en disco
+    // sin enviar tokens a QUOTA_URL de Google
+    if !is_antigravity_account(acc) && (!acc.pools.is_empty() && acc.reset_5h != UNFETCHED_RESET) {
         if Path::new(&acc.auth_file).exists()
             && !acc.auth_file.contains('#')
             && let Ok(content) = fs::read_to_string(&acc.auth_file)
@@ -1076,13 +1290,10 @@ pub async fn fetch_quota_for_account_with_cache(
         acc.error_msg.clear();
         acc.rem_5h = 100;
         acc.rem_wk = 100;
-        if acc.reset_5h.is_empty() || acc.reset_5h == UNFETCHED_RESET {
-            acc.reset_5h = "api-key".to_string();
-            acc.reset_wk = "api-key".to_string();
-        }
         return 200;
     }
 
+    // 3. Cuentas Google Antigravity (y mocks de prueba) que consultan QUOTA_URL de Google
     if !Path::new(&acc.auth_file).exists() {
         return 0;
     }
@@ -1252,8 +1463,23 @@ pub fn evaluate_account_for_model(
         let rem = acc.rem_5h;
         let is_critical = !acc.has_error && rem <= 8;
         let is_warning = !acc.has_error && (rem > 8 && rem <= 20);
-        let family = resolve_model_family(active_model)
-            .unwrap_or(if is_codex_account(acc) { "GPT" } else { "Claude" });
+        let family = resolve_model_family(active_model).unwrap_or("Claude");
+        return EffectiveAccountHealth {
+            rem_5h: rem,
+            reset_5h: acc.reset_5h.clone(),
+            rem_wk: acc.rem_wk,
+            reset_wk: acc.reset_wk.clone(),
+            is_critical,
+            is_warning,
+            family,
+        };
+    }
+
+    if is_codex_account(acc) {
+        let rem = acc.rem_5h;
+        let is_critical = !acc.has_error && rem <= 8;
+        let is_warning = !acc.has_error && (rem > 8 && rem <= 20);
+        let family = resolve_model_family(active_model).unwrap_or("GPT");
         return EffectiveAccountHealth {
             rem_5h: rem,
             reset_5h: acc.reset_5h.clone(),

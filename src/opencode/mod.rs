@@ -127,32 +127,33 @@ pub fn read_opencode_session(
     }
 
     // 2. Determinar el pane / sesión prioritaria para este espacio
-    let is_target_pane = |p: &HerdrPane| -> bool {
-        p.agent_session_id.is_some()
-            || p.agent.as_deref() == Some("opencode")
-            || p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
+    let is_same_cwd = |p: &HerdrPane| -> bool {
+        p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
     };
 
     let sibling_pane = my_tab_id.and_then(|tid| {
         herdr_panes.iter().find(|p| {
             p.tab_id.as_deref() == Some(tid)
                 && my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true)
-                && is_target_pane(p)
+                && (p.agent_session_id.is_some() || p.agent.as_deref() == Some("opencode") || is_same_cwd(p))
         })
     });
-    let focused_pane = herdr_panes.iter().find(|p| p.focused && is_target_pane(p));
-    let working_pane = herdr_panes
-        .iter()
-        .find(|p| p.agent_status.as_deref() == Some("working") && is_target_pane(p));
-    let current_cwd_pane = herdr_panes.iter().find(|p| {
-        p.cwd.as_deref().map(crate::paths::normalize_path).as_ref() == Some(&norm_target)
-            && is_target_pane(p)
-    });
+
+    // Prioridad para este espacio: panes que pertenezcan exactamente a este cwd (norm_target)
+    let cwd_focused = herdr_panes.iter().find(|p| is_same_cwd(p) && p.focused);
+    let cwd_working = herdr_panes.iter().find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working"));
+    let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p));
+
+    // Fallback global sólo si ningún pane está en este directorio
+    let global_focused = herdr_panes.iter().find(|p| p.focused);
+    let global_working = herdr_panes.iter().find(|p| p.agent_status.as_deref() == Some("working"));
 
     let primary_pane = sibling_pane
-        .or(focused_pane)
-        .or(working_pane)
-        .or(current_cwd_pane);
+        .or(cwd_focused)
+        .or(cwd_working)
+        .or(cwd_any)
+        .or(global_focused)
+        .or(global_working);
 
     let mut target_session_id: Option<String> = None;
     let mut target_time_updated: Option<i64> = None;

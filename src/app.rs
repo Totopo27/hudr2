@@ -123,13 +123,14 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
 
         // Sincronizar telemetría de costos y balance para cuentas API Key
         let session_cost = state.snapshot.agent_session.cost;
-        let local_pfx = state.snapshot.agent_session.local_prefix.clone();
         for acc in &mut accounts_copy {
             if quotas::is_api_key(acc) {
-                let is_current = local_pfx
-                    .as_deref()
-                    .map(|lp| lp.eq_ignore_ascii_case(&acc.prefix))
-                    .unwrap_or(false);
+                let is_current = quotas::is_api_account_active(
+                    acc,
+                    &state.snapshot.agent_session,
+                    &state.snapshot.orchestrators,
+                    &state.snapshot.panes,
+                );
                 let cost_to_apply = if is_current { session_cost } else { 0.0 };
                 let (budget, rem_balance, rem_pct, cost_since_set) =
                     quotas::calculate_api_key_balance(

@@ -1,6 +1,6 @@
 # HUDR2 Card Catalog
 
-`hudr2` renders 12 collapsible cards (toggled via keys `1..9`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
+`hudr2` renders 13 collapsible cards (toggled via keys `1..9`, `$`, `e`, `0`/`t`, `c` for all, or clicking the card's top border) plus a top banner and a 2-line shortcut footer (`0-9: cards · e: stack · c: todo · d: lib` and `s: sync · r: act · a: auditar · [x: migrar ·] q: salir`).
 
 | Index | Key | `CardBounds.id` | Title in `src/ui.rs` | Default State |
 | :---: | :---: | :--- | :--- | :--- |
@@ -10,12 +10,13 @@
 | `3` | `4` | `integraciones` | `Integraciones` | Expanded |
 | `4` | `5` | `orquestadores` | `Orquestadores` | Expanded |
 | `5` | `6` | `pools` | `Cuota de Modelos` | Expanded |
-| `6` | `7` | `git` | `Cambios` | Expanded |
-| `7` | `8` | `engram` | `Engram` | Expanded |
-| `8` | `9` | `tools` | `Herramientas` | Expanded |
-| `9` | `9` | `mcp` | `MCP` | Expanded |
-| `10` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
-| `11` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
+| `6` | `$` | `saldos` | `Saldos API` | Expanded (Auto) |
+| `7` | `7` | `git` | `Cambios` | Expanded |
+| `8` | `8` | `engram` | `Engram` | Expanded |
+| `9` | `9` | `tools` | `Herramientas` | Expanded |
+| `10` | `p` | `mcp` | `MCP` | Expanded |
+| `11` | `e` | `ecosystem` | `Stack · Ecosistema` | Expanded |
+| `12` | `0` / `t` | `personalizar` | `Personalizar` | **Collapsed** |
 
 ---
 
@@ -88,7 +89,22 @@
   - Interactive balance editing: Allows in-place balance editing for active API key accounts (`[editar saldo]` / key `b`).
   - Legacy fallback: When no orchestrator profiles are discovered (e.g. tests or isolated environments), gracefully falls back to single-account pool breakdown.
 
-## 6. `Cambios` (`id: "git"`, index `6`)
+## 6. `Saldos API` (`id: "saldos"`, index `6`, key `$`)
+- **Header:** `Saldos API · <N> perfiles` (only renders when API key accounts exist in `snap.accounts` and the card is not hidden).
+- **Accounts listing:** Displays each discovered API key account (`tavoclaude`, `gianniclaude`, `clasclaude`, etc.).
+- **Interactive Balance & Budget:**
+  - When budget is set: renders inline health gauge (`MINT` `> 20%`, `AMBER` `<= 20%`, `CORAL` `<= 8%`), remaining percentage, remaining dollars (`$XX.XX disp`), and clickable `[editar]` button (`action_type: Some("edit_balance")`).
+  - When no budget is set: renders `○ <prefix> [definir saldo]`.
+  - When editing: renders in-place terminal input buffer `> <prefix> Saldo $: [ XX.XX ]_ [Enter|Esc]`. Typing numbers/dots updates the buffer; pressing `Enter` saves atomically to `hudr2.json` under `account_budgets.<prefix>` with session baseline tracking; `Esc` cancels.
+- **Dynamic Task & Quota Projection:**
+  - Evaluates whether the account is currently being used by the active session, orchestrator (`is_api_account_active`), or subagent.
+  - When in use or when consumption has occurred: displays row `  sesión: $<cost_since_set> · $<avg_cost>/req · ~<reqs_remaining> reqs disp`.
+  - Dynamically recalculates and projects remaining requests in real time as turns and tasks complete.
+- **Official Billing Web Console:**
+  - Renders row `  ↳ <Provider> Console [visitar ->]` (`action_type: Some("open_billing_url")`).
+  - Clicking `[visitar ->]` opens the provider's official billing management page in the default system browser (Anthropic Spending Console, OpenAI Organization Overview, ChatGPT Subscription, DeepSeek Platform, etc.).
+
+## 7. `Cambios` (`id: "git"`, index `7`, key `7`)
 - **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).
 - **Rows:**
   - Optional conflict radar alert (`! CONFLICTO: <files>` + `[colisión]` in `CORAL`) when two or more active sessions/worktrees modify the same tracked file concurrently.
@@ -98,20 +114,20 @@
   - Up to 6 clickable file rows (`action_type: Some("git_file_diff")`): `> [M|A|D|?] <path>` with `+<added> -<deleted>`.
   - Clicking a file toggles an inline diff preview underneath (guarded by `is_sensitive_file`) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) that opens the centered floating **Quick Peek** modal (`Space` / `p` to toggle, `↑`/`↓` or wheel to scroll, `Esc` or click header to close).
 
-## 7. `Engram` (`id: "engram"`, index `7`)
+## 8. `Engram` (`id: "engram"`, index `8`, key `8`)
 - **Header:** `Engram: <project> ^` (`^` green if daemon `:7437` is online, `v` dim if offline).
 - **Rows:**
   - `Local (engram.db)` + `● En linea · <N> obs` (or `Desconectado`).
   - `Cloud: <sync_status>`.
   - Optional `Handoff #<id> (<updated_at>)` block showing extracted lines from the latest `session_summary` observation.
 
-## 8. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `8` & `9`)
-- `Herramientas` is index `8` (key `9`).
-- `MCP` is index `9` (key `9`).
+## 9. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `9` & `10`)
+- `Herramientas` is index `9` (key `9`).
+- `MCP` is index `10` (toggleable via mouse click).
 - **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
 - **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
 
-## 10. `Stack · Ecosistema` (`id: "ecosystem"`, index `10`, key `e`)
+## 11. `Stack · Ecosistema` (`id: "ecosystem"`, index `11`, key `e`)
 - **Header:** `Stack · Ecosistema` (or `Stack · Ecosistema ↑<N>` in `AMBER` when updates are available).
 - **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
   - Up-to-date: `● <name> <version>` (`MINT`).
@@ -120,10 +136,10 @@
   - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
 - **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 
-## 11. `Personalizar` (`id: "personalizar"`, index `11`, key `0` / `t`)
+## 12. `Personalizar` (`id: "personalizar"`, index `12`, key `0` / `t`)
 - **Header:** `Personalizar` (collapsed by default).
 - **Rows:**
-  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Orquestadores`, `Cuota de Modelos`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
+  - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Orquestadores`, `Cuota de Modelos`, `Saldos API`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
   - `[x] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`). Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
   - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
   - Redundant fixed row was eliminated to prevent vertical waste (`personalizar` can never hide itself).

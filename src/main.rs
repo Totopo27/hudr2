@@ -748,11 +748,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         KeyCode::Char('4') => state.toggle_card(3), // Integraciones
                                         KeyCode::Char('5') => state.toggle_card(4), // Orquestadores
                                         KeyCode::Char('6') => state.toggle_card(5), // Cuotas de Modelos
-                                        KeyCode::Char('7') => state.toggle_card(6), // Cambios
-                                        KeyCode::Char('8') => state.toggle_card(7), // Engram
-                                        KeyCode::Char('9') => state.toggle_card(8), // Herramientas
-                                        KeyCode::Char('e') => state.toggle_card(10), // Stack · Ecosistema
-                                        KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(11), // Personalizar
+                                        KeyCode::Char('$') => state.toggle_card(6), // Saldos API
+                                        KeyCode::Char('7') => state.toggle_card(7), // Cambios
+                                        KeyCode::Char('8') => state.toggle_card(8), // Engram
+                                        KeyCode::Char('9') => state.toggle_card(9), // Herramientas
+                                        KeyCode::Char('e') => state.toggle_card(11), // Stack · Ecosistema
+                                        KeyCode::Char('0') | KeyCode::Char('t') => state.toggle_card(12), // Personalizar
                                         KeyCode::Char('n') => {
                                             state.start_edit_sidebar_name();
                                         }

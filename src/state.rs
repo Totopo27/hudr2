@@ -4,13 +4,14 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub const CARD_KEYS: [&str; 12] = [
+pub const CARD_KEYS: [&str; 13] = [
     "estado",
     "contexto",
     "proyecto",
     "integraciones",
     "orquestadores",
     "pools",
+    "saldos",
     "git",
     "engram",
     "tools",
@@ -19,13 +20,13 @@ pub const CARD_KEYS: [&str; 12] = [
     "personalizar",
 ];
 
-pub const DEFAULT_COLLAPSED: [bool; 12] = [
-    false, false, true, false, false, false, false, false, false, false, false, true,
+pub const DEFAULT_COLLAPSED: [bool; 13] = [
+    false, false, true, false, false, false, false, false, false, false, false, false, true,
 ];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigData {
-    pub collapsed: [bool; 12],
+    pub collapsed: [bool; 13],
     pub hidden: HashSet<String>,
     pub theme: Option<String>,
     pub sidebar_name: Option<String>,
@@ -61,7 +62,7 @@ pub fn load_config(path: &Path) -> ConfigData {
 
     let mut collapsed = DEFAULT_COLLAPSED;
     if let Some(arr) = v.get("collapsed").and_then(Value::as_array) {
-        collapsed = [false; 12];
+        collapsed = [false; 13];
         for item in arr.iter().filter_map(Value::as_str) {
             let normalized = if item == "tarjetas" { "personalizar" } else { item };
             if let Some(idx) = CARD_KEYS.iter().position(|&k| k == normalized) {
@@ -128,7 +129,7 @@ pub fn load_config(path: &Path) -> ConfigData {
 /// Guarda de forma atómica (`<file>.<pid>.tmp` + `rename`) las tarjetas colapsadas, ocultas, tema, nombre, updates y modo de sonido.
 pub fn save_config(
     path: &Path,
-    collapsed: &[bool; 12],
+    collapsed: &[bool; 13],
     hidden: &HashSet<String>,
     theme: Option<&str>,
     sidebar_name: Option<&str>,
@@ -225,7 +226,7 @@ pub struct QuickPeekState {
 #[derive(Debug, Clone)]
 pub struct AppState {
     pub snapshot: TelemetrySnapshot,
-    pub collapsed_cards: [bool; 12],
+    pub collapsed_cards: [bool; 13],
     pub hidden_cards: HashSet<String>,
     pub scroll_offset: usize,
     pub card_bounds: Vec<CardBounds>,
@@ -604,6 +605,22 @@ impl AppState {
             false
         } else {
             self.hidden_cards.contains(card_key)
+        }
+    }
+
+    pub fn is_card_collapsed(&self, card_key: &str) -> bool {
+        CARD_KEYS
+            .iter()
+            .position(|&k| k == card_key)
+            .map(|idx| self.collapsed_cards[idx])
+            .unwrap_or(false)
+    }
+
+    pub fn set_card_collapsed(&mut self, card_key: &str, collapsed: bool) {
+        if let Some(idx) = CARD_KEYS.iter().position(|&k| k == card_key) {
+            self.collapsed_cards[idx] = collapsed;
+            self.needs_redraw = true;
+            self.persist_config_if_configured();
         }
     }
 
