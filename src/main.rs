@@ -33,7 +33,7 @@ Opciones:
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
   --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
-  --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 13 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
+  --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 14 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
   --name, --title    Nombre personalizado del sidebar (por defecto: HUDR2)
   -v, --version      Muestra la versión de hudr2
   -h, --help         Muestra esta ayuda";
@@ -517,7 +517,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = out.flush();
         }
 
-        // 2. Esperar el próximo evento sin consumir CPU (0% en reposo)
+        // 2. Esperar el próximo evento sin sondeo activo; el timer de respaldo despierta periódicamente.
         let flash_wait = {
             let st = app_state.read().await;
             st.flash_notice_until

@@ -179,6 +179,42 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_config_larger_than_one_mib_is_ignored() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opencode_json = dir.path().join("opencode.json");
+        let mut config = String::from(
+            r#"{"mcp":{"oversized":{"type":"local","enabled":true}}}"#,
+        );
+        config.push_str(&" ".repeat(1024 * 1024));
+        std::fs::write(opencode_json, config).unwrap();
+        let pi_dir = dir.path().join("pi-agent");
+        std::fs::create_dir(&pi_dir).unwrap();
+        std::fs::write(
+            pi_dir.join("mcp.json"),
+            r#"{"mcpServers":{"fallback":{"type":"remote","enabled":true}}}"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("PI_AGENT_DIR", &pi_dir);
+        }
+
+        let mcps = read_mcp_servers(dir.path().to_str().unwrap());
+        unsafe {
+            std::env::remove_var("PI_AGENT_DIR");
+        }
+
+        assert!(
+            mcps.iter().all(|m| m.name != "oversized"),
+            "Las configuraciones MCP mayores de 1 MiB deben ignorarse"
+        );
+        assert!(
+            mcps.iter().any(|m| m.name == "fallback"),
+            "Ignorar un archivo sobredimensionado no debe impedir procesar los demás candidatos"
+        );
+    }
+
+    #[test]
     fn test_flash_notice_placement_in_integraciones_not_in_header() {
         let state = AppState::new();
         let flash_text = "+ Cuotas actualizadas";
@@ -1427,6 +1463,32 @@ mod tests {
                 seen_file = true;
             }
         }
+    }
+
+    #[test]
+    fn test_read_project_tree_keeps_globally_best_entries_at_capacity() {
+        use hudr2::tree::read_project_tree;
+
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["z-dir", "a-dir", "m-dir"] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        for index in (0..2005).rev() {
+            std::fs::write(tmp.path().join(format!("file-{index:04}.txt")), b"").unwrap();
+        }
+
+        let tree_data = read_project_tree(tmp.path().to_str().unwrap());
+        let names: Vec<_> = tree_data
+            .tree
+            .iter()
+            .map(|node| node.name.as_str())
+            .collect();
+
+        assert_eq!(names.len(), 2000);
+        assert_eq!(&names[..3], ["a-dir", "m-dir", "z-dir"]);
+        assert_eq!(names[3], "file-0000.txt");
+        assert_eq!(names[1999], "file-1996.txt");
+        assert!(!names.contains(&"file-1997.txt"));
     }
 
     #[test]
@@ -4285,6 +4347,10 @@ mod tests {
         assert!(
             stdout_help.contains("-v, --version"),
             "hudr2 --help debe listar -v, --version"
+        );
+        assert!(
+            stdout_help.contains("14 de Herdr"),
+            "hudr2 --help debe reflejar los 14 temas adoptados de Herdr"
         );
     }
 

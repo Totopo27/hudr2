@@ -1,5 +1,8 @@
 use crate::models::{McpServer, ProjectTreeData, TreeNode};
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
 use std::fs;
+use std::io::Read;
 use std::path::Path;
 
 const TREE_SKIP_NAMES: [&str; 9] = [
@@ -15,6 +18,7 @@ const TREE_SKIP_NAMES: [&str; 9] = [
 ];
 
 const TREE_MAX_ENTRIES: usize = 2000;
+const MCP_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
 fn is_real_dir(entry: &fs::DirEntry) -> bool {
     entry
@@ -23,16 +27,94 @@ fn is_real_dir(entry: &fs::DirEntry) -> bool {
         .unwrap_or(false)
 }
 
-fn sort_dir_entries(entries: &mut [fs::DirEntry]) {
-    entries.sort_by(|a, b| match (is_real_dir(a), is_real_dir(b)) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a
-            .file_name()
-            .to_string_lossy()
-            .to_lowercase()
-            .cmp(&b.file_name().to_string_lossy().to_lowercase()),
-    });
+struct RankedDirEntry {
+    entry: fs::DirEntry,
+    is_dir: bool,
+    name: String,
+    sort_name: String,
+    encounter_index: usize,
+}
+
+impl RankedDirEntry {
+    fn new(entry: fs::DirEntry, encounter_index: usize) -> Option<Self> {
+        let name = entry.file_name().to_str()?.to_string();
+        if name.starts_with('.') || TREE_SKIP_NAMES.contains(&name.as_str()) {
+            return None;
+        }
+        Some(Self {
+            is_dir: is_real_dir(&entry),
+            sort_name: name.to_lowercase(),
+            name,
+            entry,
+            encounter_index,
+        })
+    }
+}
+
+impl PartialEq for RankedDirEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_dir == other.is_dir
+            && self.sort_name == other.sort_name
+            && self.encounter_index == other.encounter_index
+    }
+}
+
+impl Eq for RankedDirEntry {}
+
+impl PartialOrd for RankedDirEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for RankedDirEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.is_dir, other.is_dir) {
+            (true, false) => Ordering::Less,
+            (false, true) => Ordering::Greater,
+            _ => self
+                .sort_name
+                .cmp(&other.sort_name)
+                .then_with(|| self.encounter_index.cmp(&other.encounter_index)),
+        }
+    }
+}
+
+fn select_best_entries(path: &Path, limit: usize) -> Vec<RankedDirEntry> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut best = BinaryHeap::with_capacity(limit);
+    for entry in entries
+        .flatten()
+        .enumerate()
+        .filter_map(|(index, entry)| RankedDirEntry::new(entry, index))
+    {
+        if best.len() < limit {
+            best.push(entry);
+        } else if best.peek().is_some_and(|worst| entry < *worst) {
+            best.pop();
+            best.push(entry);
+        }
+    }
+
+    best.into_sorted_vec()
+}
+
+fn read_mcp_config(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MCP_CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MCP_CONFIG_MAX_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
@@ -43,56 +125,31 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
 
     let mut budget = TREE_MAX_ENTRIES;
     let p = Path::new(target_dir);
-    if let Ok(entries) = fs::read_dir(p) {
-        let mut list: Vec<_> = entries
-            .flatten()
-            .filter(|e| {
-                if let Some(name) = e.file_name().to_str() {
-                    !name.starts_with('.') && !TREE_SKIP_NAMES.contains(&name)
-                } else {
-                    false
-                }
-            })
-            .collect();
-
-        // Carpetas primero, luego archivos, ambos ordenados alfabéticamente (case-insensitive)
-        sort_dir_entries(&mut list);
-
-        for entry in list {
+    if p.is_dir() {
+        for entry in select_best_entries(p, budget) {
             if budget == 0 {
                 break;
             }
             budget -= 1;
 
-            let is_dir = is_real_dir(&entry);
-            let name = entry.file_name().to_string_lossy().to_string();
+            let is_dir = entry.is_dir;
+            let name = entry.name;
 
             if is_dir {
                 data.total_dirs += 1;
                 let mut children = Vec::new();
-                if let Ok(sub) = fs::read_dir(entry.path()) {
-                    let mut sub_entries: Vec<_> = sub.flatten().collect();
-                    sort_dir_entries(&mut sub_entries);
-                    for s in sub_entries {
-                        if budget == 0 {
-                            break;
-                        }
-                        let s_name = s.file_name().to_string_lossy().to_string();
-                        if !s_name.starts_with('.') && !TREE_SKIP_NAMES.contains(&s_name.as_str()) {
-                            budget -= 1;
-                            let s_is_dir = is_real_dir(&s);
-                            if s_is_dir {
-                                data.total_dirs += 1;
-                            } else {
-                                data.total_files += 1;
-                            }
-                            children.push(TreeNode {
-                                name: s_name,
-                                is_dir: s_is_dir,
-                                children: Vec::new(),
-                            });
-                        }
+                for child in select_best_entries(&entry.entry.path(), budget) {
+                    budget -= 1;
+                    if child.is_dir {
+                        data.total_dirs += 1;
+                    } else {
+                        data.total_files += 1;
                     }
+                    children.push(TreeNode {
+                        name: child.name,
+                        is_dir: child.is_dir,
+                        children: Vec::new(),
+                    });
                 }
                 data.tree.push(TreeNode {
                     name,
@@ -148,7 +205,7 @@ pub fn read_mcp_servers(target_dir: &str) -> Vec<McpServer> {
 
     for c in candidates {
         if c.exists()
-            && let Ok(content) = fs::read_to_string(&c)
+            && let Some(content) = read_mcp_config(&c)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
             if let Some(mcp) = val.get("mcp").and_then(|m| m.as_object()) {

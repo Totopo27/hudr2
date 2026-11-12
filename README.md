@@ -4,7 +4,7 @@
 [![Rust: 2024 Edition](https://img.shields.io/badge/Rust-2024_Edition-E65100.svg?logo=rust&logoColor=white)](Cargo.toml)
 [![Platform: Windows | Linux](https://img.shields.io/badge/Platform-Windows_%7C_Linux-6A1B9A.svg)]()
 [![Target: OpenCode | Gentle Shell](https://img.shields.io/badge/Target-OpenCode_%7C_Gentle_Shell-2E7D32.svg)]()
-[![Telemetry: 0% Idle CPU](https://img.shields.io/badge/Telemetry-0%25_Idle_CPU-00897B.svg)]()
+[![Telemetry: Event Driven](https://img.shields.io/badge/Telemetry-Event_Driven-00897B.svg)]()
 
 Sidebar de telemetría reactiva en Rust para agentes de código en terminal. Diseñado como panel complementario para **OpenCode**, **Pi / Gentle Shell** y el multiplexor de terminal **Herdr**.
 
@@ -19,7 +19,7 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 3. **Colisiones entre agentes simultáneos**: Con varios panes o agentes editando el mismo repositorio, es fácil que uno sobreescriba cambios de otro sin que te enteres hasta ejecutar `git status` manualmente.
 4. **Barras de estado que devoran CPU**: Monitores tradicionales en Bash o scripts continuos saturan el procesador lanzando subprocesos en bucle cada segundo.
 
-**HUDR2** resuelve esto acoplándose en un split lateral de 48 columnas. Lee directamente los registros de memoria de OpenCode (`opencode.db`), las trazas de streaming de Pi (`.jsonl`), la base de conocimiento de Engram (`engram.db`) y el estado del repositorio local, consumiendo **0% de CPU en reposo**.
+**HUDR2** resuelve esto acoplándose en un split lateral de 48 columnas. Lee directamente los registros de memoria de OpenCode (`opencode.db`), las trazas de streaming de Pi (`.jsonl`), la base de conocimiento de Engram (`engram.db`) y el estado del repositorio local mediante un bucle reactivo que permanece bloqueado entre eventos y usa despertares periódicos de respaldo.
 
 ---
 
@@ -58,7 +58,9 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 | **Contexto** | `opencode.db` / Pi Tail | Tokens consumidos vs. tamaño de ventana del modelo, porcentaje restante, tokens I/O y costo acumulado. |
 | **Proyecto** | Filesystem | Conteo de directorios y archivos con explorador de árbol desplegable (`o` para abrir en explorador). |
 | **Integraciones** | Cliproxy tokens | Porcentaje restante por pool de cuentas, temporizador de reset (`en 4h 59m`) y semáforo dinámico. |
+| **Orquestadores** | Perfiles / sesiones | Estado de orquestadores y subagentes, modelo activo y alertas críticas. |
 | **Cuota de Modelos** | Cliproxy API | Estado de cuota por familia (Gemini, Claude, GPT, DeepSeek) con métricas de 5h y semanales. |
+| **Saldos API** | `hudr2.json` / sesión | Presupuesto, saldo restante y costo atribuido de cuentas API key. |
 | **Cambios (Git)** | `.git/HEAD` directo | Líneas agregadas/borradas (`+`/`-`), archivos en staging/worktree y previsualización de diff inline segura. |
 | **Engram** | `engram.db` (SQLite) | Observaciones acumuladas, estado del daemon (`7437`) y último handoff de sesión estructurado. |
 | **Stack · Ecosistema**| CLI probes | Versiones instaladas de `pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram` y `herdr`. |
@@ -85,8 +87,11 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 
 | Tecla / Acción | Efecto |
 |---|---|
-| `1` – `9` | Plegar o desplegar tarjetas individuales (1: Estado, 2: Contexto, 3: Proyecto, 4: Integraciones, 5: Cuotas, 6: Git, 7: Engram, 8: Herramientas, 9: MCP). |
-| `0` o `t` | Plegar o desplegar la tarjeta **Personalizar** (panel de ajustes). |
+| `v` | Alternar entre navegación por pestañas y vista vertical en cascada. |
+| `Tab` / `Shift+Tab` | Recorrer pestañas en la vista por pestañas. |
+| `1` – `5` | En vista por pestañas: abrir Sesión, Código, Modelos, Stack o Ajustes. En vista vertical: plegar Estado, Contexto, Proyecto, Integraciones u Orquestadores. |
+| `6` – `9`, `$`, `e` | En vista vertical: plegar Cuota de Modelos, Cambios, Engram, Herramientas, Saldos API o Stack, respectivamente. |
+| `0`, `t`, `,` o `g` | Abrir Ajustes en la vista por pestañas o plegar **Personalizar** en la vista vertical. |
 | `n` o `[editar >]` | **Editar nombre**: Modifica en línea el título del sidebar (guardar con `Enter`, cancelar con `Esc`). |
 | `m` o `[cambiar >]` | **Ciclar tema visual**: Alterna entre Auto (Herdr), 5 temas nativos y 14 de Herdr. |
 | `c` | Colapsar o abrir todas las tarjetas a la vez. |
@@ -94,7 +99,11 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 | `s` | **Sincronización**: Regenera modelos y templates de Cliproxy en `opencode.json`. |
 | `d` | **Liberar**: Cierra sesiones inactivas y limpia retenciones de cuentas en SQLite. |
 | `r` | Forzar refresco inmediato de telemetría y cuotas de red. |
+| `a` | Auditar todas las cuentas, incluidas las inactivas. |
+| `u` | Activar o desactivar la comprobación online de actualizaciones cada 3 horas. |
+| `b` | Editar el presupuesto de la cuenta API key activa. |
 | `o` | Abrir la carpeta del proyecto en el explorador de archivos del sistema. |
+| `Espacio` o `p` | Abrir o cerrar Quick Peek. |
 | `Doble clic en Personalizar` | Abre directamente el editor de nombre personalizado. |
 | `Clic en archivo Git` | Despliega u oculta el diff inline (bloqueando automáticamente claves `.env`, pem y secretos). |
 | `k` / `j` o `↑` / `↓` | Desplazar la vista verticalmente. |
@@ -105,15 +114,18 @@ Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 i
 ## Opciones de ejecución
 
 ```bash
-hudr2 [--once] [--theme <name>] [--name <title>] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
+hudr2 [--once] [--attach] [--theme <name>] [--name <title>] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
 ```
 
 - `--once`: Imprime un snapshot único de las tarjetas activas directamente en stdout y termina de inmediato.
+- `--attach`: Abre un split lateral derecho en Herdr y ejecuta HUDR2 dentro de él.
 - `--theme <name>`: Selecciona el tema visual (`auto`, `linear`, `cyber`, `dracula`, etc.).
 - `--name <title>`: Asigna un nombre personalizado al encabezado del sidebar.
 - `--pane <id>`: Vincula el ciclo de vida del HUD a un pane específico de Herdr.
 - `--cwd <dir>`: Ruta del proyecto que se desea monitorear (por defecto toma el directorio actual).
 - `--config <file>`: Archivo de configuración alternativo para persistencia de ajustes.
+- `-v`, `--version`: Muestra la versión instalada.
+- `-h`, `--help`: Muestra la ayuda de uso.
 
 ---
 
@@ -149,7 +161,7 @@ attach-hudr2.cmd
 
 ## Rendimiento y arquitectura interna
 
-- **0% CPU en reposo**: HUDR2 implementa un bucle de eventos reactivo. Solo redibuja la pantalla si la instantánea de datos ha variado con respecto al ciclo anterior (`PartialEq` sobre `TelemetrySnapshot`).
+- **Bucle reactivo sin sondeo activo**: HUDR2 permanece bloqueado esperando eventos y solo redibuja si la instantánea de datos cambia (`PartialEq` sobre `TelemetrySnapshot`). Un timer de fiabilidad despierta el proceso cada 4 s mientras el agente trabaja o cada 60 s en reposo cuando existe IPC de Herdr; sin IPC, usa intervalos de 2 s y 5 s respectivamente.
 - **Git libre de bloqueos**: Ejecuta consultas de Git con `GIT_OPTIONAL_LOCKS=0` y lee `.git/HEAD`, ramas y `packed-refs` directamente del disco sin lanzar subprocesos innecesarios.
 - **Captura de ratón button-only**: No inunda la terminal con eventos de movimiento de ratón (`REPORT_MOUSE_POSITION`); solo procesa clics explícitos bajo el estándar SGR.
 - **Caché por `mtime`**: La telemetría de OpenCode, Pi y Git solo lee archivos si su fecha de modificación en disco ha cambiado, evitando lecturas redundantes de I/O.
