@@ -4000,10 +4000,14 @@ mod tests {
                     time_created INTEGER,
                     data TEXT
                 );
-                INSERT INTO session (id, directory, title, time_updated, time_archived)
-                    VALUES ('ses_resurrected', 'D:/proj', 'Resucitada', 5000, 1000);
                 INSERT INTO message (id, session_id, time_created, data)
                     VALUES ('m1', 'ses_resurrected', 5000, '{\"agent\":\"sdd-orchestrator-cuenta4\",\"providerID\":\"cpamc\",\"modelID\":\"cuenta4/gemini-3.8-flash-high\"}');",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session (id, directory, title, time_updated, time_archived)
+                    VALUES ('ses_resurrected', ?1, 'Resucitada', 5000, 1000)",
+                [&proj_dir_str],
             )
             .unwrap();
         }
@@ -5360,6 +5364,85 @@ api-keys:
             std::env::remove_var("OPENCODE_DB_PATH");
             std::env::remove_var("ENGRAM_BIN");
         }
+    }
+
+    #[test]
+    fn test_release_inactive_sessions_never_archives_unowned_or_foreign_orphans() {
+        use hudr2::models::AccountQuota;
+        use rusqlite::Connection;
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let oc_db = temp_dir.path().join("opencode.db");
+        {
+            let conn = Connection::open(&oc_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT,
+                    title TEXT,
+                    time_updated INTEGER,
+                    time_archived INTEGER
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                );
+                INSERT INTO session (id, directory, title, time_updated, time_archived) VALUES
+                    ('ses_own', 'D:/temp/my_proj', 'Own', 5000, NULL),
+                    ('ses_null_dir', NULL, 'No dir', 5000, NULL),
+                    ('ses_empty_dir', '   ', 'Empty dir', 5000, NULL),
+                    ('ses_mock_dir', 'D:/proj', 'Old mock dir', 5000, NULL),
+                    ('ses_other', 'D:/temp/other_proj', 'Other', 5000, NULL);",
+            )
+            .unwrap();
+        }
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", &oc_db);
+            std::env::set_var("ENGRAM_BIN", "off");
+        }
+
+        let accounts = vec![AccountQuota {
+            prefix: "cuenta1".to_string(),
+            rem_5h: 90,
+            rem_wk: 90,
+            ..Default::default()
+        }];
+
+        // A cwd ending in "proj" used to trigger a test-only bypass in production code.
+        let rel = hudr2::cleanup::release_inactive_sessions(
+            "D:/temp/my_proj",
+            &accounts,
+            Some("none_pane"),
+            Some("none_tab"),
+        );
+
+        let archived: Vec<String> = {
+            let conn = Connection::open(&oc_db).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT id FROM session WHERE time_archived IS NOT NULL ORDER BY id")
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .flatten()
+                .collect()
+        };
+
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+            std::env::remove_var("ENGRAM_BIN");
+        }
+
+        assert_eq!(
+            archived,
+            vec!["ses_own".to_string()],
+            "Only sessions owned by the current workspace may be archived"
+        );
+        assert_eq!(rel.closed_count, 1);
     }
 
     #[test]

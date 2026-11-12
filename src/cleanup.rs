@@ -857,16 +857,14 @@ pub fn release_inactive_sessions(
                 if keep_session_id.as_deref() == Some(&orphan_id) {
                     continue;
                 }
-                // Si la sesión pertenece a otro proyecto conocido en disco, no archivarla desde este HUD
-                if let Some(ref d) = raw_dir_opt
-                    && !d.trim().is_empty()
-                    && crate::paths::normalize_path(d) != norm_cwd
-                {
-                    let is_test_proj_mock = std::env::var("OPENCODE_DB_PATH").is_ok()
-                        && (d == "D:/proj" || norm_cwd.ends_with("proj"));
-                    if !is_test_proj_mock {
-                        continue;
-                    }
+                // Only archive sessions provably owned by this workspace: a missing, empty or
+                // foreign directory may belong to another project and must never be archived here.
+                let owned_by_cwd = raw_dir_opt
+                    .as_deref()
+                    .map(str::trim)
+                    .is_some_and(|d| !d.is_empty() && crate::paths::normalize_path(d) == norm_cwd);
+                if !owned_by_cwd {
+                    continue;
                 }
                 let is_live_working = panes.iter().any(|p| {
                     p.agent_session_id.as_deref() == Some(&orphan_id)
