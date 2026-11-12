@@ -659,7 +659,7 @@ pub fn resolve_adaptive_theme() -> &'static Theme {
 
     cache.last_mtime = current_mtime;
 
-    if let Ok(content) = std::fs::read_to_string(&path)
+    if let Ok(content) = crate::paths::read_config_string(&path)
         && let Some(herdr_name) = parse_herdr_theme_name(&content)
     {
         let adopted = adopt_herdr_theme(&herdr_name);

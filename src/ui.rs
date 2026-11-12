@@ -61,6 +61,48 @@ fn ansi_escape_len(s: &str) -> usize {
     }
 }
 
+/// Returns true when `seq` (a complete escape from `ansi_escape_len`) is an SGR style
+/// sequence: `ESC [ <digits ; :> m`.
+fn is_sgr_sequence(seq: &str) -> bool {
+    let b = seq.as_bytes();
+    b.len() >= 3
+        && b[1] == b'['
+        && b[b.len() - 1] == b'm'
+        && b[2..b.len() - 1]
+            .iter()
+            .all(|c| c.is_ascii_digit() || *c == b';' || *c == b':')
+}
+
+/// Makes a rendered line safe to write to the terminal: keeps SGR styling and printable text,
+/// drops every other escape sequence (OSC, cursor movement, clears, resets) and every C0/C1
+/// control character, which may come from untrusted sources (branch names, file names, session
+/// titles, diffs). Tabs become a space. Lines without controls are returned borrowed.
+pub fn sanitize_terminal_line(s: &str) -> std::borrow::Cow<'_, str> {
+    let is_unsafe = |c: char| c != '\x1b' && (c.is_control());
+    if !s.contains('\x1b') && !s.chars().any(is_unsafe) {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(c) = rest.chars().next() {
+        if c == '\x1b' {
+            let len = ansi_escape_len(rest);
+            if is_sgr_sequence(&rest[..len]) {
+                out.push_str(&rest[..len]);
+            }
+            rest = &rest[len..];
+            continue;
+        }
+        if c == '\t' {
+            out.push(' ');
+        } else if !c.is_control() {
+            out.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 pub fn strip_ansi(s: &str) -> String {
     // Ruta rápida: sin secuencias de escape no hay nada que limpiar
     if !s.contains('\x1b') {

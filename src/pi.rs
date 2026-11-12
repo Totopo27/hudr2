@@ -24,7 +24,14 @@ pub struct PiTail {
     pub modified_files: HashSet<String>,
     pub raw_model_id: String,
     pub raw_provider: String,
+    /// True while skipping the rest of a line longer than `PI_MAX_LINE_BYTES`.
+    pub discarding_line: bool,
 }
+
+/// Read size used when tailing a Pi `.jsonl` session file.
+const PI_TAIL_CHUNK_BYTES: usize = 256 * 1024;
+/// Longest `.jsonl` line kept in memory; longer lines are skipped entirely.
+pub const PI_MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 static PI_TAIL_CACHE: LazyLock<Mutex<HashMap<String, PiTail>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -112,6 +119,17 @@ impl PiTail {
             *self = Self::new();
         }
         self.offset += bytes.len() as u64;
+        let mut bytes = bytes;
+        if self.discarding_line {
+            // Still inside an oversized line: drop bytes up to and including its newline.
+            match bytes.iter().position(|&b| b == b'\n') {
+                Some(i) => {
+                    self.discarding_line = false;
+                    bytes = &bytes[i + 1..];
+                }
+                None => return,
+            }
+        }
         self.pending.extend_from_slice(bytes);
 
         let end = self
@@ -121,6 +139,10 @@ impl PiTail {
             .map(|i| i + 1)
             .unwrap_or(0);
         if end == 0 {
+            if self.pending.len() > PI_MAX_LINE_BYTES {
+                self.pending = Vec::new();
+                self.discarding_line = true;
+            }
             return;
         }
 
@@ -263,9 +285,21 @@ pub fn read_pi_session_file(
 
     if file_len > tail.offset {
         f.seek(SeekFrom::Start(tail.offset)).ok()?;
-        let mut bytes = Vec::with_capacity((file_len - tail.offset) as usize);
-        f.read_to_end(&mut bytes).ok()?;
-        tail.ingest(&bytes, false);
+        // Ingest the appended delta in bounded chunks so a huge append never forces one
+        // allocation of the whole delta; `ingest` keeps partial lines in `pending`.
+        let mut remaining = file_len - tail.offset;
+        let mut chunk = vec![0u8; PI_TAIL_CHUNK_BYTES.min(remaining as usize)];
+        while remaining > 0 {
+            let want = chunk.len().min(remaining as usize);
+            let n = match f.read(&mut chunk[..want]) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return None,
+            };
+            tail.ingest(&chunk[..n], false);
+            remaining -= n as u64;
+        }
     }
 
     let agent_dir = agent_dir_from_session_path(jsonl_path);
@@ -285,7 +319,7 @@ pub fn read_pi_session_file(
     // Fallback a settings.json si la sesión es recién creada y aún no tiene turno de asistente
     if tail.session.model.is_empty()
         && let Some(ref ad) = agent_dir
-        && let Ok(raw) = fs::read(ad.join("settings.json"))
+        && let Ok(raw) = crate::paths::read_config_bytes(ad.join("settings.json"))
         && let Ok(settings) = serde_json::from_slice::<Value>(&raw)
     {
         let def_model = json_str(&settings, "defaultModel");
@@ -309,7 +343,7 @@ pub fn read_pi_session_file(
         let mut found_limit = None;
         if let Some(ref ad) = agent_dir {
             for store_name in ["cpamc-models-cache.json", "models-store.json"] {
-                if let Ok(raw) = fs::read(ad.join(store_name))
+                if let Ok(raw) = crate::paths::read_config_bytes(ad.join(store_name))
                     && let Ok(v) = serde_json::from_slice::<Value>(&raw)
                     && let Some(cw) = find_context_window_in_json(&v, &tail.raw_model_id)
                         .or_else(|| find_context_window_in_json(&v, &tail.session.model_short))

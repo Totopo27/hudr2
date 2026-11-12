@@ -196,7 +196,7 @@ pub fn collect_ecosystem_telemetry() -> EcosystemTelemetry {
     let gai_fallback_ver = if gai_raw.is_none() {
         dirs::home_dir()
             .map(|h| h.join(".gentle-ai").join("state.json"))
-            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|p| crate::paths::read_config_string(p).ok())
             .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| {
                 v.get("installed_binary_version")
@@ -604,7 +604,7 @@ pub fn upstream_cache_path_for(config_path: Option<&std::path::Path>) -> std::pa
 }
 
 pub fn load_upstream_cache(path: &std::path::Path) -> Option<UpstreamCache> {
-    let bytes = std::fs::read(path).ok()?;
+    let bytes = crate::paths::read_config_bytes(path).ok()?;
     serde_json::from_slice(&bytes).ok()
 }
 

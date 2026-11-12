@@ -5367,6 +5367,78 @@ api-keys:
     }
 
     #[test]
+    fn test_read_capped_rejects_oversized_files_instead_of_truncating() {
+        let tmp = tempfile::tempdir().unwrap();
+        let small = tmp.path().join("small.json");
+        let big = tmp.path().join("big.json");
+        std::fs::write(&small, b"{\"a\":1}").unwrap();
+        std::fs::write(&big, vec![b' '; 65]).unwrap();
+
+        assert_eq!(hudr2::paths::read_capped(&small, 64).unwrap(), b"{\"a\":1}");
+        let err = hudr2::paths::read_capped(&big, 64).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(hudr2::paths::read_capped(tmp.path().join("missing"), 64).unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(hudr2::paths::read_config_string(&small).unwrap(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn test_pi_tail_skips_oversized_line_and_recovers_on_next_line() {
+        use hudr2::pi::{PI_MAX_LINE_BYTES, PiTail};
+
+        let mut tail = PiTail::new();
+        let junk = vec![b'x'; PI_MAX_LINE_BYTES / 2 + 1];
+        tail.ingest(&junk, false);
+        tail.ingest(&junk, false);
+        assert!(tail.pending.is_empty(), "An oversized partial line must not stay buffered");
+
+        let model_line = b"{\"type\":\"model_change\",\"provider\":\"cpamc\",\"modelId\":\"gpt-6.1-sol\"}\n";
+        let mut rest = junk.clone();
+        rest.extend_from_slice(b"tail-of-junk\n");
+        rest.extend_from_slice(model_line);
+        tail.ingest(&rest, false);
+
+        assert!(tail.pending.is_empty());
+        assert_eq!(tail.session.model_short, "gpt-6.1-sol");
+        assert_eq!(tail.offset, (junk.len() * 2 + rest.len()) as u64);
+    }
+
+    #[test]
+    fn test_terminal_output_keeps_sgr_and_strips_untrusted_control_sequences() {
+        let mut snap = TelemetrySnapshot::default();
+        // Hostile branch name: OSC title change, screen clear, terminal reset, CR, BS, C1 CSI.
+        snap.git.branch = "feat\x1b]0;pwned\x07\x1b[2J\x1bc\r\x08\u{9b}31m-x".to_string();
+        let collapsed = [false; 13];
+        let render = ui::render_screen(&snap, &collapsed, None, 48);
+        let frame: String = render
+            .lines
+            .iter()
+            .map(|l| ui::sanitize_terminal_line(l).into_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(frame.contains("feat31m-x"), "Visible text must survive sanitization");
+        assert!(frame.contains("\x1b[38;2;"), "SGR styling must be preserved");
+        assert!(!frame.contains("\x1b]") && !frame.contains("\x1b[2J") && !frame.contains("\x1bc"));
+        assert!(!frame.contains('\r') && !frame.contains('\x08') && !frame.contains('\u{9b}'));
+
+        // Every remaining escape must be an SGR sequence (ESC [ digits/;/: m).
+        let mut rest = frame.as_str();
+        while let Some(pos) = rest.find('\x1b') {
+            let seq = &rest[pos..];
+            let end = seq.find('m').expect("escape must terminate with 'm'");
+            assert!(
+                seq[1..2] == *"[" && seq[2..end].chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':'),
+                "Non-SGR escape leaked: {:?}",
+                &seq[..end.min(16)]
+            );
+            rest = &seq[end + 1..];
+        }
+
+        // Plain text has no allocation and no change.
+        assert!(matches!(ui::sanitize_terminal_line("plain"), std::borrow::Cow::Borrowed("plain")));
+    }
+
+    #[test]
     fn test_release_inactive_sessions_never_archives_unowned_or_foreign_orphans() {
         use hudr2::models::AccountQuota;
         use rusqlite::Connection;

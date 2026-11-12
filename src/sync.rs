@@ -1,6 +1,5 @@
 use serde_json::json;
 use std::collections::BTreeMap;
-use std::fs;
 
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
@@ -157,7 +156,7 @@ pub fn detect_proxy_provider_key(
 pub fn detect_configured_proxy_provider_for(target_dir: &str) -> String {
     for cfg_path in crate::paths::opencode_config_candidates(target_dir) {
         if cfg_path.exists()
-            && let Ok(content) = fs::read_to_string(&cfg_path)
+            && let Ok(content) = crate::paths::read_config_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
             for section in ["providers", "provider"] {
@@ -224,7 +223,7 @@ pub async fn sync_integrations_native_for(target_dir: &str) -> Result<SyncResult
 pub async fn sync_integrations_for_path(
     target_path: &std::path::Path,
 ) -> Result<SyncResult, String> {
-    let content = fs::read_to_string(target_path)
+    let content = crate::paths::read_config_string(target_path)
         .map_err(|e| format!("Error leyendo {}: {e}", target_path.display()))?;
 
     let mut raw_config: serde_json::Value = serde_json::from_str(&content)

@@ -12,6 +12,36 @@ fn push_windows_drive_candidates(candidates: &mut Vec<PathBuf>, suffixes: &[&str
     }
 }
 
+/// Size cap for local config, credential and cache files read by the sidebar.
+pub const CONFIG_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Reads at most `max` bytes; a larger file is rejected (never truncated) so callers
+/// cannot parse, or later rewrite, a partial document.
+pub fn read_capped(path: impl AsRef<Path>, max: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(max.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("file exceeds {max} bytes"),
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Bounded drop-in for `fs::read` on config/credential/cache files.
+pub fn read_config_bytes(path: impl AsRef<Path>) -> std::io::Result<Vec<u8>> {
+    read_capped(path, CONFIG_MAX_BYTES)
+}
+
+/// Bounded drop-in for `fs::read_to_string` on config/credential/cache files.
+pub fn read_config_string(path: impl AsRef<Path>) -> std::io::Result<String> {
+    String::from_utf8(read_config_bytes(path)?)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
 /// Normaliza un path para comparaciones case-insensitive y cross-platform
 pub fn normalize_path(p: &str) -> String {
     p.replace('\\', "/")
@@ -58,7 +88,7 @@ pub fn resolve_auths_dir_for(target_dir: &str) -> PathBuf {
     let candidates_cfg = opencode_config_candidates(target_dir);
     for cfg_path in candidates_cfg {
         if cfg_path.exists()
-            && let Ok(content) = std::fs::read_to_string(&cfg_path)
+            && let Ok(content) = read_config_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
             for section in ["providers", "provider"] {

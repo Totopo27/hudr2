@@ -1,6 +1,5 @@
 use crate::models::{AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus};
 use crate::paths::{gentle_ai_profiles_candidates, opencode_config_candidates};
-use std::fs;
 
 /// Descubre y evalúa los perfiles de orquestador configurados en Gentle AI (`profiles.json`)
 /// y OpenCode (`opencode.json`), determinando su estado operativo (`Working`, `Idle`, `Offline`)
@@ -17,7 +16,7 @@ pub fn discover_orchestrators(
 
     // 1. Descubrimiento desde profiles.json de Gentle AI
     for cfg_path in gentle_ai_profiles_candidates(target_dir) {
-        if let Ok(content) = fs::read_to_string(&cfg_path)
+        if let Ok(content) = crate::paths::read_config_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
             let default_name = val
@@ -120,7 +119,7 @@ pub fn discover_orchestrators(
 
     // 2. Descubrimiento desde opencode.json (agentes de tipo orquestador en "agent" y "agents")
     for cfg_path in opencode_config_candidates(target_dir) {
-        if let Ok(content) = fs::read_to_string(&cfg_path)
+        if let Ok(content) = crate::paths::read_config_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
             let mut agent_maps: Vec<&serde_json::Map<String, serde_json::Value>> = Vec::new();

@@ -104,7 +104,7 @@ fn sync_disk_cache_if_needed(state: &mut QuotaCacheState, cache_path: &Path) {
         state.entries.clear();
     }
 
-    if let Ok(bytes) = fs::read(cache_path)
+    if let Ok(bytes) = crate::paths::read_config_bytes(cache_path)
         && let Ok(val) = serde_json::from_slice::<serde_json::Value>(&bytes)
         && let Some(accs_obj) = val.get("accounts").and_then(|a| a.as_object())
     {
@@ -376,7 +376,7 @@ fn read_valid_credential_json(path: &Path) -> Option<(String, serde_json::Value)
     if !file_name.ends_with(".json") || file_name.starts_with('.') {
         return None;
     }
-    let content = fs::read_to_string(path).ok()?;
+    let content = crate::paths::read_config_string(path).ok()?;
     let val = serde_json::from_str::<serde_json::Value>(&content).ok()?;
     let has_creds = val.get("access_token").is_some()
         || val.get("email").is_some()
@@ -565,7 +565,7 @@ pub fn is_available_for(target_dir: &str) -> bool {
 
     // Comprobar candidatos config.yaml con api-keys
     for cfg in cliproxy_config_candidates_for(target_dir) {
-        if let Ok(c) = fs::read_to_string(&cfg)
+        if let Ok(c) = crate::paths::read_config_string(&cfg)
             && !parse_api_key_accounts_from_yaml(&c).is_empty()
         {
             return true;
@@ -577,7 +577,7 @@ pub fn is_available_for(target_dir: &str) -> bool {
         || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
         for cfg in opencode_config_candidates(target_dir) {
-            if let Ok(c) = fs::read_to_string(&cfg)
+            if let Ok(c) = crate::paths::read_config_string(&cfg)
                 && !parse_api_key_accounts_from_opencode_json(&c).is_empty()
             {
                 return true;
@@ -593,7 +593,7 @@ pub fn is_available_for(target_dir: &str) -> bool {
 pub fn get_user_configured_budget(prefix: &str) -> Option<f64> {
     let cfg_path = crate::paths::resolve_hudr2_config_path();
     if cfg_path.exists()
-        && let Ok(content) = fs::read_to_string(&cfg_path)
+        && let Ok(content) = crate::paths::read_config_string(&cfg_path)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
     {
         if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
@@ -834,7 +834,7 @@ pub fn calculate_api_key_balance(
 ) -> (Option<f64>, Option<f64>, u8, f64) {
     let cfg_path = crate::paths::resolve_hudr2_config_path();
     if cfg_path.exists()
-        && let Ok(content) = fs::read_to_string(&cfg_path)
+        && let Ok(content) = crate::paths::read_config_string(&cfg_path)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
     {
         if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
@@ -1174,7 +1174,7 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
 
     // 2. Descubrimiento de cuentas / perfiles por API Key (config.yaml de CLIProxy/CPAMC)
     for cfg_path in cliproxy_config_candidates_for(target_dir) {
-        if let Ok(content) = fs::read_to_string(&cfg_path) {
+        if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
             let api_accounts = parse_api_key_accounts_from_yaml(&content);
             for (prefix, provider) in api_accounts {
                 let p_low = prefix.to_lowercase();
@@ -1196,7 +1196,7 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
         || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
         for cfg_path in opencode_config_candidates(target_dir) {
-            if let Ok(content) = fs::read_to_string(&cfg_path) {
+            if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
                 let api_accounts = parse_api_key_accounts_from_opencode_json(&content);
                 for (prefix, provider) in api_accounts {
                     let p_low = prefix.to_lowercase();
@@ -1217,7 +1217,7 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
     // 4. Descubrimiento de perfiles de orquestador en profiles.json (Gentle AI / Pi)
     if !has_explicit_auths {
         for cfg_path in gentle_ai_profiles_candidates(target_dir) {
-            if let Ok(content) = fs::read_to_string(&cfg_path) {
+            if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
                 let api_accounts = parse_api_key_accounts_from_profiles_json(&content);
                 for (prefix, provider) in api_accounts {
                     let p_low = prefix.to_lowercase();
@@ -1289,7 +1289,7 @@ pub async fn fetch_quota_for_account_with_cache(
     if !is_antigravity_account(acc) && (!acc.pools.is_empty() && acc.reset_5h != UNFETCHED_RESET) {
         if Path::new(&acc.auth_file).exists()
             && !acc.auth_file.contains('#')
-            && let Ok(content) = fs::read_to_string(&acc.auth_file)
+            && let Ok(content) = crate::paths::read_config_string(&acc.auth_file)
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
         {
             if v.get("disabled").and_then(|d| d.as_bool()) == Some(true) {
@@ -1318,7 +1318,7 @@ pub async fn fetch_quota_for_account_with_cache(
         return 0;
     }
 
-    let raw = match fs::read_to_string(&acc.auth_file) {
+    let raw = match crate::paths::read_config_string(&acc.auth_file) {
         Ok(r) => r,
         Err(_) => return 0,
     };

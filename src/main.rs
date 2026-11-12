@@ -213,7 +213,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             48,
         );
         for line in render_out.lines {
-            println!("{line}");
+            println!("{}", ui::sanitize_terminal_line(&line));
         }
         return Ok(());
     }
@@ -504,7 +504,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 String::with_capacity(visible.iter().map(|l| l.len() + 4).sum::<usize>() + 8);
             buffer.push_str("\x1b[H");
             for (idx, line) in visible.iter().enumerate() {
-                buffer.push_str(line);
+                // Untrusted text (branches, paths, titles, diffs) must not reach the terminal
+                // as control sequences; only SGR styling survives.
+                buffer.push_str(&ui::sanitize_terminal_line(line));
                 buffer.push_str("\x1b[K");
                 if idx + 1 < visible.len() {
                     buffer.push('\n');
