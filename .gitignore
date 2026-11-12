@@ -24,6 +24,7 @@ auths/
 *.token
 *.key
 *.pem
+secrets.json
 
 # Telemetría, logs y cachés locales
 *.log
