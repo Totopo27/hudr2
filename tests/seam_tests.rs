@@ -5465,6 +5465,7 @@ api-keys:
                 );
                 INSERT INTO session (id, directory, title, time_updated, time_archived) VALUES
                     ('ses_own', 'D:/temp/my_proj', 'Own', 5000, NULL),
+                    ('ses_own_variant', ' d:\\TEMP\\My_Proj\\ ', 'Own, other spelling', 5000, NULL),
                     ('ses_null_dir', NULL, 'No dir', 5000, NULL),
                     ('ses_empty_dir', '   ', 'Empty dir', 5000, NULL),
                     ('ses_mock_dir', 'D:/proj', 'Old mock dir', 5000, NULL),
@@ -5511,10 +5512,10 @@ api-keys:
 
         assert_eq!(
             archived,
-            vec!["ses_own".to_string()],
-            "Only sessions owned by the current workspace may be archived"
+            vec!["ses_own".to_string(), "ses_own_variant".to_string()],
+            "Only sessions owned by the current workspace may be archived, whatever the path spelling"
         );
-        assert_eq!(rel.closed_count, 1);
+        assert_eq!(rel.closed_count, 2);
     }
 
     #[test]
