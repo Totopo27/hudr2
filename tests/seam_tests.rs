@@ -4068,17 +4068,31 @@ mod tests {
         let resolved = resolve_engram_binary();
         assert_eq!(resolved.as_ref(), Some(&fake_engram));
 
-        if let Some(prev) = old_path {
-            unsafe {
-                std::env::set_var("PATH", prev);
-            }
-        }
-
         // 3. HerdrClient: caché de binario disponible y timeout acotado
         hudr2::herdr::clear_herdr_binary_cache();
         // Cuando no existe herdr/telardev en PATH, get_panes debe retornar sin colgarse
+        unsafe {
+            std::env::set_var("PATH", &fake_bin_dir);
+            std::env::set_var(
+                "HERDR_SOCKET_PATH",
+                tmp.path().join("missing-herdr-endpoint"),
+            );
+        }
+        let started = std::time::Instant::now();
         let panes = HerdrClient::get_panes();
-        assert!(panes.is_empty() || !panes.is_empty());
+        assert!(panes.is_empty());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "get_panes must return within its bounded timeout"
+        );
+        unsafe {
+            std::env::remove_var("HERDR_SOCKET_PATH");
+            if let Some(prev) = old_path {
+                std::env::set_var("PATH", prev);
+            } else {
+                std::env::remove_var("PATH");
+            }
+        }
     }
 
     #[test]
@@ -4470,22 +4484,28 @@ mod tests {
         use hudr2::herdr::HerdrClient;
         use std::path::Path;
 
-        let exe = Path::new("C:\\Users\\user\\.cargo\\bin\\hudr2.exe");
+        let exe = Path::new("C:\\Users\\$demo\\O'Brien\\hudr2.exe");
         let cmd = HerdrClient::build_attach_cmd_line(
             exe,
-            "D:\\projects\\demo",
-            Some("w1:p1"),
-            Some(Path::new("D:\\cfg.json")),
+            "D:\\projects\\$(Write-Output hacked)\\demo",
+            Some("w1:p'1"),
+            Some(Path::new("D:\\cfg's.json")),
         );
 
         #[cfg(target_os = "windows")]
-        assert!(cmd.starts_with("& \"C:\\Users\\user\\.cargo\\bin\\hudr2.exe\""));
+        {
+            assert!(cmd.starts_with("& 'C:\\Users\\$demo\\O''Brien\\hudr2.exe'"));
+            assert!(cmd.contains("--cwd 'D:\\projects\\$(Write-Output hacked)\\demo'"));
+            assert!(cmd.contains("--pane 'w1:p''1'"));
+            assert!(cmd.contains("--config 'D:\\cfg''s.json'"));
+        }
         #[cfg(not(target_os = "windows"))]
-        assert!(cmd.starts_with("\"C:\\Users\\user\\.cargo\\bin\\hudr2.exe\""));
-
-        assert!(cmd.contains("--cwd \"D:\\projects\\demo\""));
-        assert!(cmd.contains("--pane \"w1:p1\""));
-        assert!(cmd.contains("--config \"D:\\cfg.json\""));
+        {
+            assert!(cmd.starts_with("\"C:\\Users\\$demo\\O'Brien\\hudr2.exe\""));
+            assert!(cmd.contains("--cwd \"D:\\projects\\$(Write-Output hacked)\\demo\""));
+            assert!(cmd.contains("--pane \"w1:p'1\""));
+            assert!(cmd.contains("--config \"D:\\cfg's.json\""));
+        }
     }
 
     #[test]
@@ -4944,20 +4964,20 @@ api-keys:
             "access_token": "mock_token_codex",
             "account_id": "2566d8ef-3667-4faf-8188-6b811237393d",
             "disabled": false,
-            "email": "ttotopo27@gmail.com",
+            "email": "developer@example.com",
             "expired": "2030-11-21T01:05:38-03:00",
             "last_refresh": "2026-11-11T01:05:38-03:00",
             "plan_type": "plus",
             "type": "codex"
         }"#;
-        let long_named_file = auths_dir.join("codex-6b6f7a00-ttotopo27@gmail.com-plus.json");
+        let long_named_file = auths_dir.join("codex-6b6f7a00-developer@example.com-plus.json");
         std::fs::write(&long_named_file, codex_json_content).unwrap();
 
         // 2. Archivo con prefijo explícito (ej. tavocodex)
         let tavocodex_json_content = r#"{
             "access_token": "mock_token_tavo",
             "disabled": false,
-            "email": "ttotopo27@gmail.com",
+            "email": "developer@example.com",
             "expired": "2030-11-21T01:05:38-03:00",
             "plan_type": "plus",
             "prefix": "tavocodex",
@@ -6223,6 +6243,251 @@ api-keys:
         unsafe {
             std::env::remove_var("HUDR2_CONFIG_PATH");
         }
+    }
+
+    #[test]
+    fn test_saldos_api_does_not_project_gemini_cost_onto_unused_api_account() {
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus};
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_path = tmp.path().join("hudr2.json");
+        unsafe {
+            std::env::set_var("HUDR2_CONFIG_PATH", &cfg_path);
+        }
+        let _ = hudr2::state::save_account_budget(
+            &cfg_path,
+            "tavoclaude",
+            Some(35.55),
+            0.0,
+            Some("gemini-session".to_string()),
+        );
+
+        let mut state = AppState::with_config(Some(cfg_path), None);
+        state.collapsed_cards[5] = false;
+        state.collapsed_cards[6] = false;
+        state.snapshot.accounts = vec![AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            ..Default::default()
+        }];
+        state.snapshot.orchestrators = vec![OrchestratorProfile {
+            name: "sdd-orchestrator-agy2".to_string(),
+            display_name: "sdd-agy2".to_string(),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            prefix: Some("agy2".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![hudr2::models::SubAgentProfile {
+                role: "explore".to_string(),
+                model: "tavoclaude/claude-opus-5-5".to_string(),
+                model_short: "claude-opus-5-5".to_string(),
+                prefix: Some("tavoclaude".to_string()),
+                thinking: None,
+            }],
+            ..Default::default()
+        }];
+        state.snapshot.agent_session = AgentSession {
+            session_id: Some("gemini-session".to_string()),
+            agent: "sdd-orchestrator-agy2".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy2".to_string()),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            cost: 0.068,
+            turn_count: 34,
+            ..Default::default()
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 54);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(screen.contains("tavoclaude"));
+        assert!(screen.contains("$35.55 disp"));
+        assert!(!screen.contains("sesión: $0.068"));
+
+        unsafe {
+            std::env::remove_var("HUDR2_CONFIG_PATH");
+        }
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_rejects_same_role_with_wrong_account() {
+        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus};
+
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        state.snapshot.accounts = vec![
+            AccountQuota {
+                prefix: "agy2".to_string(),
+                rem_5h: 99,
+                rem_wk: 91,
+                ..Default::default()
+            },
+            AccountQuota {
+                prefix: "tavoclaude".to_string(),
+                auth_file: "config.yaml#tavoclaude".to_string(),
+                reset_5h: "api-key".to_string(),
+                reset_wk: "api-key".to_string(),
+                ..Default::default()
+            },
+        ];
+        state.snapshot.orchestrators = vec![OrchestratorProfile {
+            name: "sdd-orchestrator-agy2".to_string(),
+            display_name: "sdd-agy2".to_string(),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            prefix: Some("agy2".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![hudr2::models::SubAgentProfile {
+                role: "worker".to_string(),
+                model: "tavoclaude/claude-opus-5-5".to_string(),
+                model_short: "claude-opus-5-5".to_string(),
+                prefix: Some("tavoclaude".to_string()),
+                thinking: None,
+            }],
+            ..Default::default()
+        }];
+        state.snapshot.agent_session = AgentSession {
+            agent: "worker".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy2".to_string()),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            ..Default::default()
+        };
+
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 54);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(screen.contains("○ worker"), "wrong-account worker must stay inactive");
+        assert!(!screen.contains("> worker"), "role alone must not mark a subagent active");
+    }
+
+    #[test]
+    fn test_opencode_api_child_sessions_drive_subagent_activity_and_api_cost() {
+        use hudr2::models::{AccountQuota, AgentSession};
+
+        let accounts = vec![
+            AccountQuota {
+                prefix: "agy2".to_string(),
+                ..Default::default()
+            },
+            AccountQuota {
+                prefix: "tavoclaude".to_string(),
+                auth_file: "config.yaml#tavoclaude".to_string(),
+                reset_5h: "api-key".to_string(),
+                reset_wk: "api-key".to_string(),
+                ..Default::default()
+            },
+        ];
+        let payload = serde_json::json!({
+            "data": [
+                {
+                    "id": "ses_root",
+                    "agent": "sdd-orchestrator-agy2",
+                    "model": {"providerID": "cliproxy", "id": "agy2/gemini-3.8-flash-high"},
+                    "cost": 0.0,
+                    "tokens": {"input": 1000, "output": 100, "cache": {"read": 0, "write": 0}},
+                    "time": {"created": 10, "updated": 50, "busy": 11},
+                    "location": {"directory": "D:/workspace"}
+                },
+                {
+                    "id": "ses_worker",
+                    "parentID": "ses_root",
+                    "agent": "worker",
+                    "model": {"providerID": "cliproxy", "id": "tavoclaude/claude-opus-5-5"},
+                    "cost": 0.42,
+                    "tokens": {"input": 500, "output": 50, "cache": {"read": 25, "write": 0}},
+                    "time": {"created": 20, "updated": 40, "busy": 21},
+                    "location": {"directory": "D:/workspace"}
+                },
+                {
+                    "id": "ses_explore",
+                    "parentID": "ses_root",
+                    "agent": "explore",
+                    "model": {"providerID": "cliproxy", "id": "agy2/gemini-3.8-flash-high"},
+                    "cost": 0.0,
+                    "tokens": {"input": 200, "output": 20, "cache": {"read": 0, "write": 0}},
+                    "time": {"created": 25, "updated": 35, "busy": 26, "idle": 36},
+                    "location": {"directory": "D:/workspace"}
+                }
+            ]
+        });
+        let mut session = AgentSession::default();
+
+        hudr2::opencode::apply_api_session_telemetry(
+            &mut session,
+            "D:/workspace",
+            &accounts,
+            &payload,
+        );
+
+        assert_eq!(session.subagent_invocations.len(), 2);
+        let worker = session
+            .subagent_invocations
+            .iter()
+            .find(|item| item.role == "worker")
+            .unwrap();
+        assert_eq!(worker.status, "working");
+        assert_eq!(worker.local_prefix.as_deref(), Some("tavoclaude"));
+        assert!((worker.cost - 0.42).abs() < f64::EPSILON);
+        assert_eq!(worker.started_at, Some(20));
+        assert_eq!(worker.finished_at, None);
+
+        let explore = session
+            .subagent_invocations
+            .iter()
+            .find(|item| item.role == "explore")
+            .unwrap();
+        assert_eq!(explore.status, "idle");
+        assert_eq!(explore.finished_at, Some(36));
+
+        let (cost, tasks) =
+            hudr2::quotas::cliproxy::api_account_attributed_usage(&accounts[1], &session, &[]);
+        assert!((cost - 0.42).abs() < f64::EPSILON);
+        assert_eq!(tasks, 1);
+
+        let orch = hudr2::models::OrchestratorProfile {
+            name: "sdd-orchestrator-agy2".to_string(),
+            display_name: "sdd-agy2".to_string(),
+            model: "cliproxy/agy2/gemini-3.8-flash-high".to_string(),
+            model_short: "gemini-3.8-flash".to_string(),
+            prefix: Some("agy2".to_string()),
+            status: hudr2::models::OrchestratorStatus::Working,
+            subagents: vec![
+                hudr2::models::SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "tavoclaude/claude-opus-5-5".to_string(),
+                    model_short: "claude-opus-5-5".to_string(),
+                    prefix: Some("tavoclaude".to_string()),
+                    thinking: None,
+                },
+                hudr2::models::SubAgentProfile {
+                    role: "explore".to_string(),
+                    model: "agy2/gemini-3.8-flash-high".to_string(),
+                    model_short: "gemini-3.8-flash".to_string(),
+                    prefix: Some("agy2".to_string()),
+                    thinking: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        state.snapshot.accounts = accounts;
+        state.snapshot.orchestrators = vec![orch];
+        state.snapshot.agent_session = session;
+        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 80);
+        let screen = ui::strip_ansi(&render_out.lines.join("\n"));
+        assert!(screen.contains("> worker"));
+        assert!(screen.contains("● explore"));
+        assert!(screen.contains("ini 00:00:20 · fin activo"));
+        assert!(screen.contains("$0.420 · 550 tok"));
+        assert!(screen.contains("ini 00:00:25 · fin 00:00:36"));
+        assert!(screen.contains("220 tok"));
     }
 
     #[test]

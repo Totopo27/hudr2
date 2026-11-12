@@ -571,12 +571,6 @@ where
     }
 }
 
-/// Ejecuta el comando de actualización para una herramienta específica en un subproceso
-/// seguro y no bloqueante con timeout de 120s.
-pub fn execute_tool_update(name: &str) -> Result<String, String> {
-    execute_tool_update_with_progress(name, |_, _, _, _| {})
-}
-
 /// Compara dos versiones semver normalizadas (`vX.Y.Z[-tag]`).
 /// Devuelve `true` si `upstream` es estrictamente mayor que `current`.
 pub fn is_newer_version(current: &str, upstream: &str) -> bool {

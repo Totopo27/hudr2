@@ -153,11 +153,6 @@ pub fn detect_proxy_provider_key(
     None
 }
 
-/// Detecta el nombre del provider de proxy local configurado en `opencode.json` (`"cpamc"`, `"cliproxy"`, etc.).
-pub fn detect_configured_proxy_provider() -> String {
-    detect_configured_proxy_provider_for(".")
-}
-
 /// Detecta el nombre del provider de proxy local configurado para el directorio indicado (`target_dir`).
 pub fn detect_configured_proxy_provider_for(target_dir: &str) -> String {
     for cfg_path in crate::paths::opencode_config_candidates(target_dir) {
@@ -215,10 +210,6 @@ fn extract_orchestrator_profile(agent_name: &str) -> Option<&str> {
         }
     }
     None
-}
-
-pub async fn sync_integrations_native() -> Result<SyncResult, String> {
-    sync_integrations_native_for(".").await
 }
 
 pub async fn sync_integrations_native_for(target_dir: &str) -> Result<SyncResult, String> {

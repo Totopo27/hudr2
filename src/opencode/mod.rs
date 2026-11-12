@@ -20,12 +20,15 @@ pub use session::{
     resolve_session_for_pane, resolve_session_table_name, session_select_columns, table_exists,
 };
 
-use crate::models::{AccountQuota, AgentSession, AttributedChanges, HerdrPane};
+use crate::models::{AccountQuota, AgentSession, AttributedChanges, HerdrPane, SubagentInvocation};
 use crate::paths::resolve_opencode_db_path;
 use rusqlite::{Connection, OpenFlags};
 use session::{extract_tool_path, recent_alive_sessions};
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use std::process::{Command, Stdio};
 use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 #[derive(Clone, Debug)]
 struct MessageStatsCacheEntry {
@@ -47,10 +50,254 @@ struct MessageStatsCacheEntry {
 static MESSAGE_STATS_CACHE: LazyLock<Mutex<HashMap<String, MessageStatsCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static API_SESSION_CACHE: LazyLock<Mutex<Option<(Instant, serde_json::Value)>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+const API_SESSION_MAX_STDOUT_BYTES: u64 = 8 * 1024 * 1024;
+
 pub fn clear_message_stats_cache() {
     if let Ok(mut guard) = MESSAGE_STATS_CACHE.lock() {
         guard.clear();
     }
+}
+
+pub fn apply_api_session_telemetry(
+    session: &mut AgentSession,
+    target_dir: &str,
+    accounts_list: &[AccountQuota],
+    payload: &serde_json::Value,
+) {
+    let Some(items) = payload.get("data").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    let norm_target = crate::paths::normalize_path(target_dir);
+    let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, None);
+    let requested_root = session.session_id.as_deref().and_then(|session_id| {
+        items.iter().find(|item| {
+            item.get("id").and_then(serde_json::Value::as_str) == Some(session_id)
+                && item
+                    .pointer("/location/directory")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|directory| crate::paths::normalize_path(directory) == norm_target)
+        })
+    });
+    let root = requested_root.or_else(|| {
+        items
+            .iter()
+            .filter(|item| {
+                let directory = item
+                    .pointer("/location/directory")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                crate::paths::normalize_path(directory) == norm_target
+                    && item.get("parentID").is_none()
+                    && item.get("parent_id").is_none()
+            })
+            .max_by_key(|item| {
+                item.pointer("/time/updated")
+                    .or_else(|| item.pointer("/time/created"))
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(0)
+            })
+    });
+    let Some(root) = root else {
+        return;
+    };
+    let Some(root_id) = root.get("id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+
+    session.session_id = Some(root_id.to_string());
+    if let Some(agent) = root.get("agent").and_then(serde_json::Value::as_str) {
+        session.agent = agent.to_string();
+    }
+    let root_provider = root
+        .pointer("/model/providerID")
+        .or_else(|| root.pointer("/model/provider_id"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let root_model_id = root
+        .pointer("/model/id")
+        .or_else(|| root.pointer("/model/modelID"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !root_model_id.is_empty() {
+        session.model = if root_provider.is_empty() || root_model_id.contains('/') {
+            root_model_id.to_string()
+        } else {
+            format!("{root_provider}/{root_model_id}")
+        };
+        session.model_short = clean_model_name(&session.model)
+            .rsplit('/')
+            .next()
+            .unwrap_or(&session.model)
+            .to_string();
+        session.context_limit = resolve_model_context_limit(&session.model);
+        session.local_prefix = extract_prefix(&session.agent, &session.model, &known_prefixes);
+    }
+    session.cost = root
+        .get("cost")
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(session.cost);
+    session.tokens_input = root
+        .pointer("/tokens/input")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(session.tokens_input);
+    session.tokens_output = root
+        .pointer("/tokens/output")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(session.tokens_output);
+    session.agent_status =
+        if root.pointer("/time/idle").is_some() || root.pointer("/time/archived").is_some() {
+            "idle".to_string()
+        } else {
+            "working".to_string()
+        };
+
+    session.subagent_invocations.clear();
+    for item in items {
+        let parent_id = item
+            .get("parentID")
+            .or_else(|| item.get("parent_id"))
+            .and_then(serde_json::Value::as_str);
+        if parent_id != Some(root_id) {
+            continue;
+        }
+        let directory = item
+            .pointer("/location/directory")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        if !directory.is_empty() && crate::paths::normalize_path(directory) != norm_target {
+            continue;
+        }
+
+        let role = item
+            .get("agent")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let provider = item
+            .pointer("/model/providerID")
+            .or_else(|| item.pointer("/model/provider_id"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let model_id = item
+            .pointer("/model/id")
+            .or_else(|| item.pointer("/model/modelID"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let model = if provider.is_empty() || model_id.contains('/') {
+            model_id.to_string()
+        } else {
+            format!("{provider}/{model_id}")
+        };
+        let model_short = clean_model_name(&model)
+            .rsplit('/')
+            .next()
+            .unwrap_or(&model)
+            .to_string();
+        let local_prefix = extract_prefix(&role, &model, &known_prefixes);
+        let started_at = item
+            .pointer("/time/created")
+            .and_then(serde_json::Value::as_i64);
+        let finished_at = item
+            .pointer("/time/idle")
+            .or_else(|| item.pointer("/time/archived"))
+            .and_then(serde_json::Value::as_i64);
+        let status = if finished_at.is_some() { "idle" } else { "working" };
+
+        session.subagent_invocations.push(SubagentInvocation {
+            session_id: item
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            role,
+            model,
+            model_short,
+            local_prefix,
+            status: status.to_string(),
+            tokens_input: item
+                .pointer("/tokens/input")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            tokens_output: item
+                .pointer("/tokens/output")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+            cost: item
+                .get("cost")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or(0.0),
+            started_at,
+            finished_at,
+        });
+    }
+}
+
+fn run_command_stdout(mut command: Command, timeout: Duration) -> Option<String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let output_handle = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(API_SESSION_MAX_STDOUT_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .ok()
+            .map(|_| bytes)
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(_) => break None,
+        }
+    };
+
+    let bytes = output_handle.join().ok().flatten()?;
+    let status = status?;
+    if !status.success() || bytes.len() as u64 > API_SESSION_MAX_STDOUT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn read_api_sessions() -> Option<serde_json::Value> {
+    if let Ok(guard) = API_SESSION_CACHE.lock()
+        && let Some((captured_at, value)) = guard.as_ref()
+        && captured_at.elapsed() < Duration::from_millis(750)
+    {
+        return Some(value.clone());
+    }
+
+    let mut command = Command::new("opencode");
+    command.args(["api", "get", "/api/session"]);
+    let output = run_command_stdout(command, Duration::from_millis(1500))?;
+    let value = serde_json::from_str::<serde_json::Value>(&output).ok()?;
+    if let Ok(mut guard) = API_SESSION_CACHE.lock() {
+        *guard = Some((Instant::now(), value.clone()));
+    }
+    Some(value)
 }
 
 pub fn read_opencode_session(
@@ -210,6 +457,10 @@ pub fn read_opencode_session(
     // Si encontramos sesión, calcular tokens y herramientas
     if let Some(ref session_id) = target_session_id {
         collect_message_stats(&conn, session_id, target_time_updated, &mut session);
+    }
+
+    if let Some(payload) = read_api_sessions() {
+        apply_api_session_telemetry(&mut session, target_dir, accounts_list, &payload);
     }
 
     session
@@ -631,6 +882,45 @@ fn collect_message_stats(
                 tool_engram: session.tool_engram,
                 attributed_changes: session.attributed_changes.clone(),
             },
+        );
+    }
+}
+
+#[cfg(test)]
+mod api_command_tests {
+    use super::run_command_stdout;
+    use std::io::{self, Write};
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn drains_large_child_stdout_before_waiting_for_exit() {
+        const CHILD_ENV: &str = "HUDR2_TEST_LARGE_STDOUT_CHILD";
+        const PAYLOAD_BYTES: usize = 1024 * 1024;
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let payload = vec![b'x'; PAYLOAD_BYTES];
+            let mut stdout = io::stdout().lock();
+            stdout.write_all(&payload).unwrap();
+            stdout.flush().unwrap();
+            std::process::exit(0);
+        }
+
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "opencode::api_command_tests::drains_large_child_stdout_before_waiting_for_exit",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1");
+
+        let output = run_command_stdout(command, Duration::from_secs(5))
+            .expect("large child stdout must be drained without a pipe deadlock");
+        assert!(
+            output.len() >= PAYLOAD_BYTES,
+            "expected at least {PAYLOAD_BYTES} bytes, got {}",
+            output.len()
         );
     }
 }

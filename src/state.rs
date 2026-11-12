@@ -610,7 +610,20 @@ impl AppState {
             let clean = self.balance_input_buffer.trim().trim_start_matches('$');
             let parsed = clean.parse::<f64>().ok().filter(|&v| v > 0.0);
             let cfg_path = crate::paths::resolve_hudr2_config_path();
-            let current_cost = self.snapshot.agent_session.cost;
+            let current_cost = self
+                .snapshot
+                .accounts
+                .iter()
+                .find(|account| account.prefix.eq_ignore_ascii_case(pfx))
+                .map(|account| {
+                    crate::quotas::api_account_attributed_usage(
+                        account,
+                        &self.snapshot.agent_session,
+                        &self.snapshot.panes,
+                    )
+                    .0
+                })
+                .unwrap_or(0.0);
             let current_sid = self.snapshot.agent_session.session_id.clone();
             let _ = save_account_budget(&cfg_path, pfx, parsed, current_cost, current_sid);
 
@@ -748,22 +761,6 @@ impl AppState {
             false
         } else {
             self.hidden_cards.contains(card_key)
-        }
-    }
-
-    pub fn is_card_collapsed(&self, card_key: &str) -> bool {
-        CARD_KEYS
-            .iter()
-            .position(|&k| k == card_key)
-            .map(|idx| self.collapsed_cards[idx])
-            .unwrap_or(false)
-    }
-
-    pub fn set_card_collapsed(&mut self, card_key: &str, collapsed: bool) {
-        if let Some(idx) = CARD_KEYS.iter().position(|&k| k == card_key) {
-            self.collapsed_cards[idx] = collapsed;
-            self.needs_redraw = true;
-            self.persist_config_if_configured();
         }
     }
 

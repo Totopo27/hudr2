@@ -5,9 +5,7 @@
 //! y la consulta HTTP a `QUOTA_URL`.
 
 use crate::config::{QUOTA_URL, USER_AGENT};
-use crate::models::{
-    AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus, QuotaPool,
-};
+use crate::models::{AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, QuotaPool};
 use crate::paths::{
     cliproxy_config_candidates_for, gentle_ai_profiles_candidates, opencode_config_candidates,
     resolve_auths_dir_for,
@@ -713,94 +711,116 @@ pub fn provider_billing_label(provider_or_prefix: &str) -> &'static str {
     }
 }
 
-/// Determina si una cuenta API Key está siendo utilizada en la sesión activa o en
-/// alguno de los orquestadores y subagentes en ejecución o coincidentes con el espacio actual.
+fn api_account_matches(prefix: &str, local_prefix: Option<&str>, model: &str) -> bool {
+    if local_prefix.is_some_and(|p| p.eq_ignore_ascii_case(prefix)) {
+        return true;
+    }
+
+    let prefix = prefix.to_ascii_lowercase();
+    let model = model.to_ascii_lowercase();
+    model.starts_with(&format!("{prefix}/"))
+        || model.contains(&format!("/{prefix}/"))
+        || model.contains(&format!("{prefix}:"))
+}
+
+fn pane_uses_api_account(pane: &HerdrPane, prefix: &str) -> bool {
+    let pane_prefix = pane
+        .tokens
+        .get("local_prefix")
+        .or_else(|| pane.tokens.get("account"))
+        .or_else(|| pane.tokens.get("prefix"))
+        .or_else(|| pane.tokens.get("profile"))
+        .map(String::as_str);
+    let pane_model = pane.tokens.get("model").map(String::as_str).unwrap_or("");
+    api_account_matches(prefix, pane_prefix, pane_model)
+}
+
+/// Determina si una cuenta API Key está siendo utilizada ahora por la sesión
+/// principal o por un subagente observable en la telemetría de ejecución.
 pub fn is_api_account_active(
     acc: &AccountQuota,
     session: &AgentSession,
-    orchestrators: &[OrchestratorProfile],
+    _orchestrators: &[OrchestratorProfile],
     panes: &[HerdrPane],
 ) -> bool {
-    let pfx_low = acc.prefix.to_ascii_lowercase();
-
-    // 1. Coincidencia directa con local_prefix
-    if let Some(ref lp) = session.local_prefix
-        && lp.eq_ignore_ascii_case(&acc.prefix)
+    if session.agent_status == "working"
+        && api_account_matches(
+            &acc.prefix,
+            session.local_prefix.as_deref(),
+            session.effective_model(),
+        )
     {
         return true;
     }
 
-    // 2. Coincidencia en all_active_prefixes
-    if session.all_active_prefixes.contains(&pfx_low) {
+    if session.subagent_invocations.iter().any(|invocation| {
+        invocation.status == "working"
+            && api_account_matches(
+                &acc.prefix,
+                invocation.local_prefix.as_deref(),
+                &invocation.model,
+            )
+    }) {
         return true;
     }
 
-    // 3. Coincidencia en el modelo de la sesión activa
-    let model_low = session.effective_model().to_ascii_lowercase();
-    if model_low.starts_with(&format!("{pfx_low}/"))
-        || model_low.contains(&format!("{pfx_low}:"))
-        || model_low.starts_with(&format!("{pfx_low}-"))
-    {
-        return true;
+    panes.iter().any(|pane| {
+        (pane.agent_status.as_deref() == Some("working")
+            || pane.tokens.get("agent_status").map(String::as_str) == Some("working"))
+            && pane_uses_api_account(pane, &acc.prefix)
+    })
+}
+
+/// Devuelve únicamente costo y turnos que pueden atribuirse a la cuenta dada.
+/// Si un subagente no publica costo propio, no se reutiliza el costo global del
+/// orquestador: es preferible omitir una proyección antes que inventarla.
+pub fn api_account_attributed_usage(
+    acc: &AccountQuota,
+    session: &AgentSession,
+    panes: &[HerdrPane],
+) -> (f64, usize) {
+    if api_account_matches(
+        &acc.prefix,
+        session.local_prefix.as_deref(),
+        session.effective_model(),
+    ) {
+        return (session.cost, session.turn_count);
     }
 
-    // 4. Coincidencia con orquestadores activos o asociados al espacio
-    for orch in orchestrators {
-        let orch_pfx_match = orch
-            .prefix
-            .as_deref()
-            .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-            .unwrap_or(false)
-            || orch.display_name().eq_ignore_ascii_case(&acc.prefix)
-            || orch.name.eq_ignore_ascii_case(&acc.prefix);
-
-        if orch_pfx_match {
-            if orch.status != OrchestratorStatus::Idle {
-                return true;
-            }
-            if let Some(ref lp) = session.local_prefix
-                && (orch.display_name().eq_ignore_ascii_case(lp)
-                    || orch.name.eq_ignore_ascii_case(lp))
-            {
-                return true;
-            }
-        }
-
-        for sub in &orch.subagents {
-            if sub
-                .prefix
-                .as_deref()
-                .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                .unwrap_or(false)
-            {
-                let sub_model_low = sub.model.to_ascii_lowercase();
-                if sub_model_low.starts_with(&format!("{pfx_low}/")) {
-                    return true;
-                }
-            }
-        }
+    let (child_cost, child_tasks) = session
+        .subagent_invocations
+        .iter()
+        .filter(|invocation| {
+            api_account_matches(
+                &acc.prefix,
+                invocation.local_prefix.as_deref(),
+                &invocation.model,
+            )
+        })
+        .fold((0.0, 0usize), |(cost, tasks), invocation| {
+            (cost + invocation.cost, tasks + usize::from(invocation.cost > 0.0))
+        });
+    if child_cost > 0.0 || child_tasks > 0 {
+        return (child_cost, child_tasks);
     }
 
-    // 5. Coincidencia en paneles de Herdr activos
-    for pane in panes {
-        if pane.agent_status.as_deref() == Some("working") {
-            if let Some(ref title) = pane.terminal_title {
-                let t_low = title.to_ascii_lowercase();
-                if t_low.contains(&pfx_low) {
-                    return true;
-                }
-            }
-            for (k, v) in &pane.tokens {
-                if k.to_ascii_lowercase().contains(&pfx_low)
-                    || v.to_ascii_lowercase().contains(&pfx_low)
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    false
+    panes
+        .iter()
+        .filter(|pane| pane_uses_api_account(pane, &acc.prefix))
+        .fold((0.0, 0usize), |(cost, turns), pane| {
+            let pane_cost = pane
+                .tokens
+                .get("cost")
+                .and_then(|value| value.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let pane_turns = pane
+                .tokens
+                .get("turn_count")
+                .or_else(|| pane.tokens.get("requests"))
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(0);
+            (cost + pane_cost, turns + pane_turns)
+        })
 }
 
 /// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.

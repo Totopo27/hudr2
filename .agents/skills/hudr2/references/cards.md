@@ -31,6 +31,7 @@
 - **Row 2:** Full-width inline progress bar (`━` / `─`).
 - **Row 3:** `^ <tokens_input> · v <tokens_output>` and `Costo $<cost>`.
 - **Row 4 (when `>= 50%`):** `[aviso] Sesion madura: usa /snew para handover limpio`.
+- **Semantics:** This card is intentionally global to the root session. Its token pressure and root-session cost are contextual telemetry, not evidence that any configured API-key account was used.
 
 ## 2. `~ Proyecto` (`id: "proyecto"`, index `2`)
 - **Header:** `~ Proyecto · <root_name> <dirs>d · <files>f`.
@@ -73,10 +74,11 @@
   - Role simplification: Shortens role identifiers to eliminate redundant prefixes (`gentle-ai-*`, `sdd-*`): `orch`, `worker`, `fix`, `explore`, `verify`, `deep-rsch`, `news-rsch`, `judge-a`, `judge-b`, `ui-design`.
   - Review consolidation: Groups the 4 review lenses (`review-risk`, `review-readability`, `review-reliability`, `review-resilience`) into a single collapsed active row: `rev-4r (sonnet-5-5)`.
   - Model abbreviation: Formats model names cleanly: `sonnet-5-5`, `opus-5-5`, `5.6-sol`, `5.6-terra`, `5.6-luna`, `codex-review`, `3.8-flash`.
-  - Runtime visual activity glyphs:
-    - `>` in accent color (`ACCENT_SECONDARY`) + bright bold text (`BOLD TEXT_PRIMARY`) for the active working model/agent (`Working`).
-    - `●` in purple (`MAGENTA`) + white text (`TEXT_PRIMARY`) for passive components that recently finished working / were used in the session (`all_active_prefixes`) or are in idle panes.
-    - `○` in gray (`TEXT_DIM`) + gray text (`TEXT_MUTED`) for inactive / unused components in this session.
+   - Runtime visual activity glyphs:
+     - `>` in accent color (`ACCENT_SECONDARY`) + bright bold text (`BOLD TEXT_PRIMARY`) for the active working model/agent (`Working`).
+     - `●` in purple (`MAGENTA`) + white text (`TEXT_PRIMARY`) for child sessions that finished or other passive components observed at runtime.
+     - `○` in gray (`TEXT_DIM`) + gray text (`TEXT_MUTED`) for inactive / unused components in this session.
+     - Each observed OpenCode child session adds a compact detail row with local start/end clocks and its own attributable dollar/token consumption; a running child shows `fin activo`.
   - Quota and Balance Projections:
     - For OAuth accounts (Antigravity): evaluates the sovereign/target pool for that model with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`) with inline gauge and `%` remaining (`5h` and `Wk`).
     - For API key and subscription accounts (Claude, Codex): renders session cost or balance remaining (`$XX.XX disp` / `$X.XX sesión`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
@@ -91,8 +93,9 @@
   - When no budget is set: renders `○ <prefix> [definir saldo]`.
   - When editing: renders in-place terminal input buffer `> <prefix> Saldo $: [ XX.XX ]_ [Enter|Esc]`. Typing numbers/dots updates the buffer; pressing `Enter` saves atomically to `hudr2.json` under `account_budgets.<prefix>` with session baseline tracking; `Esc` cancels.
 - **Dynamic Task & Quota Projection:**
-  - Evaluates whether the account is currently being used by the active session, orchestrator (`is_api_account_active`), or subagent.
-  - When in use or when consumption has occurred: displays row `  sesión: $<cost_since_set> · $<avg_cost>/req · ~<reqs_remaining> reqs disp`.
+  - Evaluates actual runtime telemetry: a matching working root session, a matching OpenCode child session, or a working Herdr pane with matching account/model metadata. Merely configuring an account in an orchestrator profile or retaining it in `all_active_prefixes` does not count as use.
+  - When attributable consumption exists: displays row `  sesión: $<cost_since_set> · $<avg_cost>/req · ~<reqs_remaining> reqs disp` using only that account's own root/child/pane cost.
+  - When no cost can be attributed, preserves the configured balance and omits session/projection metrics instead of reusing the global root-session cost.
   - Dynamically recalculates and projects remaining requests in real time as turns and tasks complete.
 - **Official Billing Web Console:**
   - Renders row `  ↳ <Provider> Console [visitar ->]` (`action_type: Some("open_billing_url")`).

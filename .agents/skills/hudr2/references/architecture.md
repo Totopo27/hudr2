@@ -12,7 +12,7 @@
 | [`src/pi.rs`](../../../src/pi.rs) | Pi & Gentle Shell telemetry: incremental byte-offset `.jsonl` reader (`PiTail`), sibling `.jsonl` detection on `/new`, context limit resolution (`cpamc-models-cache.json` -> `models-store.json` -> `resolve_model_context_limit`), and `settings.json` default model fallback. |
 | [`src/opencode/`](../../../src/opencode/mod.rs) | OpenCode SQLite (`opencode.db`) reader (`session.rs`), `time_updated` message stats cache, model normalization & context limits (`model_info.rs`), and account/pool prefix extraction (`prefix.rs`). |
 | [`src/quotas/`](../../../src/quotas/mod.rs) | Direct module re-exports (`mod.rs`) and `cliproxy.rs` adapter: credential discovery, HTTP quota polling, dynamic multi-model family health (`Gemini`, `Claude`, `GPT`, `DeepSeek`, `Qwen`), `sorted_known_prefixes`, and pacing/reset formatters. |
-| [`src/herdr.rs`](../../../src/herdr.rs) | `HerdrClient`: direct NDJSON socket/named-pipe IPC (`pane.list`, `pane.close`, `workspace.close`, `events.subscribe`) for Herdr and TelarDev, CLI fallback (`herdr` / `telardev` / `telar`), wire event parser (`parse_wire_event`), `metadata_tokens` (`pane.tokens`) extraction, and pane/tab correlation. |
+| [`src/herdr.rs`](../../../src/herdr.rs) | `HerdrClient`: direct NDJSON socket/named-pipe IPC (`pane.list`, `pane.close`, `events.subscribe`) for Herdr and TelarDev, CLI fallback (`herdr` / `telardev` / `telar`), wire event parser (`parse_wire_event`), `metadata_tokens` (`pane.tokens`) extraction, and pane/tab correlation. |
 | [`src/git.rs`](../../../src/git.rs) | Lock-free git runner (`GIT_OPTIONAL_LOCKS=0`, 3s timeout), zero-subprocess `.git/HEAD` branch & short SHA reader (`read_git_head_short` supporting loose refs, `packed-refs`, and worktree `commondir`), cross-session conflict radar (`detect_cross_session_conflicts` / `collect_cross_session_conflicts`), `porcelain=v1 -z` + `diff HEAD --numstat -z` parser, `is_sensitive_file` filter, and inline/Quick Peek diff preview (`read_file_diff_preview` / `read_file_quick_peek`). |
 | [`src/engram.rs`](../../../src/engram.rs) | Read-only SQLite `engram.db` reader (`mtime` cache), raw TCP HTTP/1.0 daemon `/health` probe (`127.0.0.1:7437`), and latest `session_summary` (`HandoffSummary`) parser. |
 | [`src/tree.rs`](../../../src/tree.rs) | Project tree scanner (`TREE_MAX_ENTRIES = 2000`, `is_real_dir` symlink guard, `TREE_SKIP_NAMES`) and deduplicated MCP server discovery (`opencode.json` + Pi `mcp.json`). |
@@ -58,6 +58,7 @@
    - Resolves `opencode.db` by max `mtime` across `opencode.db`, `opencode.db-wal`, and `opencode.db-shm`.
    - Pairs modern Drizzle tables (`session` + `message` + `part`, OpenCode 1.19+) cleanly when coexisting with legacy `session_v2` + `session_message` + `session_part`, hydrating `agent`, `model` (`providerID` + `modelID`), `tokens_input`, `tokens_output`, and `cost` from `message.data` / `part.data` JSON when `session` lacks SQL columns.
    - Message token/tool/file-change stats are cached by `(session_id, time_updated)` to avoid rescanning JSON blobs when idle.
+   - A bounded `opencode api get /api/session` read supplements the root session with direct child sessions (`parentID`). Each child contributes its own role, account/model, cost, tokens, and created/idle timestamps; configured profiles and historical prefixes are not execution evidence.
 
 ---
 
@@ -68,6 +69,7 @@
   - Dynamic extra pools when present in `groups`: `GPT Wk`, `GPT 5h`, `DeepSeek Wk`, `DeepSeek 5h`, `Qwen Wk`, `Qwen 5h`.
 - `resolve_model_family(model_str)` maps the active session model to `"Claude"`, `"GPT"`, `"DeepSeek"`, `"Qwen"`, or `"Gemini"`.
 - `evaluate_account_for_model(acc, active_model)` selects the `5h` and `Wk` pools matching the active model's family (with `GPT` falling back to `Claude` when the provider shares their bucket, and unknown/empty models defaulting to `Gemini`).
+- API-key balances use `api_account_attributed_usage`: root-session cost only when the root belongs to that account, plus each matching child session's own cost. A child or pane without attributable cost never inherits the root session's global cost.
 - Thresholds:
   - **Critical (`is_critical`):** `used >= 85%` (`remaining <= 15%`) -> `CORAL` (`[AGOTÁNDOSE]`) + migration alert (`x`).
   - **Warning (`is_warning`):** `70% <= used < 85%` (`15% < remaining <= 30%`) -> `AMBER` (`[AVISO 70%]`).

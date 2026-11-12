@@ -118,6 +118,23 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
+fn format_invocation_clock(timestamp: Option<i64>) -> String {
+    let Some(timestamp) = timestamp else {
+        return "--".to_string();
+    };
+    let (seconds, nanos) = if timestamp.abs() >= 10_000_000_000 {
+        (
+            timestamp.div_euclid(1000),
+            timestamp.rem_euclid(1000) as u32 * 1_000_000,
+        )
+    } else {
+        (timestamp, 0)
+    };
+    chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos)
+        .map(|time| time.format("%H:%M:%S").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
 fn truncate_plain(s: &str, max_width: usize) -> String {
     if string_width(s) <= max_width {
         return s.to_string();
@@ -979,17 +996,12 @@ pub fn render_screen_tabbed(
                 let pfx_clean = format!("{:<width$}", acc.prefix, width = pfx_w);
                 let pfx_disp = format!("{TEXT_PRIMARY}{pfx_clean}{RESET}");
                 let left = if is_api {
-                    let cost_to_apply = if snap
-                        .agent_session
-                        .local_prefix
-                        .as_deref()
-                        .map(|p| p.eq_ignore_ascii_case(&acc.prefix))
-                        .unwrap_or(false)
-                    {
-                        snap.agent_session.cost
-                    } else {
-                        0.0
-                    };
+                    let (cost_to_apply, _) =
+                        crate::quotas::cliproxy::api_account_attributed_usage(
+                            acc,
+                            &snap.agent_session,
+                            &snap.panes,
+                        );
                     let (_budget, rem_balance, _, _) =
                         crate::quotas::cliproxy::calculate_api_key_balance(
                             &acc.prefix,
@@ -1356,6 +1368,31 @@ pub fn render_screen_tabbed(
                         .iter()
                         .find(|a| a.prefix.eq_ignore_ascii_case(pfx_str));
 
+                    let clean_lower = row.role_label.to_lowercase();
+                    let check_subagent_hit =
+                        |agent_str: &str, pfx_opt: Option<&str>, model_str: &str| {
+                            let sess_agent = agent_str.to_lowercase();
+                            let sess_clean = clean_subagent_role(&sess_agent);
+                            let role_matches = row.all_roles.iter().any(|&r| {
+                                let rl = r.to_lowercase();
+                                sess_agent == rl
+                                    || sess_clean == rl
+                                    || sess_agent.contains(&rl)
+                                    || sess_clean.contains(&rl)
+                            }) || sess_agent == clean_lower
+                                || sess_clean == clean_lower;
+                            let model_matches = if let Some(pfx) = row.prefix {
+                                pfx_opt.map(|lp| lp.eq_ignore_ascii_case(pfx)).unwrap_or(false)
+                                    || model_str.to_lowercase().contains(&pfx.to_lowercase())
+                                    || model_str.eq_ignore_ascii_case(row.model_short)
+                            } else {
+                                model_str.is_empty()
+                                    || model_str.eq_ignore_ascii_case(row.model_short)
+                                    || model_str.to_lowercase().contains(&row.model_short.to_lowercase())
+                            };
+                            role_matches && model_matches
+                        };
+
                     // Determinar estado de ejecución:
                     // 1. Activo (Working):
                     let is_active = if row.is_orch {
@@ -1377,32 +1414,6 @@ pub fn render_screen_tabbed(
                                     p_working && hit_name
                                 }))
                     } else {
-                        let clean_lower = row.role_label.to_lowercase();
-                        let check_subagent_hit = |agent_str: &str, pfx_opt: Option<&str>, model_str: &str| {
-                            let sess_agent = agent_str.to_lowercase();
-                            let sess_clean = clean_subagent_role(&sess_agent);
-
-                            let role_matches = row.all_roles.iter().any(|&r| {
-                                let rl = r.to_lowercase();
-                                sess_agent == rl
-                                    || sess_clean == rl
-                                    || sess_agent.contains(&rl)
-                                    || sess_clean.contains(&rl)
-                            }) || sess_agent == clean_lower || sess_clean == clean_lower;
-
-                            let model_matches = if let Some(pfx) = row.prefix {
-                                pfx_opt.map(|lp| lp.eq_ignore_ascii_case(pfx)).unwrap_or(false)
-                                    || model_str.to_lowercase().contains(&pfx.to_lowercase())
-                                    || true
-                            } else {
-                                model_str.is_empty()
-                                    || model_str.eq_ignore_ascii_case(row.model_short)
-                                    || model_str.to_lowercase().contains(&row.model_short.to_lowercase())
-                            };
-
-                            role_matches && model_matches
-                        };
-
                         let session_active = snap.agent_session.agent_status == "working"
                             && check_subagent_hit(
                                 &snap.agent_session.agent,
@@ -1427,7 +1438,16 @@ pub fn render_screen_tabbed(
                             check_subagent_hit(p_agent, p_pfx, p_model)
                         });
 
-                        session_active || pane_active
+                        let child_active = snap.agent_session.subagent_invocations.iter().any(|child| {
+                            child.status == "working"
+                                && check_subagent_hit(
+                                    &child.role,
+                                    child.local_prefix.as_deref(),
+                                    &child.model,
+                                )
+                        });
+
+                        session_active || pane_active || child_active
                     };
 
                     // 2. Pasivo (recién dejó de trabajar / presente en all_active_prefixes / idle):
@@ -1435,6 +1455,14 @@ pub fn render_screen_tabbed(
                         && (row.prefix
                             .map(|p| snap.agent_session.all_active_prefixes.contains(&p.to_lowercase()))
                             .unwrap_or(false)
+                            || snap.agent_session.subagent_invocations.iter().any(|child| {
+                                child.status != "working"
+                                    && check_subagent_hit(
+                                        &child.role,
+                                        child.local_prefix.as_deref(),
+                                        &child.model,
+                                    )
+                            })
                             || (row.is_orch && orch.status == crate::models::OrchestratorStatus::Idle));
 
                     // 3. Glifos y colores de texto solicitados:
@@ -1464,11 +1492,12 @@ pub fn render_screen_tabbed(
                     let right = if let Some(acc) = target_acc {
                         let is_api = crate::quotas::is_api_key(acc);
                         if is_api {
-                            let session_cost = if is_active || is_passive {
-                                snap.agent_session.cost
-                            } else {
-                                0.0
-                            };
+                            let (session_cost, _) =
+                                crate::quotas::cliproxy::api_account_attributed_usage(
+                                    acc,
+                                    &snap.agent_session,
+                                    &snap.panes,
+                                );
                             let (maybe_budget, rem_balance, rem_pct, _cost) =
                                 crate::quotas::cliproxy::calculate_api_key_balance(
                                     &acc.prefix,
@@ -1533,6 +1562,36 @@ pub fn render_screen_tabbed(
                     };
 
                     lines.push(draw_row(&left, &right, width));
+
+                    if !row.is_orch {
+                        for invocation in snap.agent_session.subagent_invocations.iter().filter(
+                            |invocation| {
+                                check_subagent_hit(
+                                    &invocation.role,
+                                    invocation.local_prefix.as_deref(),
+                                    &invocation.model,
+                                )
+                            },
+                        ) {
+                            let started = format_invocation_clock(invocation.started_at);
+                            let finished = if invocation.status == "working" {
+                                "activo".to_string()
+                            } else {
+                                format_invocation_clock(invocation.finished_at)
+                            };
+                            let tokens = invocation.tokens_input + invocation.tokens_output;
+                            let usage = if invocation.cost > 0.0 {
+                                format!("${:.3} · {tokens} tok", invocation.cost)
+                            } else {
+                                format!("{tokens} tok")
+                            };
+                            lines.push(draw_row(
+                                &format!("  {TEXT_DIM}↳ ini {started} · fin {finished}{RESET}"),
+                                &format!("{TEXT_MUTED}{usage}{RESET}"),
+                                width,
+                            ));
+                        }
+                    }
                 }
             }
         } else {
@@ -1626,9 +1685,6 @@ pub fn render_screen_tabbed(
         lines.push(draw_top(&saldos_title, collapsed[6], width));
 
         if !collapsed[6] {
-            let active_sess_cost = snap.agent_session.cost;
-            let avg_cost = snap.agent_session.avg_turn_cost();
-
             for (i, acc) in api_accounts.iter().enumerate() {
                 if i > 0 {
                     lines.push(draw_divider(width));
@@ -1641,8 +1697,14 @@ pub fn render_screen_tabbed(
                     &snap.panes,
                 );
 
-                let session_cost = if is_in_use {
-                    active_sess_cost
+                let (session_cost, attributed_turns) =
+                    crate::quotas::cliproxy::api_account_attributed_usage(
+                        acc,
+                        &snap.agent_session,
+                        &snap.panes,
+                    );
+                let avg_cost = if attributed_turns > 0 {
+                    session_cost / attributed_turns as f64
                 } else {
                     0.0
                 };

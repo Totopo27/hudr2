@@ -30,6 +30,21 @@ pub struct SessionTodo {
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
+pub struct SubagentInvocation {
+    pub session_id: String,
+    pub role: String,
+    pub model: String,
+    pub model_short: String,
+    pub local_prefix: Option<String>,
+    pub status: String,
+    pub tokens_input: i64,
+    pub tokens_output: i64,
+    pub cost: f64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentSession {
     pub session_id: Option<String>,
     pub provider_name: String, // "opencode", "pi", "gentle-shell"
@@ -52,6 +67,7 @@ pub struct AgentSession {
     pub tool_total: usize,
     pub agent_status: String, // "idle" | "working"
     pub all_active_prefixes: HashSet<String>,
+    pub subagent_invocations: Vec<SubagentInvocation>,
     pub attributed_changes: AttributedChanges,
     pub todos: Vec<SessionTodo>,
 }

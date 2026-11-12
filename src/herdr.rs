@@ -70,6 +70,11 @@ pub enum HerdrWireEvent {
 pub struct HerdrClient;
 
 impl HerdrClient {
+    #[cfg(target_os = "windows")]
+    fn quote_powershell_arg(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
     pub fn resolve_ipc_path() -> Option<PathBuf> {
         for env_key in ["HERDR_SOCKET_PATH", "TELAR_SOCKET_PATH"] {
             if let Ok(p) = std::env::var(env_key) {
@@ -317,17 +322,30 @@ impl HerdrClient {
     ) -> String {
         let exe_str = exe_path.to_string_lossy();
         #[cfg(target_os = "windows")]
-        let mut cmd_line = format!("& \"{exe_str}\" --cwd \"{cwd}\"");
+        let mut cmd_line = format!(
+            "& {} --cwd {}",
+            Self::quote_powershell_arg(&exe_str),
+            Self::quote_powershell_arg(cwd)
+        );
         #[cfg(not(target_os = "windows"))]
         let mut cmd_line = format!("\"{exe_str}\" --cwd \"{cwd}\"");
 
         if let Some(parent) = parent_pane {
             let trimmed = parent.trim();
             if !trimmed.is_empty() {
+                #[cfg(target_os = "windows")]
+                cmd_line.push_str(&format!(" --pane {}", Self::quote_powershell_arg(trimmed)));
+                #[cfg(not(target_os = "windows"))]
                 cmd_line.push_str(&format!(" --pane \"{trimmed}\""));
             }
         }
         if let Some(cfg) = config_path {
+            #[cfg(target_os = "windows")]
+            cmd_line.push_str(&format!(
+                " --config {}",
+                Self::quote_powershell_arg(&cfg.to_string_lossy())
+            ));
+            #[cfg(not(target_os = "windows"))]
             cmd_line.push_str(&format!(" --config \"{}\"", cfg.to_string_lossy()));
         }
         cmd_line
@@ -486,13 +504,6 @@ impl HerdrClient {
             return true;
         }
         Self::run_herdr_cli(&["pane", "close", pane_id]).is_some()
-    }
-
-    pub fn close_workspace(workspace_id: &str) -> bool {
-        if Self::request_ipc("workspace.close", json!({ "workspace_id": workspace_id })).is_some() {
-            return true;
-        }
-        Self::run_herdr_cli(&["workspace", "close", workspace_id]).is_some()
     }
 
     /// Inicia un hilo suscriptor al stream NDJSON `events.subscribe` de Herdr cuando el socket/pipe existe.
