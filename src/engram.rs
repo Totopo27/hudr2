@@ -152,16 +152,16 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
     if let Ok(count) = conn.query_row(
         "SELECT count(*) FROM observations WHERE project = ?1 AND deleted_at IS NULL",
         [&tele.project],
-        |row| row.get::<_, usize>(0),
+        |row| row.get::<_, i64>(0),
     ) {
-        tele.obs_count = count;
+        tele.obs_count = usize::try_from(count).unwrap_or(0);
     }
 
     // 2. Comprobar si está sincronizado en cloud
     if let Ok(enrolled) = conn.query_row(
         "SELECT count(*) FROM sync_enrolled_projects WHERE project = ?1",
         [&tele.project],
-        |row| row.get::<_, usize>(0),
+        |row| row.get::<_, i64>(0),
     ) {
         tele.enrolled = enrolled > 0;
     }
