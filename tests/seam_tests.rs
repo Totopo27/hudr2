@@ -5042,15 +5042,14 @@ mod tests {
             .build()
             .unwrap();
         rt.block_on(async {
+            use hudr2::quotas::{
+                discover_accounts_for, evaluate_account_for_model,
+                fetch_quota_for_account_with_cache, is_api_key, is_fresh_within, needs_refresh,
+                parse_api_key_accounts_from_opencode_json, parse_api_key_accounts_from_yaml,
+            };
 
-        use hudr2::quotas::{
-            discover_accounts_for, evaluate_account_for_model, fetch_quota_for_account_with_cache,
-            is_api_key, is_fresh_within, needs_refresh, parse_api_key_accounts_from_opencode_json,
-            parse_api_key_accounts_from_yaml,
-        };
-
-        // 1. Verificar parseo de config.yaml con cuentas de Claude
-        let yaml_sample = r#"
+            // 1. Verificar parseo de config.yaml con cuentas de Claude
+            let yaml_sample = r#"
 api-keys:
     claude:
         - name: claude-1
@@ -5069,23 +5068,23 @@ api-keys:
           keys:
             - api-key: "sk-ant-sample-clas"
 "#;
-        let accounts_yaml = parse_api_key_accounts_from_yaml(yaml_sample);
-        assert_eq!(accounts_yaml.len(), 3);
-        assert_eq!(
-            accounts_yaml[0],
-            ("tavoclaude".to_string(), "Claude".to_string())
-        );
-        assert_eq!(
-            accounts_yaml[1],
-            ("gianniclaude".to_string(), "Claude".to_string())
-        );
-        assert_eq!(
-            accounts_yaml[2],
-            ("clasclaude".to_string(), "Claude".to_string())
-        );
+            let accounts_yaml = parse_api_key_accounts_from_yaml(yaml_sample);
+            assert_eq!(accounts_yaml.len(), 3);
+            assert_eq!(
+                accounts_yaml[0],
+                ("tavoclaude".to_string(), "Claude".to_string())
+            );
+            assert_eq!(
+                accounts_yaml[1],
+                ("gianniclaude".to_string(), "Claude".to_string())
+            );
+            assert_eq!(
+                accounts_yaml[2],
+                ("clasclaude".to_string(), "Claude".to_string())
+            );
 
-        // 2. Verificar parseo de opencode.json models
-        let opencode_json_sample = r#"{
+            // 2. Verificar parseo de opencode.json models
+            let opencode_json_sample = r#"{
             "providers": {
                 "cliproxy": {
                     "models": {
@@ -5099,189 +5098,190 @@ api-keys:
                 }
             }
         }"#;
-        let accounts_opencode = parse_api_key_accounts_from_opencode_json(opencode_json_sample);
-        assert_eq!(accounts_opencode.len(), 2);
-        assert!(accounts_opencode.iter().any(|(p, _)| p == "tavoclaude"));
-        assert!(accounts_opencode.iter().any(|(p, _)| p == "gianniclaude"));
+            let accounts_opencode = parse_api_key_accounts_from_opencode_json(opencode_json_sample);
+            assert_eq!(accounts_opencode.len(), 2);
+            assert!(accounts_opencode.iter().any(|(p, _)| p == "tavoclaude"));
+            assert!(accounts_opencode.iter().any(|(p, _)| p == "gianniclaude"));
 
-        // 3. Crear entorno temporal con config.yaml y probar discover_accounts_for
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg_path = tmp.path().join("config.yaml");
-        let hudr2_cfg_path = tmp.path().join("hudr2.json");
-        std::fs::write(&cfg_path, yaml_sample).unwrap();
-        std::fs::write(&hudr2_cfg_path, "{}").unwrap();
-        unsafe {
-            std::env::set_var("CLIPROXY_CONFIG_PATH", cfg_path.to_str().unwrap());
-            std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
-            std::env::set_var("HUDR2_CONFIG_PATH", hudr2_cfg_path.to_str().unwrap());
-        }
+            // 3. Crear entorno temporal con config.yaml y probar discover_accounts_for
+            let tmp = tempfile::tempdir().unwrap();
+            let cfg_path = tmp.path().join("config.yaml");
+            let hudr2_cfg_path = tmp.path().join("hudr2.json");
+            std::fs::write(&cfg_path, yaml_sample).unwrap();
+            std::fs::write(&hudr2_cfg_path, "{}").unwrap();
+            unsafe {
+                std::env::set_var("CLIPROXY_CONFIG_PATH", cfg_path.to_str().unwrap());
+                std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
+                std::env::set_var("HUDR2_CONFIG_PATH", hudr2_cfg_path.to_str().unwrap());
+            }
 
-        let mut discovered = Vec::new();
-        discover_accounts_for(tmp.path().to_str().unwrap(), &mut discovered);
+            let mut discovered = Vec::new();
+            discover_accounts_for(tmp.path().to_str().unwrap(), &mut discovered);
 
-        unsafe {
-            std::env::remove_var("CLIPROXY_CONFIG_PATH");
-            std::env::remove_var("CLIPROXY_AUTHS_DIR");
-        }
+            unsafe {
+                std::env::remove_var("CLIPROXY_CONFIG_PATH");
+                std::env::remove_var("CLIPROXY_AUTHS_DIR");
+            }
 
-        assert_eq!(discovered.len(), 3);
-        assert!(discovered.iter().any(|a| a.prefix == "tavoclaude"));
-        assert!(discovered.iter().any(|a| a.prefix == "gianniclaude"));
-        assert!(discovered.iter().any(|a| a.prefix == "clasclaude"));
+            assert_eq!(discovered.len(), 3);
+            assert!(discovered.iter().any(|a| a.prefix == "tavoclaude"));
+            assert!(discovered.iter().any(|a| a.prefix == "gianniclaude"));
+            assert!(discovered.iter().any(|a| a.prefix == "clasclaude"));
 
-        let tavo = discovered
-            .iter()
-            .find(|a| a.prefix == "tavoclaude")
-            .unwrap();
-        assert!(is_api_key(tavo));
-        assert_eq!(tavo.reset_5h, "api-key");
-        assert_eq!(tavo.reset_wk, "api-key");
-        assert!(!needs_refresh(tavo));
-        assert!(is_fresh_within(tavo, 600));
-
-        // 4. Probar fetch_quota_for_account_with_cache (no debe fallar ni llamar HTTP)
-        let mut tavo_clone = tavo.clone();
-        let status = fetch_quota_for_account_with_cache(&mut tavo_clone, None).await;
-        assert_eq!(status, 200);
-        assert!(!tavo_clone.has_error);
-        assert_eq!(tavo_clone.rem_5h, 100);
-
-        // 5. Probar evaluación dinámica y semáforo de saldo para cuenta API Key
-        let eff_claude = evaluate_account_for_model(tavo, "claude-opus-5-5");
-        assert_eq!(eff_claude.family, "Claude");
-        assert_eq!(eff_claude.rem_5h, 100);
-        assert_eq!(eff_claude.reset_5h, "api-key");
-        assert!(!eff_claude.is_critical);
-        assert!(!eff_claude.is_warning);
-
-        // Probar umbrales de advertencia (<= 20%) y crítico (<= 8%)
-        let mut tavo_warning = tavo.clone();
-        tavo_warning.rem_5h = 20;
-        let eff_warn = evaluate_account_for_model(&tavo_warning, "claude-opus-5-5");
-        assert!(!eff_warn.is_critical);
-        assert!(eff_warn.is_warning);
-
-        let mut tavo_critical = tavo.clone();
-        tavo_critical.rem_5h = 8;
-        let eff_crit = evaluate_account_for_model(&tavo_critical, "claude-opus-5-5");
-        assert!(eff_crit.is_critical);
-        assert!(!eff_crit.is_warning);
-
-        // 6. Probar renderizado en UI sin saldo configurado (verdad de campo: $0.00 sesión y [definir saldo])
-        let mut state = AppState::new();
-        state.snapshot.accounts = discovered.clone();
-        state.snapshot.agent_session.local_prefix = Some("clasclaude".to_string());
-        state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
-        state.collapsed_cards[3] = false; // Integraciones expandida
-        state.collapsed_cards[5] = false; // Cuota de Modelos expandida
-        state.collapsed_cards[6] = false; // Saldos API expandida
-
-        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
-        let screen = render_out.lines.join("\n");
-        let clean_screen = ui::strip_ansi(&screen);
-
-        assert!(clean_screen.contains("Integraciones · 3 cuentas"));
-        assert!(clean_screen.contains("[api-key]"));
-        assert!(clean_screen.contains("clasclaude"));
-        assert!(!clean_screen.contains("> clasclaude"));
-        assert!(clean_screen.contains("$0.00 sesión"));
-        assert!(!clean_screen.contains("Wk:100%"));
-        assert!(clean_screen.contains("Cuota de Modelos · clasclaude *"));
-        assert!(clean_screen.contains("Claude API"));
-        assert!(clean_screen.contains("Saldos API · 3 perfiles"));
-        assert!(clean_screen.contains("[definir saldo]"));
-        assert!(clean_screen.contains("Anthropic Console"));
-        assert!(clean_screen.contains("[visitar ->]"));
-        assert!(!clean_screen.contains("Claude Wk"));
-        assert!(!clean_screen.contains("Claude 5h"));
-
-        unsafe {
-            std::env::remove_var("HUDR2_CONFIG_PATH");
-        }
-
-        // Verificar límites de clics interactivos para saldo y facturación oficial
-        assert!(
-            render_out
-                .bounds
+            let tavo = discovered
                 .iter()
-                .any(|b| b.action_type == Some("edit_balance")
-                    && b.action_path.as_deref() == Some("clasclaude"))
-        );
-        assert!(
-            render_out
-                .bounds
-                .iter()
-                .any(|b| b.action_type == Some("open_billing_url")
-                    && b.action_path.as_deref() == Some("https://platform.claude.com/spending"))
-        );
-        assert!(render_out.bounds.iter().any(|b| b.id == "saldos"));
+                .find(|a| a.prefix == "tavoclaude")
+                .unwrap();
+            assert!(is_api_key(tavo));
+            assert_eq!(tavo.reset_5h, "api-key");
+            assert_eq!(tavo.reset_wk, "api-key");
+            assert!(!needs_refresh(tavo));
+            assert!(is_fresh_within(tavo, 600));
 
-        // 7. Probar mapeo modular de URLs y etiquetas de facturación para diferentes proveedores
-        use hudr2::quotas::cliproxy::{provider_billing_label, provider_billing_url};
-        assert_eq!(
-            provider_billing_url("claude"),
-            "https://platform.claude.com/spending"
-        );
-        assert_eq!(provider_billing_label("claude"), "Anthropic Console");
-        assert_eq!(
-            provider_billing_url("anthropic"),
-            "https://platform.claude.com/spending"
-        );
-        assert_eq!(provider_billing_label("anthropic"), "Anthropic Console");
-        assert_eq!(
-            provider_billing_url("deepseek"),
-            "https://platform.deepseek.com/top_up"
-        );
-        assert_eq!(provider_billing_label("deepseek"), "DeepSeek Platform");
-        assert_eq!(
-            provider_billing_url("google"),
-            "https://aistudio.google.com/"
-        );
-        assert_eq!(provider_billing_label("google"), "Google AI Studio");
-        assert_eq!(
-            provider_billing_url("gemini"),
-            "https://aistudio.google.com/"
-        );
-        assert_eq!(provider_billing_label("gemini"), "Google AI Studio");
-        assert_eq!(provider_billing_url("opencode"), "https://opencode.ai/zen");
-        assert_eq!(provider_billing_label("opencode"), "OpenCode Zen");
-        assert_eq!(
-            provider_billing_url("kimi"),
-            "https://platform.moonshot.cn/console/pay"
-        );
-        assert_eq!(provider_billing_label("kimi"), "Moonshot Platform");
-        assert_eq!(
-            provider_billing_url("codex"),
-            "https://chatgpt.com/#settings/Subscription"
-        );
-        assert_eq!(provider_billing_label("codex"), "ChatGPT Subscription");
-        assert_eq!(
-            provider_billing_url("openai"),
-            "https://platform.openai.com/settings/organization/billing/overview"
-        );
-        assert_eq!(provider_billing_label("openai"), "OpenAI Platform");
-        assert_eq!(
-            provider_billing_url("openrouter"),
-            "https://openrouter.ai/credits"
-        );
-        assert_eq!(provider_billing_label("openrouter"), "OpenRouter Credits");
-        assert_eq!(
-            provider_billing_url("groq"),
-            "https://console.groq.com/settings/billing"
-        );
-        assert_eq!(provider_billing_label("groq"), "Groq Console");
+            // 4. Probar fetch_quota_for_account_with_cache (no debe fallar ni llamar HTTP)
+            let mut tavo_clone = tavo.clone();
+            let status = fetch_quota_for_account_with_cache(&mut tavo_clone, None).await;
+            assert_eq!(status, 200);
+            assert!(!tavo_clone.has_error);
+            assert_eq!(tavo_clone.rem_5h, 100);
 
-        // 8. Probar ciclo de vida de edición de saldo interactiva
-        state.start_edit_balance("clasclaude");
-        assert!(state.is_editing_balance);
-        state.update_balance_input_buffer("50.00".to_string());
-        let edit_render = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
-        let edit_screen = ui::strip_ansi(&edit_render.lines.join("\n"));
-        assert!(edit_screen.contains("clasclaude Saldo $: 50.00"));
-        assert!(edit_screen.contains("[Enter|Esc]"));
+            // 5. Probar evaluación dinámica y semáforo de saldo para cuenta API Key
+            let eff_claude = evaluate_account_for_model(tavo, "claude-opus-5-5");
+            assert_eq!(eff_claude.family, "Claude");
+            assert_eq!(eff_claude.rem_5h, 100);
+            assert_eq!(eff_claude.reset_5h, "api-key");
+            assert!(!eff_claude.is_critical);
+            assert!(!eff_claude.is_warning);
 
-        state.cancel_edit_balance();
-        assert!(!state.is_editing_balance);
+            // Probar umbrales de advertencia (<= 20%) y crítico (<= 8%)
+            let mut tavo_warning = tavo.clone();
+            tavo_warning.rem_5h = 20;
+            let eff_warn = evaluate_account_for_model(&tavo_warning, "claude-opus-5-5");
+            assert!(!eff_warn.is_critical);
+            assert!(eff_warn.is_warning);
+
+            let mut tavo_critical = tavo.clone();
+            tavo_critical.rem_5h = 8;
+            let eff_crit = evaluate_account_for_model(&tavo_critical, "claude-opus-5-5");
+            assert!(eff_crit.is_critical);
+            assert!(!eff_crit.is_warning);
+
+            // 6. Probar renderizado en UI sin saldo configurado (verdad de campo: $0.00 sesión y [definir saldo])
+            let mut state = AppState::new();
+            state.snapshot.accounts = discovered.clone();
+            state.snapshot.agent_session.local_prefix = Some("clasclaude".to_string());
+            state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
+            state.collapsed_cards[3] = false; // Integraciones expandida
+            state.collapsed_cards[5] = false; // Cuota de Modelos expandida
+            state.collapsed_cards[6] = false; // Saldos API expandida
+
+            let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+            let screen = render_out.lines.join("\n");
+            let clean_screen = ui::strip_ansi(&screen);
+
+            assert!(clean_screen.contains("Integraciones · 3 cuentas"));
+            assert!(clean_screen.contains("[api-key]"));
+            assert!(clean_screen.contains("clasclaude"));
+            assert!(!clean_screen.contains("> clasclaude"));
+            assert!(clean_screen.contains("$0.00 sesión"));
+            assert!(!clean_screen.contains("Wk:100%"));
+            assert!(clean_screen.contains("Cuota de Modelos · clasclaude *"));
+            assert!(clean_screen.contains("Claude API"));
+            assert!(clean_screen.contains("Saldos API · 3 perfiles"));
+            assert!(clean_screen.contains("[definir saldo]"));
+            assert!(clean_screen.contains("Anthropic Console"));
+            assert!(clean_screen.contains("[visitar ->]"));
+            assert!(!clean_screen.contains("Claude Wk"));
+            assert!(!clean_screen.contains("Claude 5h"));
+
+            unsafe {
+                std::env::remove_var("HUDR2_CONFIG_PATH");
+            }
+
+            // Verificar límites de clics interactivos para saldo y facturación oficial
+            assert!(
+                render_out
+                    .bounds
+                    .iter()
+                    .any(|b| b.action_type == Some("edit_balance")
+                        && b.action_path.as_deref() == Some("clasclaude"))
+            );
+            assert!(
+                render_out
+                    .bounds
+                    .iter()
+                    .any(|b| b.action_type == Some("open_billing_url")
+                        && b.action_path.as_deref()
+                            == Some("https://platform.claude.com/spending"))
+            );
+            assert!(render_out.bounds.iter().any(|b| b.id == "saldos"));
+
+            // 7. Probar mapeo modular de URLs y etiquetas de facturación para diferentes proveedores
+            use hudr2::quotas::cliproxy::{provider_billing_label, provider_billing_url};
+            assert_eq!(
+                provider_billing_url("claude"),
+                "https://platform.claude.com/spending"
+            );
+            assert_eq!(provider_billing_label("claude"), "Anthropic Console");
+            assert_eq!(
+                provider_billing_url("anthropic"),
+                "https://platform.claude.com/spending"
+            );
+            assert_eq!(provider_billing_label("anthropic"), "Anthropic Console");
+            assert_eq!(
+                provider_billing_url("deepseek"),
+                "https://platform.deepseek.com/top_up"
+            );
+            assert_eq!(provider_billing_label("deepseek"), "DeepSeek Platform");
+            assert_eq!(
+                provider_billing_url("google"),
+                "https://aistudio.google.com/"
+            );
+            assert_eq!(provider_billing_label("google"), "Google AI Studio");
+            assert_eq!(
+                provider_billing_url("gemini"),
+                "https://aistudio.google.com/"
+            );
+            assert_eq!(provider_billing_label("gemini"), "Google AI Studio");
+            assert_eq!(provider_billing_url("opencode"), "https://opencode.ai/zen");
+            assert_eq!(provider_billing_label("opencode"), "OpenCode Zen");
+            assert_eq!(
+                provider_billing_url("kimi"),
+                "https://platform.moonshot.cn/console/pay"
+            );
+            assert_eq!(provider_billing_label("kimi"), "Moonshot Platform");
+            assert_eq!(
+                provider_billing_url("codex"),
+                "https://chatgpt.com/#settings/Subscription"
+            );
+            assert_eq!(provider_billing_label("codex"), "ChatGPT Subscription");
+            assert_eq!(
+                provider_billing_url("openai"),
+                "https://platform.openai.com/settings/organization/billing/overview"
+            );
+            assert_eq!(provider_billing_label("openai"), "OpenAI Platform");
+            assert_eq!(
+                provider_billing_url("openrouter"),
+                "https://openrouter.ai/credits"
+            );
+            assert_eq!(provider_billing_label("openrouter"), "OpenRouter Credits");
+            assert_eq!(
+                provider_billing_url("groq"),
+                "https://console.groq.com/settings/billing"
+            );
+            assert_eq!(provider_billing_label("groq"), "Groq Console");
+
+            // 8. Probar ciclo de vida de edición de saldo interactiva
+            state.start_edit_balance("clasclaude");
+            assert!(state.is_editing_balance);
+            state.update_balance_input_buffer("50.00".to_string());
+            let edit_render = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+            let edit_screen = ui::strip_ansi(&edit_render.lines.join("\n"));
+            assert!(edit_screen.contains("clasclaude Saldo $: 50.00"));
+            assert!(edit_screen.contains("[Enter|Esc]"));
+
+            state.cancel_edit_balance();
+            assert!(!state.is_editing_balance);
         });
     }
 
@@ -5435,8 +5435,7 @@ api-keys:
         assert!(is_codex_account(&tavo_acc));
         assert!(!is_api_key(&tavo_acc));
         assert_eq!(tavo_acc.reset_5h, UNFETCHED_RESET);
-        let unknown_health =
-            hudr2::quotas::evaluate_account_for_model(&tavo_acc, "gpt-5.6-sol");
+        let unknown_health = hudr2::quotas::evaluate_account_for_model(&tavo_acc, "gpt-5.6-sol");
         assert!(!unknown_health.is_critical);
         assert!(!unknown_health.is_warning);
 
