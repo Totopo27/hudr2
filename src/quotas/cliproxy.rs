@@ -1771,6 +1771,17 @@ pub fn evaluate_account_for_model(
     }
 
     if is_codex_account(acc) {
+        if is_unfetched(acc) {
+            return EffectiveAccountHealth {
+                rem_5h: acc.rem_5h,
+                reset_5h: acc.reset_5h.clone(),
+                rem_wk: acc.rem_wk,
+                reset_wk: acc.reset_wk.clone(),
+                is_critical: false,
+                is_warning: false,
+                family: "GPT",
+            };
+        }
         let worst_remaining = acc.rem_5h.min(acc.rem_wk);
         let is_critical = !acc.has_error && worst_remaining <= 15;
         let is_warning = !acc.has_error && (worst_remaining > 15 && worst_remaining <= 30);

@@ -1016,13 +1016,20 @@ pub fn render_screen_tabbed(
 
                     let is_api = crate::quotas::is_api_key(acc);
                     let is_antigravity = crate::quotas::is_antigravity_account(acc);
+                    let is_unknown = crate::quotas::is_unfetched(acc);
                     let right_normal = if is_api || !is_antigravity {
                         format!("{TEXT_DIM}[{}]{RESET}", eff.reset_5h)
                     } else {
                         format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h)
                     };
 
-                    let (status_glyph, pct_color, right_text) = if acc.has_error {
+                    let (status_glyph, pct_color, right_text) = if is_unknown {
+                        (
+                            format!("{AMBER}?{RESET}"),
+                            AMBER,
+                            format!("{AMBER}[sin consultar]{RESET}"),
+                        )
+                    } else if acc.has_error {
                         let err_display = if acc.error_msg.to_lowercase().contains("expirado") {
                             if width < 34 {
                                 "exp".to_string()
@@ -1108,6 +1115,8 @@ pub fn render_screen_tabbed(
                                 }
                             }
                         }
+                    } else if is_unknown {
+                        format!("{status_glyph} {pfx_disp} {TEXT_DIM}cuota desconocida{RESET}")
                     } else {
                         let bar_len = if width < 38 { 2 } else { 3 };
                         let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);

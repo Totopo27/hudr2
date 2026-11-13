@@ -5434,6 +5434,10 @@ api-keys:
         assert!(is_codex_account(&tavo_acc));
         assert!(!is_api_key(&tavo_acc));
         assert_eq!(tavo_acc.reset_5h, UNFETCHED_RESET);
+        let unknown_health =
+            hudr2::quotas::evaluate_account_for_model(&tavo_acc, "gpt-5.6-sol");
+        assert!(!unknown_health.is_critical);
+        assert!(!unknown_health.is_warning);
 
         // 3. Aplicar la respuesta real de Codex: una ventana semanal puede venir en primary_window.
         let mut codex_clone = codex_acc.clone();
@@ -5516,6 +5520,8 @@ api-keys:
 
         // 7. Sin respuesta remota válida, una flota configurada debe mostrar desconocido.
         let mut unknown_state = AppState::new();
+        unknown_state.collapsed_cards[3] = false;
+        unknown_state.collapsed_cards[4] = false;
         unknown_state.collapsed_cards[5] = false;
         unknown_state.snapshot.accounts = vec![codex_acc];
         unknown_state.snapshot.orchestrators = vec![hudr2::models::OrchestratorProfile {
@@ -5542,6 +5548,18 @@ api-keys:
             ui::strip_ansi(&unknown_render.lines[pools.start_line..=pools.end_line].join("\n"));
         assert!(unknown_screen.contains("?[sin consultar]"));
         assert!(!unknown_screen.contains("100%"));
+
+        let integrations = unknown_render
+            .bounds
+            .iter()
+            .find(|bound| bound.id == "integraciones")
+            .unwrap();
+        let integrations_screen = ui::strip_ansi(
+            &unknown_render.lines[integrations.start_line..=integrations.end_line].join("\n"),
+        );
+        assert!(integrations_screen.contains("[sin consultar]"));
+        assert!(!integrations_screen.contains("0%"));
+        assert!(!integrations_screen.contains("AGOTÁNDOSE"));
     }
 
     #[test]
