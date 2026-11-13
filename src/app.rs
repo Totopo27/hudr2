@@ -334,6 +334,8 @@ pub async fn force_refresh_with_notify(
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
             drop(state);
             wake();
+        } else {
+            clear_stale_quota_progress_notice(app_state, &wake).await;
         }
         return;
     }
@@ -375,6 +377,8 @@ pub async fn force_refresh_with_notify(
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
             drop(state);
             wake();
+        } else {
+            clear_stale_quota_progress_notice(app_state, &wake).await;
         }
         return;
     }
@@ -524,18 +528,27 @@ pub async fn force_refresh_with_notify(
         drop(state);
         wake();
     } else {
-        let mut state = app_state.write().await;
-        if state
-            .flash_notice
-            .as_deref()
-            .is_some_and(|n| n.starts_with("+ Cuotas ("))
-        {
-            state.flash_notice = None;
-            state.flash_notice_until = None;
-            state.needs_redraw = true;
-            drop(state);
-            wake();
-        }
+        clear_stale_quota_progress_notice(app_state, &wake).await;
+    }
+}
+
+/// Clears a leftover silent quota progress notice (`+ Cuotas (n/m ...`) once a
+/// non-interactive sweep ends, including sweeps that exit early with nothing to fetch.
+async fn clear_stale_quota_progress_notice(
+    app_state: &Arc<RwLock<AppState>>,
+    wake: &(dyn Fn() + Sync),
+) {
+    let mut state = app_state.write().await;
+    if state
+        .flash_notice
+        .as_deref()
+        .is_some_and(|n| n.starts_with("+ Cuotas ("))
+    {
+        state.flash_notice = None;
+        state.flash_notice_until = None;
+        state.needs_redraw = true;
+        drop(state);
+        wake();
     }
 }
 
