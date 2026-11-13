@@ -5318,6 +5318,7 @@ api-keys:
 
     #[test]
     fn test_claude_api_key_balance_baseline_tracking() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let cfg_path = temp_dir.path().join("hudr2.json");
 
