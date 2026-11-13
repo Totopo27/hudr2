@@ -63,10 +63,7 @@ fn matches_pool_num(pfx: &str, pool_num: u32) -> bool {
     if let Ok(n) = num_part.parse::<u32>() {
         return n == pool_num;
     }
-    if pool_num == 1 && num_part.is_empty() {
-        return true;
-    }
-    false
+    pool_num == 1 && num_part.is_empty()
 }
 
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
