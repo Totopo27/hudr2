@@ -4911,8 +4911,8 @@ mod tests {
 
         let updating_text = render_updating.lines.join("\n");
         assert!(
-            updating_text.contains("[⠋ 45%]"),
-            "Debe mostrar el monitor con porcentaje a la izquierda del botón"
+            updating_text.contains("[| 45%]"),
+            "Debe mostrar un spinner ASCII portátil junto al porcentaje"
         );
         assert!(
             updating_text.contains("[\u{2191}]"),
@@ -4926,21 +4926,34 @@ mod tests {
             "pi no debe tener bound de actualización mientras se está actualizando"
         );
 
-        // 3. Ancho ancho (56 columnas): monitor [⠋ 45%] + [actualizando]
+        // 3. Ancho ancho (56 columnas): monitor [| 45%] + [actualizando]
         let render_updating_56 =
             ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
         let text_56 = render_updating_56.lines.join("\n");
-        assert!(text_56.contains("[⠋ 45%]"));
+        assert!(text_56.contains("[| 45%]"));
         assert!(text_56.contains("[actualizando]"));
 
-        // 4. Ancho adaptativo estrecho (42 columnas): monitor [⠋ 45%] + botón compacto [↑]
+        // 4. Ancho adaptativo estrecho (42 columnas): monitor [| 45%] + botón compacto [↑]
         let render_updating_42 =
             ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
         let text_42 = render_updating_42.lines.join("\n");
-        assert!(text_42.contains("[⠋ 45%]"));
+        assert!(text_42.contains("[| 45%]"));
         assert!(text_42.contains("[\u{2191}]"));
 
-        // 4b. Estado completado (100%): monitor verde [✓ 100%] + [completado]
+        // Every animation frame must remain portable across terminal fonts.
+        for (spinner_idx, expected) in [(0, '|'), (1, '/'), (2, '-'), (3, '\\')] {
+            state.snapshot.ecosystem.tools[0]
+                .update_progress
+                .as_mut()
+                .unwrap()
+                .spinner_idx = spinner_idx;
+            let frame = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48)
+                .lines
+                .join("\n");
+            assert!(frame.contains(&format!("[{expected} 45%]")));
+        }
+
+        // 4b. Estado completado (100%): monitor verde [+ 100%] + [completado]
         state.snapshot.ecosystem.tools[0].update_progress =
             Some(hudr2::models::ToolUpdateProgress {
                 percent: 100,
@@ -4951,8 +4964,8 @@ mod tests {
         let render_done_56 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
         let text_done_56 = render_done_56.lines.join("\n");
         assert!(
-            text_done_56.contains("[✓ 100%]"),
-            "Al 100% debe mostrar [✓ 100%]"
+            text_done_56.contains("[+ 100%]"),
+            "Al 100% debe mostrar [+ 100%]"
         );
         assert!(
             text_done_56.contains("[completado]"),
@@ -4961,8 +4974,8 @@ mod tests {
 
         let render_done_42 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
         let text_done_42 = render_done_42.lines.join("\n");
-        assert!(text_done_42.contains("[✓ 100%]"));
-        assert!(text_done_42.contains("[✓]"));
+        assert!(text_done_42.contains("[+ 100%]"));
+        assert!(text_done_42.contains("[+]"));
 
         // 5. Ancho estrecho estándar (36 columnas): botón adaptativo compacto [↑]
         state.snapshot.ecosystem.tools[0].is_updating = false;

@@ -2434,10 +2434,7 @@ pub fn render_screen_tabbed(
                     };
 
                     let right = if tool.is_updating {
-                        const SPINNER_FRAMES: &[char] = &[
-                            '\u{280b}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283c}', '\u{2834}',
-                            '\u{2826}', '\u{2827}', '\u{2807}', '\u{280f}',
-                        ];
+                        const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
                         let is_done = tool
                             .update_progress
                             .as_ref()
@@ -2445,14 +2442,14 @@ pub fn render_screen_tabbed(
                             .unwrap_or(false);
                         let (spinner, pct_str) = if let Some(ref prog) = tool.update_progress {
                             if is_done {
-                                ('\u{2713}', "100%".to_string())
+                                ('+', "100%".to_string())
                             } else {
                                 let sp = SPINNER_FRAMES[prog.spinner_idx % SPINNER_FRAMES.len()];
                                 let p = format!("{}%", prog.percent);
                                 (sp, p)
                             }
                         } else {
-                            ('\u{280b}', "--%".to_string())
+                            ('|', "--%".to_string())
                         };
 
                         let monitor = if is_done {
@@ -2464,7 +2461,7 @@ pub fn render_screen_tabbed(
                             if width >= 56 {
                                 format!("{mint}[completado]{RESET}")
                             } else if width >= 40 {
-                                format!("{mint}[\u{2713}]{RESET}")
+                                format!("{mint}[+]{RESET}")
                             } else {
                                 String::new()
                             }

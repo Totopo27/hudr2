@@ -130,7 +130,7 @@
 - **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
   - Up-to-date: `● <name> <version>` (`MINT`).
   - Update available: `● <name> <version> ↑<upstream>` (`AMBER`) accompanied by an interactive clickable `[actualizar]` button (or adaptive `[↑]` when `width < 44`) mapped to `action_type: Some("update_tool")`. For `hudr2` itself, renders `[asistido]` and displays non-blocking instructions in flash notice to prevent Windows executable file-locking (`os error 5`) and CPU compilation spikes.
-  - In progress / Completed: Retains in-flight update state across periodic/event-driven refresh cycles (`preserve_in_flight_update_state`), displaying dynamic Braille spinner frame and real-time percent `[⠋ 45%]` alongside responsive `[actualizando]` or `[↑]`. Upon reaching 100%, displays `[✓ 100%] [completado]` in `MINT` for ~1.2s before clearing the monitor and returning to the up-to-date state.
+  - In progress / Completed: Retains in-flight update state across periodic/event-driven refresh cycles (`preserve_in_flight_update_state`), displaying a terminal-portable ASCII spinner (`| / - \\`) and real-time percent `[| 45%]` alongside responsive `[actualizando]` or `[↑]`. Upon reaching 100%, displays `[+ 100%] [completado]` in `MINT` for ~1.2s before clearing the monitor and returning to the up-to-date state.
   - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
 - **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 
