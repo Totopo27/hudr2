@@ -90,6 +90,57 @@ impl AgentSession {
             &self.model_short
         }
     }
+
+    pub fn zenwarp_usages(&self) -> Vec<ZenWarpUsage> {
+        let mut usages = Vec::new();
+        if let (Some(actor_id), Some(route)) = (
+            self.session_id.as_deref(),
+            normalize_zenwarp_model(self.effective_model()),
+        ) {
+            usages.push(ZenWarpUsage {
+                actor_id: actor_id.to_string(), parent_actor_id: None,
+                actor_role: self.agent.clone(), model_id: route.model_id,
+                route: route.route, activity_state: self.agent_status.clone(),
+                started_at: None, finished_at: None,
+            });
+        }
+        usages.extend(self.subagent_invocations.iter().filter_map(|invocation| {
+            let route = normalize_zenwarp_model(&invocation.model)?;
+            Some(ZenWarpUsage {
+                actor_id: invocation.session_id.clone(), parent_actor_id: self.session_id.clone(),
+                actor_role: invocation.role.clone(), model_id: route.model_id,
+                route: route.route, activity_state: invocation.status.clone(),
+                started_at: invocation.started_at, finished_at: invocation.finished_at,
+            })
+        }));
+        usages
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZenWarpUsage {
+    pub actor_id: String,
+    pub parent_actor_id: Option<String>,
+    pub actor_role: String,
+    pub model_id: String,
+    pub route: String,
+    pub activity_state: String,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+}
+
+struct ZenWarpRoute { model_id: String, route: String }
+
+fn normalize_zenwarp_model(model: &str) -> Option<ZenWarpRoute> {
+    let model = model.trim();
+    let (route, model_id) = if let Some(model_id) = model.strip_prefix("zenwarp/") {
+        ("direct", model_id)
+    } else {
+        let model_id = model.strip_prefix("cliproxy/zen/")?;
+        ("cliproxy", model_id)
+    };
+    if model_id.is_empty() { return None; }
+    Some(ZenWarpRoute { model_id: model_id.to_string(), route: route.to_string() })
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

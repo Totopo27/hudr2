@@ -1403,6 +1403,21 @@ pub fn render_screen_tabbed(
                     });
                 }
 
+                let zenwarp_usages = snap.agent_session.zenwarp_usages();
+                if !zenwarp_usages.is_empty() {
+                    lines.push(draw_divider(width));
+                    lines.push(draw_row(&format!("{BOLD}{TEXT_PRIMARY}ZenWarp usage{RESET} {TEXT_DIM}\u{00b7} {} actors{RESET}", zenwarp_usages.len()), "", width));
+                    for usage in &zenwarp_usages {
+                        let glyph = if usage.activity_state == "working" { format!("{accent_secondary}>{RESET}") } else { format!("{MAGENTA}\u{25cf}{RESET}") };
+                        let role = truncate_to_width(&usage.actor_role, if width < 42 { 10 } else { 18 });
+                        let model = truncate_to_width(&usage.model_id, if width < 42 { 14 } else { 28 });
+                        let route = if usage.route == "cliproxy" { "ZenWarp \u{00b7} CLIProxy" } else { "ZenWarp \u{00b7} direct" };
+                        let state = if usage.activity_state == "working" { String::new() } else { format!(" \u{00b7} {}", usage.activity_state) };
+                        lines.push(draw_row(&format!("{glyph} {TEXT_PRIMARY}{role}{RESET} {TEXT_DIM}({model}){RESET}"), &format!("{TEXT_MUTED}{route}{state}{RESET}"), width));
+                    }
+                    lines.push(draw_divider(width));
+                }
+
                 for row in &fleet_rows {
                     let pfx_str = row.prefix.or(orch.prefix.as_deref()).unwrap_or("local");
                     let target_acc = snap
@@ -1661,6 +1676,16 @@ pub fn render_screen_tabbed(
 
             lines.push(draw_top(&pool_title, collapsed[5], width));
             if !collapsed[5] {
+                let zenwarp_usages = snap.agent_session.zenwarp_usages();
+                if !zenwarp_usages.is_empty() {
+                    lines.push(draw_row(&format!("{BOLD}{TEXT_PRIMARY}ZenWarp usage{RESET} {TEXT_DIM}\u{00b7} {} actors{RESET}", zenwarp_usages.len()), "", width));
+                    for usage in &zenwarp_usages {
+                        let route = if usage.route == "cliproxy" { "ZenWarp \u{00b7} CLIProxy" } else { "ZenWarp \u{00b7} direct" };
+                        let state = if usage.activity_state == "working" { String::new() } else { format!(" \u{00b7} {}", usage.activity_state) };
+                        lines.push(draw_row(&format!("{TEXT_PRIMARY}{} {TEXT_DIM}({}){RESET}", usage.actor_role, truncate_to_width(&usage.model_id, if width < 42 { 14 } else { 28 })), &format!("{TEXT_MUTED}{route}{state}{RESET}"), width));
+                    }
+                    lines.push(draw_divider(width));
+                }
                 if snap.accounts.is_empty() {
                     lines.push(draw_row(
                         &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),

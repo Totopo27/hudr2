@@ -6713,6 +6713,50 @@ api-keys:
     }
 
     #[test]
+    fn test_zenwarp_usage_is_actor_driven_dynamic_and_route_aware() {
+        use hudr2::models::AgentSession;
+        let payload = serde_json::json!({ "data": [
+            { "id": "ses_root", "agent": "gentle-orchestrator", "model": {"providerID": "zenwarp", "id": "new-model-free"}, "time": {"created": 10, "updated": 50, "busy": 11}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_worker_a", "parentID": "ses_root", "agent": "worker-a", "model": {"providerID": "cliproxy", "id": "zen/glm-5.3-flash-free"}, "time": {"created": 20, "updated": 40, "busy": 21}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_worker_b", "parentID": "ses_root", "agent": "worker-b", "model": {"providerID": "cliproxy", "id": "zen/glm-5.3-flash-free"}, "time": {"created": 25, "updated": 45, "busy": 26, "idle": 46}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_unrelated", "parentID": "ses_root", "agent": "explore", "model": {"providerID": "cliproxy", "id": "zenith/not-zenwarp"}, "time": {"created": 30, "updated": 35, "busy": 31}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_similar_provider", "parentID": "ses_root", "agent": "fix", "model": {"providerID": "zenwarp-proxy", "id": "almost-zen"}, "time": {"created": 31, "updated": 36, "busy": 32}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_direct_qualified", "parentID": "ses_root", "agent": "verify", "model": {"id": "zenwarp/future-model-free"}, "time": {"created": 32, "updated": 34, "busy": 33}, "location": {"directory": "D:/workspace"} }
+        ]});
+        let mut session = AgentSession::default();
+        hudr2::opencode::apply_api_session_telemetry(&mut session, "D:/workspace", &[], &payload);
+        let usages = session.zenwarp_usages();
+        assert_eq!(usages.len(), 4, "only observed ZenWarp actors create rows");
+        assert_eq!((&usages[0].actor_id, &usages[0].model_id, &usages[0].route), (&"ses_root".to_string(), &"new-model-free".to_string(), &"direct".to_string()));
+        assert_eq!(usages[1].parent_actor_id.as_deref(), Some("ses_root"));
+        assert_eq!((&usages[1].model_id, &usages[1].route), (&"glm-5.3-flash-free".to_string(), &"cliproxy".to_string()));
+        assert_eq!((&usages[2].actor_id, &usages[2].activity_state, usages[2].finished_at), (&"ses_worker_b".to_string(), &"idle".to_string(), Some(46)));
+        assert_eq!((&usages[3].model_id, &usages[3].route), (&"future-model-free".to_string(), &"direct".to_string()));
+    }
+
+    #[test]
+    fn test_zenwarp_usage_renders_observed_actors_and_omits_empty_inventory() {
+        use hudr2::models::AgentSession;
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        state.snapshot.agent_session = AgentSession {
+            session_id: Some("ses_root".to_string()), provider_name: "opencode".to_string(),
+            agent: "gentle-orchestrator".to_string(), model: "zenwarp/new-model-free".to_string(),
+            model_short: "new-model-free".to_string(), agent_status: "working".to_string(),
+            subagent_invocations: vec![hudr2::models::SubagentInvocation {
+                session_id: "ses_worker".to_string(), role: "worker".to_string(),
+                model: "cliproxy/zen/glm-5.3-flash-free".to_string(), model_short: "glm-5.3-flash-free".to_string(),
+                status: "idle".to_string(), ..Default::default()
+            }], ..Default::default()
+        };
+        let screen = ui::strip_ansi(&ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 120).lines.join("\n"));
+        for expected in ["ZenWarp usage · 2 actors", "gentle-orchestrator", "new-model-free", "ZenWarp · direct", "worker", "glm-5.3-flash-free", "ZenWarp · CLIProxy · idle"] { assert!(screen.contains(expected), "missing {expected}"); }
+        state.snapshot.agent_session = AgentSession::default();
+        let empty = ui::strip_ansi(&ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 120).lines.join("\n"));
+        assert!(!empty.contains("ZenWarp usage"));
+    }
+
+    #[test]
     fn test_tabbed_sidebar_rendering_and_card_distribution() {
         use hudr2::state::ActiveTab;
         let mut state = AppState::new();

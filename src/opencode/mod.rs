@@ -122,11 +122,7 @@ pub fn apply_api_session_telemetry(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     if !root_model_id.is_empty() {
-        session.model = if root_provider.is_empty() || root_model_id.contains('/') {
-            root_model_id.to_string()
-        } else {
-            format!("{root_provider}/{root_model_id}")
-        };
+        session.model = qualified_runtime_model(root_provider, root_model_id);
         session.model_short = clean_model_name(&session.model)
             .rsplit('/')
             .next()
@@ -186,11 +182,7 @@ pub fn apply_api_session_telemetry(
             .or_else(|| item.pointer("/model/modelID"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let model = if provider.is_empty() || model_id.contains('/') {
-            model_id.to_string()
-        } else {
-            format!("{provider}/{model_id}")
-        };
+        let model = qualified_runtime_model(provider, model_id);
         let model_short = clean_model_name(&model)
             .rsplit('/')
             .next()
@@ -232,6 +224,18 @@ pub fn apply_api_session_telemetry(
             started_at,
             finished_at,
         });
+    }
+}
+
+fn qualified_runtime_model(provider: &str, model_id: &str) -> String {
+    if provider.eq_ignore_ascii_case("zenwarp") {
+        format!("zenwarp/{}", model_id.strip_prefix("zenwarp/").unwrap_or(model_id))
+    } else if provider.eq_ignore_ascii_case("cliproxy") && model_id.starts_with("zen/") {
+        format!("cliproxy/{model_id}")
+    } else if provider.is_empty() || model_id.contains('/') {
+        model_id.to_string()
+    } else {
+        format!("{provider}/{model_id}")
     }
 }
 

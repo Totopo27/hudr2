@@ -68,6 +68,7 @@
 
 ## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)
 - **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped exclusively to the active orchestrator, fallback to `<active_acc_prefix> *` or first account).
+- **Observed ZenWarp Usage:** When the root actor or a direct child session uses `zenwarp/<model>` or `cliproxy/zen/<model>`, renders one actor-attributed row per runtime observation with the dynamic model identifier, direct/CLIProxy route, and working/idle state. Multiple actors using the same model remain separate. The section is omitted when no runtime actor uses ZenWarp; catalogs and quota data never create rows by themselves.
 - **Orchestrator Fleet Breakdown (Diseño Compacto con roles limpios y colapso rev-4r):**
   - Identifies the active orchestrator from Card 4 `Orquestadores` (`Working` -> `Idle` -> `is_default` -> first profile).
   - Inspects only the subagents and orchestrator models configured for that specific orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`). Never mixes subagents from other orchestrators.
