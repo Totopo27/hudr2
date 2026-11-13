@@ -183,9 +183,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let opencode_json = dir.path().join("opencode.json");
-        let mut config = String::from(
-            r#"{"mcp":{"oversized":{"type":"local","enabled":true}}}"#,
-        );
+        let mut config = String::from(r#"{"mcp":{"oversized":{"type":"local","enabled":true}}}"#);
         config.push_str(&" ".repeat(1024 * 1024));
         std::fs::write(opencode_json, config).unwrap();
         let pi_dir = dir.path().join("pi-agent");
@@ -1444,6 +1442,71 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_refresh_all_preserves_in_flight_tool_update_progress() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+            let progress = hudr2::models::ToolUpdateProgress {
+                percent: 42,
+                stage: "descargando".to_string(),
+                spinner_idx: 3,
+                elapsed_secs: 7,
+            };
+            {
+                let mut state = app_state.write().await;
+                state.collapsed_cards[2] = true;
+                state.snapshot.ecosystem = hudr2::models::EcosystemTelemetry {
+                    tools: vec![hudr2::models::ToolVersionInfo {
+                        name: "pi".to_string(),
+                        version: Some("v0.87.0".to_string()),
+                        is_installed: true,
+                        is_updating: true,
+                        update_progress: Some(progress.clone()),
+                        ..Default::default()
+                    }],
+                };
+            }
+
+            // A watcher/Herdr event triggers a full refresh while the update is running.
+            hudr2::app::refresh_all(&app_state).await;
+
+            let state = app_state.read().await;
+            let pi = state
+                .snapshot
+                .ecosystem
+                .tools
+                .iter()
+                .find(|t| t.name == "pi")
+                .expect("refreshed ecosystem must still list pi");
+            assert!(
+                pi.is_updating,
+                "refresh_all must not clear an in-flight update"
+            );
+            assert_eq!(pi.update_progress, Some(progress));
+
+            let render = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
+            let text = render.lines.join("\n");
+            assert!(
+                text.contains("42%]") && text.contains("[actualizando]"),
+                "the progress monitor must stay visible after a refresh"
+            );
+            for tool in state
+                .snapshot
+                .ecosystem
+                .tools
+                .iter()
+                .filter(|t| t.name != "pi")
+            {
+                assert!(!tool.is_updating && tool.update_progress.is_none());
+            }
+        });
+    }
+
     #[tokio::test]
     async fn test_read_project_tree_prioritizes_directories_and_orders_alphabetically() {
         use hudr2::tree::read_project_tree;
@@ -1601,7 +1664,10 @@ mod tests {
         assert!(screen_text.contains("Herramientas"));
 
         // Validar effective_model
-        assert_eq!(state.snapshot.agent_session.effective_model(), "anthropic/claude-3-5-sonnet");
+        assert_eq!(
+            state.snapshot.agent_session.effective_model(),
+            "anthropic/claude-3-5-sonnet"
+        );
         assert_eq!(state.snapshot.agent_session.provider_name, "pi");
         assert_eq!(state.snapshot.agent_session.tool_total, 13);
     }
@@ -1907,7 +1973,10 @@ mod tests {
         st.toggle_card(5); // Colapsar "git"
         assert!(st.collapsed_cards[0]);
         assert!(st.collapsed_cards[5]);
-        assert!(cfg_path.exists(), "El archivo de configuración debe haberse guardado");
+        assert!(
+            cfg_path.exists(),
+            "El archivo de configuración debe haberse guardado"
+        );
 
         // Recargar en un nuevo AppState y comprobar que recuerda las tarjetas colapsadas
         let st2 = AppState::with_config(Some(cfg_path), None);
@@ -1991,7 +2060,10 @@ mod tests {
         let tele = hudr2::engram::read_engram_telemetry(proj_path.to_str().unwrap());
         assert!(tele.online);
         assert_eq!(tele.obs_count, 1);
-        let handoff = tele.last_handoff.as_ref().expect("debe extraer last_handoff");
+        let handoff = tele
+            .last_handoff
+            .as_ref()
+            .expect("debe extraer last_handoff");
         assert_eq!(handoff.id, 77);
         assert!(handoff.lines.iter().any(|l| l.contains("Optimizar hudr2")));
 
@@ -2097,7 +2169,10 @@ mod tests {
         assert_eq!(eff_cla.family, "Claude");
         assert_eq!(eff_cla.rem_5h, 8);
         assert_eq!(eff_cla.rem_wk, 45);
-        assert!(eff_cla.is_critical, "Claude al 8% debe marcarse crítico cuando la sesión usa Claude");
+        assert!(
+            eff_cla.is_critical,
+            "Claude al 8% debe marcarse crítico cuando la sesión usa Claude"
+        );
 
         // 2. Con modelo GPT (compartiendo bucket con Claude cuando no hay bucket GPT separado): crítico (8%)
         let eff_gpt = evaluate_account_for_model(&acc, "gpt-4o");
@@ -2117,7 +2192,11 @@ mod tests {
         state.snapshot.accounts.push(acc);
         state.snapshot.agent_session.model = "claude-sonnet-4-5".to_string();
         state.snapshot.agent_session.local_prefix = Some("proxy_acc".to_string());
-        state.snapshot.agent_session.all_active_prefixes.insert("proxy_acc".to_string());
+        state
+            .snapshot
+            .agent_session
+            .all_active_prefixes
+            .insert("proxy_acc".to_string());
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let screen_clean = ui::strip_ansi(&render_out.lines.join("\n"));
@@ -2183,16 +2262,45 @@ mod tests {
         apply_quota_data(&mut acc, &payload);
 
         // 1. Verificar que Gemini base NO fue sobreescrito por Argon
-        assert_eq!(acc.rem_5h, 99, "Gemini 5h debe reflejar Gemini Models (99%)");
-        assert_eq!(acc.rem_wk, 49, "Gemini Wk debe reflejar Gemini Models (49%), no el 2% de Argon");
-        assert!(!acc.is_critical, "La cuenta base Gemini no debe ser crítica con 49% restante");
+        assert_eq!(
+            acc.rem_5h, 99,
+            "Gemini 5h debe reflejar Gemini Models (99%)"
+        );
+        assert_eq!(
+            acc.rem_wk, 49,
+            "Gemini Wk debe reflejar Gemini Models (49%), no el 2% de Argon"
+        );
+        assert!(
+            !acc.is_critical,
+            "La cuenta base Gemini no debe ser crítica con 49% restante"
+        );
 
         // 2. Verificar que los pools incluyen Gemini, Claude y Argon por separado
-        assert!(acc.pools.iter().any(|p| p.label == "Gemini Wk" && p.percent == 49));
-        assert!(acc.pools.iter().any(|p| p.label == "Gemini 5h" && p.percent == 99));
-        assert!(acc.pools.iter().any(|p| p.label == "Claude Wk" && p.percent == 0));
-        assert!(acc.pools.iter().any(|p| p.label == "Claude 5h" && p.percent == 100));
-        assert!(acc.pools.iter().any(|p| p.label == "Argon Wk" && p.percent == 2));
+        assert!(
+            acc.pools
+                .iter()
+                .any(|p| p.label == "Gemini Wk" && p.percent == 49)
+        );
+        assert!(
+            acc.pools
+                .iter()
+                .any(|p| p.label == "Gemini 5h" && p.percent == 99)
+        );
+        assert!(
+            acc.pools
+                .iter()
+                .any(|p| p.label == "Claude Wk" && p.percent == 0)
+        );
+        assert!(
+            acc.pools
+                .iter()
+                .any(|p| p.label == "Claude 5h" && p.percent == 100)
+        );
+        assert!(
+            acc.pools
+                .iter()
+                .any(|p| p.label == "Argon Wk" && p.percent == 2)
+        );
         // Argon no tiene bucket 5h en Pro plan, no debe inventarse
         assert!(!acc.pools.iter().any(|p| p.label == "Argon 5h"));
 
@@ -2201,7 +2309,10 @@ mod tests {
         assert_eq!(eff_gem.family, "Gemini");
         assert_eq!(eff_gem.rem_5h, 99);
         assert_eq!(eff_gem.rem_wk, 49);
-        assert!(!eff_gem.is_critical, "Gemini Flash High no debe marcarse crítico por cuota de Argon");
+        assert!(
+            !eff_gem.is_critical,
+            "Gemini Flash High no debe marcarse crítico por cuota de Argon"
+        );
         assert!(!eff_gem.is_warning);
 
         // 4. Con cuentas Antigravity (agy3): la cuota principal soberana en Integraciones es GEMINI MODELS.
@@ -2210,12 +2321,18 @@ mod tests {
         let eff_claude = evaluate_account_for_model(&acc, "claude-opus-5-5");
         assert_eq!(eff_claude.family, "Gemini");
         assert_eq!(eff_claude.rem_wk, 49);
-        assert!(!eff_claude.is_critical, "Claude Opus como orquestador no debe marcar crítico agy3 en Integraciones");
+        assert!(
+            !eff_claude.is_critical,
+            "Claude Opus como orquestador no debe marcar crítico agy3 en Integraciones"
+        );
 
         let eff_argon = evaluate_account_for_model(&acc, "gemini-4-argon");
         assert_eq!(eff_argon.family, "Gemini");
         assert_eq!(eff_argon.rem_wk, 49);
-        assert!(!eff_argon.is_critical, "Argon secundario no debe marcar crítico agy3 en Integraciones");
+        assert!(
+            !eff_argon.is_critical,
+            "Argon secundario no debe marcar crítico agy3 en Integraciones"
+        );
 
         // 5. Renderizado en UI:
         // A) Cuando la sesión activa usa Claude Opus:
@@ -2223,7 +2340,11 @@ mod tests {
         state.snapshot.accounts.push(acc.clone());
         state.snapshot.agent_session.model = "claude-opus-5-5".to_string();
         state.snapshot.agent_session.local_prefix = Some("agy3".to_string());
-        state.snapshot.agent_session.all_active_prefixes.insert("agy3".to_string());
+        state
+            .snapshot
+            .agent_session
+            .all_active_prefixes
+            .insert("agy3".to_string());
 
         let render_claude = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let screen_claude = ui::strip_ansi(&render_claude.lines.join("\n"));
@@ -2270,15 +2391,9 @@ mod tests {
             "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678\n",
         )
         .unwrap();
-        assert_eq!(
-            read_git_head_short(&git_dir).as_deref(),
-            Some("a1b2c3d")
-        );
+        assert_eq!(read_git_head_short(&git_dir).as_deref(), Some("a1b2c3d"));
         let (_, dir_gd) = find_git_root_and_dir(tmp.path().to_str().unwrap()).unwrap();
-        assert_eq!(
-            read_git_head_short(&dir_gd).as_deref(),
-            Some("a1b2c3d")
-        );
+        assert_eq!(read_git_head_short(&dir_gd).as_deref(), Some("a1b2c3d"));
 
         // 2. Fallback a packed-refs cuando la rama no tiene archivo suelto
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature/telar\n").unwrap();
@@ -2287,10 +2402,7 @@ mod tests {
             "# pack-refs with: peeled fully-peeled sorted\n9f8e7d6c5b4a39281726354433221100aabbccdd refs/heads/feature/telar\n",
         )
         .unwrap();
-        assert_eq!(
-            read_git_head_short(&git_dir).as_deref(),
-            Some("9f8e7d6")
-        );
+        assert_eq!(read_git_head_short(&git_dir).as_deref(), Some("9f8e7d6"));
 
         // 3. Detached HEAD directo (40 hex chars)
         std::fs::write(
@@ -2298,10 +2410,7 @@ mod tests {
             "deadbeefcafebabe1234567890abcdef12345678\n",
         )
         .unwrap();
-        assert_eq!(
-            read_git_head_short(&git_dir).as_deref(),
-            Some("deadbee")
-        );
+        assert_eq!(read_git_head_short(&git_dir).as_deref(), Some("deadbee"));
 
         // 4. Worktree con archivo .git apuntando a gitdir + commondir
         let wt_git_dir = git_dir.join("worktrees").join("wt1");
@@ -2318,10 +2427,7 @@ mod tests {
         .unwrap();
 
         let (_, wt_gd) = find_git_root_and_dir(wt_root.to_str().unwrap()).unwrap();
-        assert_eq!(
-            read_git_head_short(&wt_gd).as_deref(),
-            Some("9f8e7d6")
-        );
+        assert_eq!(read_git_head_short(&wt_gd).as_deref(), Some("9f8e7d6"));
     }
 
     #[test]
@@ -2496,16 +2602,31 @@ mod tests {
         let clean = ui::strip_ansi(&render_out.lines.join("\n"));
 
         // Comprobar que aparecen los items con sus casillas universales [x] sin símbolos rotos [?]
-        assert!(clean.contains("Personalizar"), "debe mostrar el título Personalizar");
+        assert!(
+            clean.contains("Personalizar"),
+            "debe mostrar el título Personalizar"
+        );
         assert!(clean.contains("[x] Estado"));
         assert!(clean.contains("[x] Contexto"));
         assert!(clean.contains("[x] Proyecto"));
-        assert!(!clean.contains("fija"), "la fila fija redundante fue removida");
-        assert!(!clean.contains("[x] Personalizar"), "no debe listar Personalizar dentro de Personalizar");
+        assert!(
+            !clean.contains("fija"),
+            "la fila fija redundante fue removida"
+        );
+        assert!(
+            !clean.contains("[x] Personalizar"),
+            "no debe listar Personalizar dentro de Personalizar"
+        );
         assert!(clean.contains("Nombre"), "debe incluir sección de Nombre");
         assert!(clean.contains("HUDR2"), "debe indicar nombre por defecto");
-        assert!(clean.contains("[editar >]"), "debe mostrar botón interactivo de editar nombre");
-        assert!(clean.contains("Tema"), "debe incluir sección interactiva de Tema");
+        assert!(
+            clean.contains("[editar >]"),
+            "debe mostrar botón interactivo de editar nombre"
+        );
+        assert!(
+            clean.contains("Tema"),
+            "debe incluir sección interactiva de Tema"
+        );
         assert!(clean.contains("[cambiar >]"));
 
         // Ocultar card "proyecto"
@@ -2551,10 +2672,16 @@ mod tests {
     fn test_tarjetas_cannot_hide_itself() {
         let mut state = AppState::new();
         state.toggle_card_visibility("personalizar");
-        assert!(!state.is_card_hidden("personalizar"), "Personalizar no puede ocultarse a sí misma");
+        assert!(
+            !state.is_card_hidden("personalizar"),
+            "Personalizar no puede ocultarse a sí misma"
+        );
         // Compatibilidad hacia atrás con id legado
         state.toggle_card_visibility("tarjetas");
-        assert!(!state.is_card_hidden("tarjetas"), "id legado tarjetas no puede ocultarse");
+        assert!(
+            !state.is_card_hidden("tarjetas"),
+            "id legado tarjetas no puede ocultarse"
+        );
     }
 
     #[test]
@@ -2588,7 +2715,10 @@ mod tests {
             click_res,
             Some(ClickAction::ToggleCardVisibility("engram".to_string()))
         );
-        assert!(state.is_card_hidden("engram"), "engram debe quedar oculto tras el clic");
+        assert!(
+            state.is_card_hidden("engram"),
+            "engram debe quedar oculto tras el clic"
+        );
     }
 
     #[test]
@@ -2605,7 +2735,10 @@ mod tests {
         st.set_sidebar_name(Some("Mi Proyecto HUD".to_string()));
         st.cycle_theme(); // avanza a "linear"
 
-        assert!(cfg_path.exists(), "hudr2.json debe existir tras persistencia atómica");
+        assert!(
+            cfg_path.exists(),
+            "hudr2.json debe existir tras persistencia atómica"
+        );
 
         // Cargar en un nuevo AppState
         let st2 = AppState::with_config(Some(cfg_path), None);
@@ -2615,7 +2748,10 @@ mod tests {
         assert!(!st2.collapsed_cards[12]); // recuerda el estado colapsado/expandido
         assert_eq!(st2.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
         assert_eq!(st2.theme.as_deref(), Some("linear"));
-        assert_eq!(st2.snapshot.sidebar_name.as_deref(), Some("Mi Proyecto HUD"));
+        assert_eq!(
+            st2.snapshot.sidebar_name.as_deref(),
+            Some("Mi Proyecto HUD")
+        );
         assert_eq!(st2.snapshot.theme_name.as_deref(), Some("linear"));
     }
 
@@ -2647,7 +2783,10 @@ mod tests {
         snap.sidebar_name = Some("Nombre Extremadamente Largo Que Desborda El Panel".to_string());
         let out_narrow = ui::render_screen(&snap, &collapsed, None, 20);
         let narrow_header = &out_narrow.lines[0];
-        assert!(ui::string_width(narrow_header) <= 20, "el header nunca debe exceder el ancho");
+        assert!(
+            ui::string_width(narrow_header) <= 20,
+            "el header nunca debe exceder el ancho"
+        );
     }
 
     #[test]
@@ -2687,8 +2826,17 @@ mod tests {
 
         assert!(!state.is_editing_sidebar_name);
         assert_eq!(state.sidebar_name.as_deref(), Some("Gentle Shell 3"));
-        assert_eq!(state.snapshot.sidebar_name.as_deref(), Some("Gentle Shell 3"));
-        assert!(state.flash_notice.as_ref().unwrap().contains("Gentle Shell 3"));
+        assert_eq!(
+            state.snapshot.sidebar_name.as_deref(),
+            Some("Gentle Shell 3")
+        );
+        assert!(
+            state
+                .flash_notice
+                .as_ref()
+                .unwrap()
+                .contains("Gentle Shell 3")
+        );
 
         // 5. Verificar que el header superior refleja el nuevo nombre
         let render_saved = ui::render_screen_with_diff(
@@ -2802,7 +2950,13 @@ mod tests {
         );
         assert_eq!(state.theme.as_deref(), Some("linear"));
         assert_eq!(hudr2::theme::active_theme().id, "linear");
-        assert!(state.flash_notice.as_ref().unwrap().contains("Linear Studio"));
+        assert!(
+            state
+                .flash_notice
+                .as_ref()
+                .unwrap()
+                .contains("Linear Studio")
+        );
 
         // Siguiente ciclo avanza a "cyber"
         let click_res2 = state.handle_mouse_click(theme_start_line, 0);
@@ -3006,13 +3160,8 @@ mod tests {
             ..Default::default()
         }];
 
-        let session = hudr2::opencode::read_opencode_session(
-            target_dir,
-            &panes,
-            &accounts,
-            None,
-            None,
-        );
+        let session =
+            hudr2::opencode::read_opencode_session(target_dir, &panes, &accounts, None, None);
 
         unsafe {
             std::env::remove_var("OPENCODE_DB_PATH");
@@ -3083,7 +3232,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(hudr2::opencode::resolve_session_table_name(&conn), "session");
+        assert_eq!(
+            hudr2::opencode::resolve_session_table_name(&conn),
+            "session"
+        );
 
         drop(conn);
 
@@ -3109,13 +3261,8 @@ mod tests {
             ..Default::default()
         }];
 
-        let session = hudr2::opencode::read_opencode_session(
-            target_dir,
-            &panes,
-            &accounts,
-            None,
-            None,
-        );
+        let session =
+            hudr2::opencode::read_opencode_session(target_dir, &panes, &accounts, None, None);
 
         unsafe {
             std::env::remove_var("OPENCODE_DB_PATH");
@@ -3129,7 +3276,11 @@ mod tests {
 
     #[test]
     fn test_cpamc_and_parentheses_prefix_attribution_with_accounts() {
-        let known = vec!["cuenta1".to_string(), "cuenta4".to_string(), "cuenta9".to_string()];
+        let known = vec![
+            "cuenta1".to_string(),
+            "cuenta4".to_string(),
+            "cuenta9".to_string(),
+        ];
 
         assert_eq!(
             extract_prefix("", "gemini-3.8-flash-high (cuenta4)", &known).as_deref(),
@@ -3148,7 +3299,9 @@ mod tests {
             Some("cuenta1")
         );
         assert_eq!(
-            hudr2::opencode::clean_model_name("{\"id\":\"cuenta4/gemini-3.8-flash-high\",\"providerID\":\"cpamc\"}"),
+            hudr2::opencode::clean_model_name(
+                "{\"id\":\"cuenta4/gemini-3.8-flash-high\",\"providerID\":\"cpamc\"}"
+            ),
             "cuenta4/gemini-3.8-flash-high"
         );
         assert_eq!(
@@ -3395,7 +3548,10 @@ mod tests {
                 Some(&cache_path),
             );
         }
-        assert!(cache_path.exists(), "quotas_cache.json debe persistirse en disco");
+        assert!(
+            cache_path.exists(),
+            "quotas_cache.json debe persistirse en disco"
+        );
 
         // 2. Simular arranque en frío de otra instancia/panel en Herdr con las 50 cuentas
         clear_quota_runtime_cache();
@@ -3419,20 +3575,21 @@ mod tests {
             .collect();
 
         hydrate_accounts_from_cache(&mut cold_accounts, Some(&cache_path));
-        assert_eq!(cold_accounts[3].rem_5h, 96, "cuenta04 debe hidratar 96% en 0ms");
+        assert_eq!(
+            cold_accounts[3].rem_5h, 96,
+            "cuenta04 debe hidratar 96% en 0ms"
+        );
         assert_ne!(cold_accounts[3].reset_5h, UNFETCHED_RESET);
-        assert_eq!(cold_accounts[49].reset_5h, UNFETCHED_RESET, "cuenta50 sigue nueva");
+        assert_eq!(
+            cold_accounts[49].reset_5h, UNFETCHED_RESET,
+            "cuenta50 sigue nueva"
+        );
 
         // 3. Comando 'r' (selectivo): de 50 cuentas solo debe consultar cuenta04 (activa), cuenta12 (vencida) y cuenta50 (nueva)
         let mut active = HashSet::new();
         active.insert("cuenta04".to_string());
-        let selected_r = select_accounts_for_refresh(
-            &cold_accounts,
-            Some("cuenta04"),
-            &active,
-            false,
-            false,
-        );
+        let selected_r =
+            select_accounts_for_refresh(&cold_accounts, Some("cuenta04"), &active, false, false);
         let prefixes_r: Vec<&str> = selected_r.iter().map(|a| a.prefix.as_str()).collect();
         assert_eq!(
             prefixes_r,
@@ -3441,13 +3598,8 @@ mod tests {
         );
 
         // 4. Comando 'a' (auditar todas): selecciona las 50 pero poniendo cuenta04 en idx 0
-        let selected_a = select_accounts_for_refresh(
-            &cold_accounts,
-            Some("cuenta04"),
-            &active,
-            true,
-            false,
-        );
+        let selected_a =
+            select_accounts_for_refresh(&cold_accounts, Some("cuenta04"), &active, true, false);
         assert_eq!(selected_a.len(), 50);
         assert_eq!(selected_a[0].prefix, "cuenta04");
 
@@ -3623,7 +3775,11 @@ mod tests {
                 "sdd-orchestrator-cuenta4": { "model": "" }
             }
         });
-        std::fs::write(&cfg_path, serde_json::to_string_pretty(&initial_cfg).unwrap()).unwrap();
+        std::fs::write(
+            &cfg_path,
+            serde_json::to_string_pretty(&initial_cfg).unwrap(),
+        )
+        .unwrap();
 
         let res = hudr2::sync::sync_integrations_for_path(&cfg_path)
             .await
@@ -3658,7 +3814,10 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(25));
         std::fs::write(&wal_file, b"wal-newer").unwrap();
         let m2 = hudr2::paths::db_effective_mtime(&db_file).unwrap();
-        assert!(m2 >= m1, "db_effective_mtime debe considerar opencode.db-wal");
+        assert!(
+            m2 >= m1,
+            "db_effective_mtime debe considerar opencode.db-wal"
+        );
 
         let state = AppState::new();
         for w in [36usize, 44, 48] {
@@ -3705,7 +3864,8 @@ mod tests {
 
         // 2. F-01 + A1 + F-03: carpeta multibyte >18 bytes en límite UTF-8, thinking_level, todos, tool_bash y fallback project_dir
         let mut state = AppState::new();
-        state.snapshot.project_dir = "D:/proyectos/documentaci\u{00f3}n_t\u{00e9}cnica_avanzada".to_string();
+        state.snapshot.project_dir =
+            "D:/proyectos/documentaci\u{00f3}n_t\u{00e9}cnica_avanzada".to_string();
         state.snapshot.agent_session.model_short = "gemini-3.8-flash-h".to_string();
         state.snapshot.agent_session.thinking_level = Some("high".to_string());
         state.snapshot.agent_session.tool_bash = 7;
@@ -3741,7 +3901,10 @@ mod tests {
             "Estado debe renderizar thinking_level: {plain}"
         );
         assert!(
-            plain.contains("Tareas") && plain.contains("✓1") && plain.contains("◉1") && plain.contains("○1"),
+            plain.contains("Tareas")
+                && plain.contains("✓1")
+                && plain.contains("◉1")
+                && plain.contains("○1"),
             "Estado debe renderizar resumen de todos: {plain}"
         );
         assert!(
@@ -3921,13 +4084,19 @@ mod tests {
         // 1. Escritura atómica (.{pid}.tmp + rename) sin residuos temporales
         let nested_cfg = tmp.path().join("cfg_sub").join("opencode.json");
         hudr2::paths::atomic_write_bytes(&nested_cfg, br#"{"ok":true}"#).unwrap();
-        assert_eq!(std::fs::read_to_string(&nested_cfg).unwrap(), r#"{"ok":true}"#);
+        assert_eq!(
+            std::fs::read_to_string(&nested_cfg).unwrap(),
+            r#"{"ok":true}"#
+        );
         let leftovers: Vec<_> = std::fs::read_dir(nested_cfg.parent().unwrap())
             .unwrap()
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
-        assert!(leftovers.is_empty(), "No deben quedar archivos .tmp tras atomic_write_bytes");
+        assert!(
+            leftovers.is_empty(),
+            "No deben quedar archivos .tmp tras atomic_write_bytes"
+        );
 
         // 2. Engram en modo WAL + preservación de mayúsculas/minúsculas del proyecto
         let engram_db = tmp.path().join("engram.db");
@@ -4071,7 +4240,10 @@ mod tests {
             &active,
             "cpamc/cuenta4/gemini-3.8-flash-high",
         );
-        assert_eq!(migrated_zero, 0, "Una sesión ya archivada no debe contarse como migrada");
+        assert_eq!(
+            migrated_zero, 0,
+            "Una sesión ya archivada no debe contarse como migrada"
+        );
 
         unsafe {
             std::env::remove_var("ENGRAM_DB_PATH");
@@ -4105,11 +4277,12 @@ mod tests {
         let target_str = repo_dir.to_string_lossy().to_string();
 
         let traversal = read_file_diff_preview(&target_str, "../escaped_secret.txt");
-        assert_eq!(
-            traversal,
-            vec!["[ruta inválida fuera del repositorio]"]
-        );
-        let abs_target = if cfg!(windows) { "C:/test.txt" } else { "/test.txt" };
+        assert_eq!(traversal, vec!["[ruta inválida fuera del repositorio]"]);
+        let abs_target = if cfg!(windows) {
+            "C:/test.txt"
+        } else {
+            "/test.txt"
+        };
         let absolute_escape = read_file_diff_preview(&target_str, abs_target);
         assert_eq!(
             absolute_escape,
@@ -4170,7 +4343,10 @@ mod tests {
 
         // 1. Simulación de config.toml de Herdr con diferentes temas adoptados directamente
         let toml_dracula = "[theme]\nname = \"dracula\"\n";
-        assert_eq!(parse_herdr_theme_name(toml_dracula).as_deref(), Some("dracula"));
+        assert_eq!(
+            parse_herdr_theme_name(toml_dracula).as_deref(),
+            Some("dracula")
+        );
         assert_eq!(adopt_herdr_theme("dracula").id, "dracula");
 
         let toml_nord = "[theme]\nname = \"nord\"\n";
@@ -4178,11 +4354,17 @@ mod tests {
         assert_eq!(adopt_herdr_theme("nord").id, "nord");
 
         let toml_gruvbox_light = "[theme]\nname = 'gruvbox-light'\n";
-        assert_eq!(parse_herdr_theme_name(toml_gruvbox_light).as_deref(), Some("gruvbox-light"));
+        assert_eq!(
+            parse_herdr_theme_name(toml_gruvbox_light).as_deref(),
+            Some("gruvbox-light")
+        );
         assert_eq!(adopt_herdr_theme("gruvbox-light").id, "gruvbox-light");
 
         let toml_catppuccin = "[theme]\nname = \"catppuccin\"\n";
-        assert_eq!(parse_herdr_theme_name(toml_catppuccin).as_deref(), Some("catppuccin"));
+        assert_eq!(
+            parse_herdr_theme_name(toml_catppuccin).as_deref(),
+            Some("catppuccin")
+        );
         assert_eq!(adopt_herdr_theme("catppuccin").id, "catppuccin");
 
         // 2. Comprobar que find_theme resuelve los 5 nativos de HUDR2 y los 14 de Herdr
@@ -4195,7 +4377,10 @@ mod tests {
 
         // Adoptados de Herdr:
         assert_eq!(find_theme("catppuccin").unwrap().id, "catppuccin");
-        assert_eq!(find_theme("catppuccin-latte").unwrap().id, "catppuccin-latte");
+        assert_eq!(
+            find_theme("catppuccin-latte").unwrap().id,
+            "catppuccin-latte"
+        );
         assert_eq!(find_theme("terminal").unwrap().id, "terminal");
         assert_eq!(find_theme("tokyo-night").unwrap().id, "tokyo-night");
         assert_eq!(find_theme("tokyo-night-day").unwrap().id, "tokyo-night-day");
@@ -4261,7 +4446,8 @@ mod tests {
         let res = HerdrClient::request_ipc_at(dummy_pipe, "pane.list", serde_json::json!({}));
         assert!(res.is_none());
 
-        let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(hudr2::state::AppState::new()));
+        let app_state =
+            std::sync::Arc::new(tokio::sync::RwLock::new(hudr2::state::AppState::new()));
         {
             let mut st = app_state.write().await;
             st.set_flash_notice(Some("+ Cuotas (2/9)".to_string()), 5000);
@@ -4388,17 +4574,32 @@ mod tests {
         let render_on = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let text_on = render_on.lines.join("\n");
         assert!(text_on.contains("Stack"));
-        assert!(text_on.contains("\u{2191}1"), "Header debe contener aviso ↑1");
-        assert!(text_on.contains("\u{2191}v3.7.0"), "Fila de engram debe mostrar ↑v3.7.0");
-        assert!(!text_on.contains("\u{2191}v0.9.5"), "Fila de herdr no debe mostrar flecha");
+        assert!(
+            text_on.contains("\u{2191}1"),
+            "Header debe contener aviso ↑1"
+        );
+        assert!(
+            text_on.contains("\u{2191}v3.7.0"),
+            "Fila de engram debe mostrar ↑v3.7.0"
+        );
+        assert!(
+            !text_on.contains("\u{2191}v0.9.5"),
+            "Fila de herdr no debe mostrar flecha"
+        );
 
         // 2. Con check_updates desactivado: se ocultan los avisos de actualización
         state.toggle_check_updates();
         assert!(!state.check_updates);
         let render_off = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         let text_off = render_off.lines.join("\n");
-        assert!(!text_off.contains("\u{2191}1"), "Header no debe mostrar ↑1 cuando check_updates está apagado");
-        assert!(!text_off.contains("\u{2191}v3.7.0"), "Fila no debe mostrar ↑v3.7.0 cuando check_updates está apagado");
+        assert!(
+            !text_off.contains("\u{2191}1"),
+            "Header no debe mostrar ↑1 cuando check_updates está apagado"
+        );
+        assert!(
+            !text_off.contains("\u{2191}v3.7.0"),
+            "Fila no debe mostrar ↑v3.7.0 cuando check_updates está apagado"
+        );
     }
 
     #[test]
@@ -4424,12 +4625,18 @@ mod tests {
 
         // Simular clic en la fila de toggle_check_updates
         let action = st.handle_mouse_click(bound.start_line, 0);
-        assert!(matches!(action, Some(ClickAction::ToggleCheckUpdates(false))));
+        assert!(matches!(
+            action,
+            Some(ClickAction::ToggleCheckUpdates(false))
+        ));
         assert!(!st.check_updates);
 
         // Recargar en un nuevo AppState desde disco para verificar persistencia atómica
         let st2 = AppState::with_config(Some(cfg_path.clone()), None);
-        assert!(!st2.check_updates, "El estado apagado de check_updates debe persistir en hudr2.json");
+        assert!(
+            !st2.check_updates,
+            "El estado apagado de check_updates debe persistir en hudr2.json"
+        );
 
         // Volver a activar con clic
         let mut st3 = AppState::with_config(Some(cfg_path.clone()), None);
@@ -4445,11 +4652,17 @@ mod tests {
             .expect("bound para toggle_check_updates debe existir");
 
         let action2 = st3.handle_mouse_click(bound2.start_line, 0);
-        assert!(matches!(action2, Some(ClickAction::ToggleCheckUpdates(true))));
+        assert!(matches!(
+            action2,
+            Some(ClickAction::ToggleCheckUpdates(true))
+        ));
         assert!(st3.check_updates);
 
         let st4 = AppState::with_config(Some(cfg_path), None);
-        assert!(st4.check_updates, "El estado reactivado debe persistir en disco");
+        assert!(
+            st4.check_updates,
+            "El estado reactivado debe persistir en disco"
+        );
     }
 
     #[test]
@@ -4478,28 +4691,49 @@ mod tests {
 
         // Simular clic en la fila de cycle_sound_mode: Bell -> Native
         let action = st.handle_mouse_click(click_line, 0);
-        assert!(matches!(action, Some(ClickAction::CycleSoundMode(SoundMode::Native))));
+        assert!(matches!(
+            action,
+            Some(ClickAction::CycleSoundMode(SoundMode::Native))
+        ));
         assert_eq!(st.sound_mode, SoundMode::Native);
 
         // Recargar en un nuevo AppState desde disco para verificar persistencia atómica
         let st2 = AppState::with_config(Some(cfg_path.clone()), None);
-        assert_eq!(st2.sound_mode, SoundMode::Native, "El modo Native debe persistir en hudr2.json");
+        assert_eq!(
+            st2.sound_mode,
+            SoundMode::Native,
+            "El modo Native debe persistir en hudr2.json"
+        );
 
         // Simular segundo clic: Native -> Off
         let action2 = st.handle_mouse_click(click_line, 0);
-        assert!(matches!(action2, Some(ClickAction::CycleSoundMode(SoundMode::Off))));
+        assert!(matches!(
+            action2,
+            Some(ClickAction::CycleSoundMode(SoundMode::Off))
+        ));
         assert_eq!(st.sound_mode, SoundMode::Off);
 
         let st3 = AppState::with_config(Some(cfg_path.clone()), None);
-        assert_eq!(st3.sound_mode, SoundMode::Off, "El modo Off debe persistir en hudr2.json");
+        assert_eq!(
+            st3.sound_mode,
+            SoundMode::Off,
+            "El modo Off debe persistir en hudr2.json"
+        );
 
         // Simular tercer clic: Off -> Bell
         let action3 = st.handle_mouse_click(click_line, 0);
-        assert!(matches!(action3, Some(ClickAction::CycleSoundMode(SoundMode::Bell))));
+        assert!(matches!(
+            action3,
+            Some(ClickAction::CycleSoundMode(SoundMode::Bell))
+        ));
         assert_eq!(st.sound_mode, SoundMode::Bell);
 
         let st4 = AppState::with_config(Some(cfg_path), None);
-        assert_eq!(st4.sound_mode, SoundMode::Bell, "El modo Bell debe persistir en hudr2.json");
+        assert_eq!(
+            st4.sound_mode,
+            SoundMode::Bell,
+            "El modo Bell debe persistir en hudr2.json"
+        );
     }
 
     #[test]
@@ -4585,13 +4819,22 @@ mod tests {
 
         // 1. Extracción de split_pane_id desde varios formatos válidos de Herdr
         let val1 = serde_json::json!({ "result": { "pane": { "pane_id": "w11:p2" } } });
-        assert_eq!(HerdrClient::extract_split_pane_id(&val1).as_deref(), Some("w11:p2"));
+        assert_eq!(
+            HerdrClient::extract_split_pane_id(&val1).as_deref(),
+            Some("w11:p2")
+        );
 
         let val2 = serde_json::json!({ "pane": { "pane_id": "w11:p3" } });
-        assert_eq!(HerdrClient::extract_split_pane_id(&val2).as_deref(), Some("w11:p3"));
+        assert_eq!(
+            HerdrClient::extract_split_pane_id(&val2).as_deref(),
+            Some("w11:p3")
+        );
 
         let val3 = serde_json::json!({ "pane_id": "w11:p4" });
-        assert_eq!(HerdrClient::extract_split_pane_id(&val3).as_deref(), Some("w11:p4"));
+        assert_eq!(
+            HerdrClient::extract_split_pane_id(&val3).as_deref(),
+            Some("w11:p4")
+        );
 
         // 2. Value::Null no extrae id
         assert_eq!(HerdrClient::extract_split_pane_id(&Value::Null), None);
@@ -4656,18 +4899,25 @@ mod tests {
 
         // 2. Estado is_updating con monitor de porcentaje en tiempo real
         state.snapshot.ecosystem.tools[0].is_updating = true;
-        state.snapshot.ecosystem.tools[0].update_progress = Some(hudr2::models::ToolUpdateProgress {
-            percent: 45,
-            stage: "descargando".to_string(),
-            spinner_idx: 0,
-            elapsed_secs: 2,
-        });
+        state.snapshot.ecosystem.tools[0].update_progress =
+            Some(hudr2::models::ToolUpdateProgress {
+                percent: 45,
+                stage: "descargando".to_string(),
+                spinner_idx: 0,
+                elapsed_secs: 2,
+            });
         let render_updating = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
         state.card_bounds = render_updating.bounds;
 
         let updating_text = render_updating.lines.join("\n");
-        assert!(updating_text.contains("[⠋ 45%]"), "Debe mostrar el monitor con porcentaje a la izquierda del botón");
-        assert!(updating_text.contains("[\u{2191}]"), "En ancho 48 muestra botón compacto [↑] junto al monitor");
+        assert!(
+            updating_text.contains("[⠋ 45%]"),
+            "Debe mostrar el monitor con porcentaje a la izquierda del botón"
+        );
+        assert!(
+            updating_text.contains("[\u{2191}]"),
+            "En ancho 48 muestra botón compacto [↑] junto al monitor"
+        );
         assert!(
             !state
                 .card_bounds
@@ -4677,16 +4927,42 @@ mod tests {
         );
 
         // 3. Ancho ancho (56 columnas): monitor [⠋ 45%] + [actualizando]
-        let render_updating_56 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
+        let render_updating_56 =
+            ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
         let text_56 = render_updating_56.lines.join("\n");
         assert!(text_56.contains("[⠋ 45%]"));
         assert!(text_56.contains("[actualizando]"));
 
         // 4. Ancho adaptativo estrecho (42 columnas): monitor [⠋ 45%] + botón compacto [↑]
-        let render_updating_42 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
+        let render_updating_42 =
+            ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
         let text_42 = render_updating_42.lines.join("\n");
         assert!(text_42.contains("[⠋ 45%]"));
         assert!(text_42.contains("[\u{2191}]"));
+
+        // 4b. Estado completado (100%): monitor verde [✓ 100%] + [completado]
+        state.snapshot.ecosystem.tools[0].update_progress =
+            Some(hudr2::models::ToolUpdateProgress {
+                percent: 100,
+                stage: "completado".to_string(),
+                spinner_idx: 0,
+                elapsed_secs: 4,
+            });
+        let render_done_56 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
+        let text_done_56 = render_done_56.lines.join("\n");
+        assert!(
+            text_done_56.contains("[✓ 100%]"),
+            "Al 100% debe mostrar [✓ 100%]"
+        );
+        assert!(
+            text_done_56.contains("[completado]"),
+            "En ancho 56 debe mostrar [completado]"
+        );
+
+        let render_done_42 = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
+        let text_done_42 = render_done_42.lines.join("\n");
+        assert!(text_done_42.contains("[✓ 100%]"));
+        assert!(text_done_42.contains("[✓]"));
 
         // 5. Ancho estrecho estándar (36 columnas): botón adaptativo compacto [↑]
         state.snapshot.ecosystem.tools[0].is_updating = false;
@@ -4758,12 +5034,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_claude_api_key_accounts_discovery_and_ui_rendering() {
+    #[test]
+    fn test_claude_api_key_accounts_discovery_and_ui_rendering() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+
         use hudr2::quotas::{
             discover_accounts_for, evaluate_account_for_model, fetch_quota_for_account_with_cache,
-            is_api_key, is_fresh_within, needs_refresh,
-            parse_api_key_accounts_from_opencode_json, parse_api_key_accounts_from_yaml,
+            is_api_key, is_fresh_within, needs_refresh, parse_api_key_accounts_from_opencode_json,
+            parse_api_key_accounts_from_yaml,
         };
 
         // 1. Verificar parseo de config.yaml con cuentas de Claude
@@ -4788,9 +5071,18 @@ api-keys:
 "#;
         let accounts_yaml = parse_api_key_accounts_from_yaml(yaml_sample);
         assert_eq!(accounts_yaml.len(), 3);
-        assert_eq!(accounts_yaml[0], ("tavoclaude".to_string(), "Claude".to_string()));
-        assert_eq!(accounts_yaml[1], ("gianniclaude".to_string(), "Claude".to_string()));
-        assert_eq!(accounts_yaml[2], ("clasclaude".to_string(), "Claude".to_string()));
+        assert_eq!(
+            accounts_yaml[0],
+            ("tavoclaude".to_string(), "Claude".to_string())
+        );
+        assert_eq!(
+            accounts_yaml[1],
+            ("gianniclaude".to_string(), "Claude".to_string())
+        );
+        assert_eq!(
+            accounts_yaml[2],
+            ("clasclaude".to_string(), "Claude".to_string())
+        );
 
         // 2. Verificar parseo de opencode.json models
         let opencode_json_sample = r#"{
@@ -4813,13 +5105,15 @@ api-keys:
         assert!(accounts_opencode.iter().any(|(p, _)| p == "gianniclaude"));
 
         // 3. Crear entorno temporal con config.yaml y probar discover_accounts_for
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("config.yaml");
+        let hudr2_cfg_path = tmp.path().join("hudr2.json");
         std::fs::write(&cfg_path, yaml_sample).unwrap();
+        std::fs::write(&hudr2_cfg_path, "{}").unwrap();
         unsafe {
             std::env::set_var("CLIPROXY_CONFIG_PATH", cfg_path.to_str().unwrap());
             std::env::set_var("CLIPROXY_AUTHS_DIR", tmp.path().to_str().unwrap());
+            std::env::set_var("HUDR2_CONFIG_PATH", hudr2_cfg_path.to_str().unwrap());
         }
 
         let mut discovered = Vec::new();
@@ -4829,14 +5123,16 @@ api-keys:
             std::env::remove_var("CLIPROXY_CONFIG_PATH");
             std::env::remove_var("CLIPROXY_AUTHS_DIR");
         }
-        drop(_guard);
 
         assert_eq!(discovered.len(), 3);
         assert!(discovered.iter().any(|a| a.prefix == "tavoclaude"));
         assert!(discovered.iter().any(|a| a.prefix == "gianniclaude"));
         assert!(discovered.iter().any(|a| a.prefix == "clasclaude"));
 
-        let tavo = discovered.iter().find(|a| a.prefix == "tavoclaude").unwrap();
+        let tavo = discovered
+            .iter()
+            .find(|a| a.prefix == "tavoclaude")
+            .unwrap();
         assert!(is_api_key(tavo));
         assert_eq!(tavo.reset_5h, "api-key");
         assert_eq!(tavo.reset_wk, "api-key");
@@ -4899,36 +5195,80 @@ api-keys:
         assert!(!clean_screen.contains("Claude Wk"));
         assert!(!clean_screen.contains("Claude 5h"));
 
+        unsafe {
+            std::env::remove_var("HUDR2_CONFIG_PATH");
+        }
+
         // Verificar límites de clics interactivos para saldo y facturación oficial
-        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("edit_balance")
-            && b.action_path.as_deref() == Some("clasclaude")));
-        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("open_billing_url")
-            && b.action_path.as_deref() == Some("https://platform.claude.com/spending")));
+        assert!(
+            render_out
+                .bounds
+                .iter()
+                .any(|b| b.action_type == Some("edit_balance")
+                    && b.action_path.as_deref() == Some("clasclaude"))
+        );
+        assert!(
+            render_out
+                .bounds
+                .iter()
+                .any(|b| b.action_type == Some("open_billing_url")
+                    && b.action_path.as_deref() == Some("https://platform.claude.com/spending"))
+        );
         assert!(render_out.bounds.iter().any(|b| b.id == "saldos"));
 
         // 7. Probar mapeo modular de URLs y etiquetas de facturación para diferentes proveedores
         use hudr2::quotas::cliproxy::{provider_billing_label, provider_billing_url};
-        assert_eq!(provider_billing_url("claude"), "https://platform.claude.com/spending");
+        assert_eq!(
+            provider_billing_url("claude"),
+            "https://platform.claude.com/spending"
+        );
         assert_eq!(provider_billing_label("claude"), "Anthropic Console");
-        assert_eq!(provider_billing_url("anthropic"), "https://platform.claude.com/spending");
+        assert_eq!(
+            provider_billing_url("anthropic"),
+            "https://platform.claude.com/spending"
+        );
         assert_eq!(provider_billing_label("anthropic"), "Anthropic Console");
-        assert_eq!(provider_billing_url("deepseek"), "https://platform.deepseek.com/top_up");
+        assert_eq!(
+            provider_billing_url("deepseek"),
+            "https://platform.deepseek.com/top_up"
+        );
         assert_eq!(provider_billing_label("deepseek"), "DeepSeek Platform");
-        assert_eq!(provider_billing_url("google"), "https://aistudio.google.com/");
+        assert_eq!(
+            provider_billing_url("google"),
+            "https://aistudio.google.com/"
+        );
         assert_eq!(provider_billing_label("google"), "Google AI Studio");
-        assert_eq!(provider_billing_url("gemini"), "https://aistudio.google.com/");
+        assert_eq!(
+            provider_billing_url("gemini"),
+            "https://aistudio.google.com/"
+        );
         assert_eq!(provider_billing_label("gemini"), "Google AI Studio");
         assert_eq!(provider_billing_url("opencode"), "https://opencode.ai/zen");
         assert_eq!(provider_billing_label("opencode"), "OpenCode Zen");
-        assert_eq!(provider_billing_url("kimi"), "https://platform.moonshot.cn/console/pay");
+        assert_eq!(
+            provider_billing_url("kimi"),
+            "https://platform.moonshot.cn/console/pay"
+        );
         assert_eq!(provider_billing_label("kimi"), "Moonshot Platform");
-        assert_eq!(provider_billing_url("codex"), "https://chatgpt.com/#settings/Subscription");
+        assert_eq!(
+            provider_billing_url("codex"),
+            "https://chatgpt.com/#settings/Subscription"
+        );
         assert_eq!(provider_billing_label("codex"), "ChatGPT Subscription");
-        assert_eq!(provider_billing_url("openai"), "https://platform.openai.com/settings/organization/billing/overview");
+        assert_eq!(
+            provider_billing_url("openai"),
+            "https://platform.openai.com/settings/organization/billing/overview"
+        );
         assert_eq!(provider_billing_label("openai"), "OpenAI Platform");
-        assert_eq!(provider_billing_url("openrouter"), "https://openrouter.ai/credits");
+        assert_eq!(
+            provider_billing_url("openrouter"),
+            "https://openrouter.ai/credits"
+        );
         assert_eq!(provider_billing_label("openrouter"), "OpenRouter Credits");
-        assert_eq!(provider_billing_url("groq"), "https://console.groq.com/settings/billing");
+        assert_eq!(
+            provider_billing_url("groq"),
+            "https://console.groq.com/settings/billing"
+        );
         assert_eq!(provider_billing_label("groq"), "Groq Console");
 
         // 8. Probar ciclo de vida de edición de saldo interactiva
@@ -4942,6 +5282,7 @@ api-keys:
 
         state.cancel_edit_balance();
         assert!(!state.is_editing_balance);
+        });
     }
 
     #[test]
@@ -4977,6 +5318,7 @@ api-keys:
 
     #[test]
     fn test_claude_api_key_balance_baseline_tracking() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let temp_dir = tempfile::tempdir().unwrap();
         let cfg_path = temp_dir.path().join("hudr2.json");
 
@@ -5020,7 +5362,7 @@ api-keys:
     async fn test_codex_subscription_account_discovery_local_validation_and_ui_rendering() {
         use hudr2::opencode::extract_prefix;
         use hudr2::quotas::{
-            discover_accounts_for, fetch_quota_for_account_with_cache,
+            UNFETCHED_RESET, apply_codex_quota_data, discover_accounts_for,
             hydrate_accounts_from_cache, is_api_key, is_codex_account,
         };
 
@@ -5082,21 +5424,46 @@ api-keys:
 
         assert!(is_codex_account(&codex_acc));
         assert!(!is_api_key(&codex_acc));
-        assert_eq!(codex_acc.reset_5h, "plus");
+        assert_eq!(codex_acc.reset_5h, UNFETCHED_RESET);
+        assert_eq!(codex_acc.reset_wk, UNFETCHED_RESET);
+        assert_eq!(codex_acc.rem_5h, 0);
+        assert_eq!(codex_acc.rem_wk, 0);
         assert!(!codex_acc.has_error);
         assert_eq!(codex_acc.pools.len(), 1);
         assert_eq!(codex_acc.pools[0].label, "Codex Plus");
 
         assert!(is_codex_account(&tavo_acc));
         assert!(!is_api_key(&tavo_acc));
-        assert_eq!(tavo_acc.reset_5h, "plus");
+        assert_eq!(tavo_acc.reset_5h, UNFETCHED_RESET);
+        let unknown_health =
+            hudr2::quotas::evaluate_account_for_model(&tavo_acc, "gpt-5.6-sol");
+        assert!(!unknown_health.is_critical);
+        assert!(!unknown_health.is_warning);
 
-        // 3. Probar fetch_quota_for_account_with_cache: valida localmente sin llamar Google
+        // 3. Aplicar la respuesta real de Codex: una ventana semanal puede venir en primary_window.
         let mut codex_clone = codex_acc.clone();
-        let status = fetch_quota_for_account_with_cache(&mut codex_clone, None).await;
-        assert_eq!(status, 200);
+        let usage = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 91.0,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1800000000
+                },
+                "secondary_window": null
+            }
+        });
+        assert!(apply_codex_quota_data(&mut codex_clone, &usage));
         assert!(!codex_clone.has_error);
-        assert_eq!(codex_clone.rem_5h, 100);
+        assert_eq!(codex_clone.rem_5h, 9);
+        assert_eq!(codex_clone.rem_wk, 9);
+        assert_eq!(codex_clone.pools.len(), 1);
+        assert_eq!(codex_clone.pools[0].label, "Codex Plus Wk");
+        assert_eq!(codex_clone.pools[0].percent, 9);
+
+        let health = hudr2::quotas::evaluate_account_for_model(&codex_clone, "gpt-5.6-sol");
+        assert!(health.is_critical, "9% semanal restante debe ser crítico");
+        assert_eq!(health.rem_wk, 9);
 
         // 4. Probar que una entrada de error en caché no clobbee la cuenta válida
         hydrate_accounts_from_cache(&mut accounts, None);
@@ -5134,7 +5501,7 @@ api-keys:
         let mut state = AppState::new();
         state.collapsed_cards[3] = false; // Integraciones expandida
         state.collapsed_cards[5] = false; // Cuota de Modelos expandida
-        state.snapshot.accounts = vec![codex_acc.clone()];
+        state.snapshot.accounts = vec![codex_clone.clone()];
         state.snapshot.agent_session.local_prefix = Some("codex".to_string());
         state.snapshot.agent_session.cost = 0.45;
         state.snapshot.agent_session.model = "gpt-5.6-sol".to_string();
@@ -5143,14 +5510,57 @@ api-keys:
         let screen = ui::strip_ansi(&render.lines.join("\n"));
 
         assert!(screen.contains("codex"));
-        assert!(screen.contains("[plus]"));
+        assert!(screen.contains("9%"));
         assert!(!screen.contains("[expirado]"));
         assert!(!screen.contains("? codex"));
         assert!(screen.contains("Cuota de Modelos · codex *"));
-        assert!(screen.contains("Codex Plus"));
-        assert!(screen.contains("Suscripción"));
+        assert!(screen.contains("Codex Plus Wk"));
+        assert!(screen.contains("cuota real"));
         // Codex es cuenta de suscripción mensual/semanal, NO debe renderizar la card Saldos API
         assert!(!screen.contains("Saldos API ·"));
+
+        // 7. Sin respuesta remota válida, una flota configurada debe mostrar desconocido.
+        let mut unknown_state = AppState::new();
+        unknown_state.collapsed_cards[3] = false;
+        unknown_state.collapsed_cards[4] = false;
+        unknown_state.collapsed_cards[5] = false;
+        unknown_state.snapshot.accounts = vec![codex_acc];
+        unknown_state.snapshot.orchestrators = vec![hudr2::models::OrchestratorProfile {
+            name: "fleet-codex".to_string(),
+            display_name: "tavocodex".to_string(),
+            model: "codex/gpt-5.6-sol".to_string(),
+            model_short: "gpt-5.6-sol".to_string(),
+            prefix: Some("codex".to_string()),
+            status: hudr2::models::OrchestratorStatus::Working,
+            ..Default::default()
+        }];
+        let unknown_render = ui::render_screen(
+            &unknown_state.snapshot,
+            &unknown_state.collapsed_cards,
+            None,
+            80,
+        );
+        let pools = unknown_render
+            .bounds
+            .iter()
+            .find(|bound| bound.id == "pools")
+            .unwrap();
+        let unknown_screen =
+            ui::strip_ansi(&unknown_render.lines[pools.start_line..=pools.end_line].join("\n"));
+        assert!(unknown_screen.contains("?[sin consultar]"));
+        assert!(!unknown_screen.contains("100%"));
+
+        let integrations = unknown_render
+            .bounds
+            .iter()
+            .find(|bound| bound.id == "integraciones")
+            .unwrap();
+        let integrations_screen = ui::strip_ansi(
+            &unknown_render.lines[integrations.start_line..=integrations.end_line].join("\n"),
+        );
+        assert!(integrations_screen.contains("[sin consultar]"));
+        assert!(!integrations_screen.contains("0%"));
+        assert!(!integrations_screen.contains("AGOTÁNDOSE"));
     }
 
     #[test]
@@ -5265,8 +5675,8 @@ api-keys:
 
     #[test]
     fn test_release_inactive_sessions_strict_cwd_containment_and_no_foreign_workspace_close() {
-        use rusqlite::Connection;
         use hudr2::models::AccountQuota;
+        use rusqlite::Connection;
 
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -5329,7 +5739,10 @@ api-keys:
             Some("none_tab"),
         );
 
-        assert_eq!(rel.closed_count, 1, "Solo debe archivar la sesión del proyecto actual");
+        assert_eq!(
+            rel.closed_count, 1,
+            "Solo debe archivar la sesión del proyecto actual"
+        );
         assert_eq!(rel.released_prefixes, vec!["cuenta1".to_string()]);
 
         // Verificar en SQLite que ses_foreign NO fue archivada (time_archived IS NULL)
@@ -5377,8 +5790,16 @@ api-keys:
         assert_eq!(hudr2::paths::read_capped(&small, 64).unwrap(), b"{\"a\":1}");
         let err = hudr2::paths::read_capped(&big, 64).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
-        assert_eq!(hudr2::paths::read_capped(tmp.path().join("missing"), 64).unwrap_err().kind(), std::io::ErrorKind::NotFound);
-        assert_eq!(hudr2::paths::read_config_string(&small).unwrap(), "{\"a\":1}");
+        assert_eq!(
+            hudr2::paths::read_capped(tmp.path().join("missing"), 64)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            hudr2::paths::read_config_string(&small).unwrap(),
+            "{\"a\":1}"
+        );
     }
 
     #[test]
@@ -5389,9 +5810,13 @@ api-keys:
         let junk = vec![b'x'; PI_MAX_LINE_BYTES / 2 + 1];
         tail.ingest(&junk, false);
         tail.ingest(&junk, false);
-        assert!(tail.pending.is_empty(), "An oversized partial line must not stay buffered");
+        assert!(
+            tail.pending.is_empty(),
+            "An oversized partial line must not stay buffered"
+        );
 
-        let model_line = b"{\"type\":\"model_change\",\"provider\":\"cpamc\",\"modelId\":\"gpt-6.1-sol\"}\n";
+        let model_line =
+            b"{\"type\":\"model_change\",\"provider\":\"cpamc\",\"modelId\":\"gpt-6.1-sol\"}\n";
         let mut rest = junk.clone();
         rest.extend_from_slice(b"tail-of-junk\n");
         rest.extend_from_slice(model_line);
@@ -5416,8 +5841,14 @@ api-keys:
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(frame.contains("feat31m-x"), "Visible text must survive sanitization");
-        assert!(frame.contains("\x1b[38;2;"), "SGR styling must be preserved");
+        assert!(
+            frame.contains("feat31m-x"),
+            "Visible text must survive sanitization"
+        );
+        assert!(
+            frame.contains("\x1b[38;2;"),
+            "SGR styling must be preserved"
+        );
         assert!(!frame.contains("\x1b]") && !frame.contains("\x1b[2J") && !frame.contains("\x1bc"));
         assert!(!frame.contains('\r') && !frame.contains('\x08') && !frame.contains('\u{9b}'));
 
@@ -5427,7 +5858,10 @@ api-keys:
             let seq = &rest[pos..];
             let end = seq.find('m').expect("escape must terminate with 'm'");
             assert!(
-                seq[1..2] == *"[" && seq[2..end].chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':'),
+                seq[1..2] == *"["
+                    && seq[2..end]
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == ';' || c == ':'),
                 "Non-SGR escape leaked: {:?}",
                 &seq[..end.min(16)]
             );
@@ -5435,7 +5869,10 @@ api-keys:
         }
 
         // Plain text has no allocation and no change.
-        assert!(matches!(ui::sanitize_terminal_line("plain"), std::borrow::Cow::Borrowed("plain")));
+        assert!(matches!(
+            ui::sanitize_terminal_line("plain"),
+            std::borrow::Cow::Borrowed("plain")
+        ));
     }
 
     #[test]
@@ -5635,20 +6072,32 @@ api-keys:
         assert!(discovered.len() >= 3);
 
         // fleet-tavo está Working y con cuota crítica (0%) pues su modelo de orquestador usa tavoclaude
-        let tavo = discovered.iter().find(|o| o.name == "fleet-tavo").expect("fleet-tavo debe existir");
+        let tavo = discovered
+            .iter()
+            .find(|o| o.name == "fleet-tavo")
+            .expect("fleet-tavo debe existir");
         assert_eq!(tavo.status, OrchestratorStatus::Working);
-        assert!(tavo.is_critical, "La cuota del orquestador debe reflejar la del modelo principal tavoclaude (0%)");
+        assert!(
+            tavo.is_critical,
+            "La cuota del orquestador debe reflejar la del modelo principal tavoclaude (0%)"
+        );
         assert_eq!(tavo.rem_pct, 0);
 
         // fleet-codex está Offline (no hay sesión ni pane activo para él) y saludable (100%)
-        let codex = discovered.iter().find(|o| o.name == "fleet-codex").expect("fleet-codex debe existir");
+        let codex = discovered
+            .iter()
+            .find(|o| o.name == "fleet-codex")
+            .expect("fleet-codex debe existir");
         assert_eq!(codex.status, OrchestratorStatus::Offline);
         assert!(!codex.is_critical);
         assert_eq!(codex.thinking.as_deref(), Some("high"));
         assert!(codex.is_default);
 
         // gentle-orchestrator está Offline y saludable (80%)
-        let gentle = discovered.iter().find(|o| o.name == "gentle-orchestrator").expect("gentle-orchestrator debe existir");
+        let gentle = discovered
+            .iter()
+            .find(|o| o.name == "gentle-orchestrator")
+            .expect("gentle-orchestrator debe existir");
         assert_eq!(gentle.status, OrchestratorStatus::Offline);
         assert_eq!(gentle.rem_pct, 80);
 
@@ -5671,7 +6120,9 @@ api-keys:
         // En ancho amplio (80 cols), debe mostrar el banner extendido con la sugerencia de migración
         let render_wide = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 80);
         let screen_wide = ui::strip_ansi(&render_wide.lines.join("\n"));
-        assert!(screen_wide.contains("! CR\u{00cd}TICO: fleet-tavo (activo) [presion\u{00e1} 'x' -> migrar a fleet-codex]"));
+        assert!(screen_wide.contains(
+            "! CR\u{00cd}TICO: fleet-tavo (activo) [presion\u{00e1} 'x' -> migrar a fleet-codex]"
+        ));
 
         // 5. Interacción del mouse: clic en el header de Orquestadores (card 4)
         state.card_bounds = render_out.bounds;
@@ -5694,7 +6145,9 @@ api-keys:
     #[test]
     fn test_cuota_de_modelos_orchestrator_fleet_breakdown() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use hudr2::models::{AccountQuota, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::models::{
+            AccountQuota, OrchestratorProfile, OrchestratorStatus, SubAgentProfile,
+        };
         use hudr2::state::{AppState, ClickAction};
 
         let mut state = AppState::new();
@@ -5791,7 +6244,11 @@ api-keys:
         state.snapshot.agent_session.model_short = "claude-opus-5-5".to_string();
 
         // Explore (agy) ya trabajó en esta sesión y ahora está pasivo
-        state.snapshot.agent_session.all_active_prefixes.insert("agy".to_string());
+        state
+            .snapshot
+            .agent_session
+            .all_active_prefixes
+            .insert("agy".to_string());
 
         // 4. Renderizado y verificación
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
@@ -5837,7 +6294,9 @@ api-keys:
     #[test]
     fn test_orchestrators_subagent_disambiguation_and_profile_isolation() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::models::{
+            AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, SubAgentProfile,
+        };
         use hudr2::state::AppState;
 
         let mut state = AppState::new();
@@ -6013,7 +6472,11 @@ api-keys:
         });
 
         let profiles_file = gentle_dir.join("profiles.json");
-        std::fs::write(&profiles_file, serde_json::to_string(&profiles_json).unwrap()).unwrap();
+        std::fs::write(
+            &profiles_file,
+            serde_json::to_string(&profiles_json).unwrap(),
+        )
+        .unwrap();
 
         unsafe {
             std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_file.to_str().unwrap());
@@ -6032,13 +6495,24 @@ api-keys:
         let session = AgentSession::default();
         let panes = vec![];
 
-        let discovered = discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
-        let dup_orch = discovered.iter().find(|o| o.name == "fleet-dup").expect("fleet-dup debe existir");
+        let discovered =
+            discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
+        let dup_orch = discovered
+            .iter()
+            .find(|o| o.name == "fleet-dup")
+            .expect("fleet-dup debe existir");
 
         // Verificación 1: Deduplicación defensiva
         // 'worker' solo debe existir 1 vez en subagents a pesar de estar repetido en el JSON
-        let worker_count = dup_orch.subagents.iter().filter(|s| s.role == "worker").count();
-        assert_eq!(worker_count, 1, "worker no debe aparecer duplicado en la flota de subagentes");
+        let worker_count = dup_orch
+            .subagents
+            .iter()
+            .filter(|s| s.role == "worker")
+            .count();
+        assert_eq!(
+            worker_count, 1,
+            "worker no debe aparecer duplicado en la flota de subagentes"
+        );
 
         // Verificación 2: Truncado inteligente y seguro de roles largos en terminal angosta (38 columnas)
         let mut state = AppState::new();
@@ -6058,7 +6532,10 @@ api-keys:
         for line in &render_narrow.lines[pools_bound.start_line..=pools_bound.end_line] {
             let stripped = ui::strip_ansi(line);
             let w = ui::string_width(&stripped);
-            assert_eq!(w, 38, "Cada fila de la card pools debe medir exactamente 38 caracteres sin desbordar");
+            assert_eq!(
+                w, 38,
+                "Cada fila de la card pools debe medir exactamente 38 caracteres sin desbordar"
+            );
         }
 
         unsafe {
@@ -6067,10 +6544,92 @@ api-keys:
     }
 
     #[test]
-    fn test_sdd_orchestrator_discovery_and_role_cleaning() {
+    fn test_gentle_orchestrator_agents_use_short_names_and_merge_with_fleet_profiles() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession};
         use hudr2::orchestrators::discover_orchestrators;
-        use hudr2::models::{AccountQuota, AgentSession, OrchestratorStatus};
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let profiles_json = serde_json::json!({
+            "profiles": {
+                "fleet-zengem": {
+                    "orchestrator": { "model": "cliproxy/agy/gemini-3.8-flash" }
+                }
+            }
+        });
+        let profiles_file = tmp.path().join("profiles.json");
+        std::fs::write(
+            &profiles_file,
+            serde_json::to_string(&profiles_json).unwrap(),
+        )
+        .unwrap();
+
+        let opencode_json = serde_json::json!({
+            "agent": {
+                "gentle-orchestrator-zengem": {
+                    "mode": "primary",
+                    "model": "cliproxy/agy/gemini-3.8-flash"
+                },
+                "gentle-orchestrator-agy2": {
+                    "mode": "primary",
+                    "model": "cliproxy/agy2/gemini-3.8-flash"
+                },
+                "gentle-orchestrator-codex": {
+                    "mode": "primary",
+                    "model": "cliproxy/tavocodex/gpt-5.6-sol"
+                }
+            }
+        });
+        let opencode_file = tmp.path().join("opencode.json");
+        std::fs::write(
+            &opencode_file,
+            serde_json::to_string(&opencode_json).unwrap(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("OPENCODE_CONFIG_PATH", opencode_file.to_str().unwrap());
+            std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_file.to_str().unwrap());
+        }
+
+        let accounts = vec![AccountQuota {
+            prefix: "agy2".to_string(),
+            auth_file: "agy2.json".to_string(),
+            ..Default::default()
+        }];
+        let discovered = discover_orchestrators(
+            tmp.path().to_str().unwrap(),
+            &accounts,
+            &AgentSession::default(),
+            &[],
+        );
+
+        unsafe {
+            std::env::remove_var("OPENCODE_CONFIG_PATH");
+            std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+        }
+
+        let mut names: Vec<&str> = discovered.iter().map(|o| o.display_name()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["agy2", "tavocodex", "zengem"],
+            "gentle-orchestrator-<x> must display as <x> and merge with fleet-<x>"
+        );
+        let agy2 = discovered
+            .iter()
+            .find(|o| o.display_name() == "agy2")
+            .unwrap();
+        assert_eq!(agy2.name, "gentle-orchestrator-agy2");
+        assert_eq!(agy2.prefix.as_deref(), Some("agy2"));
+    }
+
+    #[test]
+    fn test_configured_sdd_orchestrators_are_discovered_from_opencode() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession};
+        use hudr2::orchestrators::discover_orchestrators;
         use hudr2::state::AppState;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -6098,7 +6657,11 @@ api-keys:
             }
         });
         let opencode_file = tmp.path().join("opencode.json");
-        std::fs::write(&opencode_file, serde_json::to_string_pretty(&opencode_json).unwrap()).unwrap();
+        std::fs::write(
+            &opencode_file,
+            serde_json::to_string_pretty(&opencode_json).unwrap(),
+        )
+        .unwrap();
 
         let empty_profiles = tmp.path().join("empty_profiles.json");
         std::fs::write(&empty_profiles, "{}").unwrap();
@@ -6119,7 +6682,7 @@ api-keys:
         };
         let accounts = vec![agy3_acc];
 
-        // Sesión activa que coincide con Sdd-Orchestrator-Agy3
+        // Una sesión SDD activa debe enlazar con la configuración real de OpenCode.
         let session = AgentSession {
             agent: "Sdd-Orchestrator-Agy3".to_string(),
             agent_status: "working".to_string(),
@@ -6130,15 +6693,20 @@ api-keys:
         };
 
         let panes = vec![];
-        let discovered = discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
+        let discovered =
+            discover_orchestrators(tmp.path().to_str().unwrap(), &accounts, &session, &panes);
 
-        assert_eq!(discovered.len(), 1, "Debe descubrir exactamente el orquestador sdd-agy3 y descartar los subagentes");
-        let orch = &discovered[0];
-        assert_eq!(orch.name, "sdd-orchestrator-agy3");
-        assert_eq!(orch.display_name(), "sdd-agy3");
-        assert_eq!(orch.prefix.as_deref(), Some("agy3"));
-        assert_eq!(orch.status, OrchestratorStatus::Working);
-        assert_eq!(orch.subagents.len(), 3, "Debe tener los 3 subagentes de la suite sdd");
+        assert_eq!(
+            discovered.len(),
+            1,
+            "solo el orquestador SDD primario debe entrar al inventario"
+        );
+        assert_eq!(discovered[0].name, "sdd-orchestrator-agy3");
+        assert_eq!(
+            discovered[0].status,
+            hudr2::models::OrchestratorStatus::Working
+        );
+        assert_eq!(discovered[0].subagents.len(), 3);
 
         let mut state = AppState::new();
         state.collapsed_cards[4] = false; // Orquestadores
@@ -6150,17 +6718,7 @@ api-keys:
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
         let screen = ui::strip_ansi(&render_out.lines.join("\n"));
 
-        // Card Orquestadores muestra sdd-agy3
-        assert!(screen.contains("> sdd-agy3"));
-        assert!(screen.contains("trabajando"));
-
-        // Card Cuota de Modelos muestra el breakdown limpio con 3.8-flash y roles limpios
-        assert!(screen.contains("Cuota de Modelos · sdd-agy3 *"));
-        assert!(screen.contains("> orch"));
-        assert!(screen.contains("explore"));
-        assert!(screen.contains("apply"));
-        assert!(screen.contains("verify"));
-        assert!(screen.contains("3.8-flash"));
+        assert!(screen.contains("sdd-agy3"));
 
         unsafe {
             std::env::remove_var("OPENCODE_CONFIG_PATH");
@@ -6171,7 +6729,10 @@ api-keys:
     #[test]
     fn test_cuota_de_modelos_multiple_simultaneous_active_subagents() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        use hudr2::models::{AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus, SubAgentProfile};
+        use hudr2::models::{
+            AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus,
+            SubAgentProfile,
+        };
         use hudr2::state::AppState;
 
         let mut state = AppState::new();
@@ -6251,10 +6812,19 @@ api-keys:
         let screen = ui::strip_ansi(&render_out.lines.join("\n"));
 
         // AMBOS subagentes activos deben mostrar '>' simultáneamente
-        assert!(screen.contains("> worker"), "Worker debe estar activo con '>'");
-        assert!(screen.contains("> explore"), "Explore debe estar activo simultáneamente con '>'");
+        assert!(
+            screen.contains("> worker"),
+            "Worker debe estar activo con '>'"
+        );
+        assert!(
+            screen.contains("> explore"),
+            "Explore debe estar activo simultáneamente con '>'"
+        );
         // El subagente inactivo debe permanecer en '○'
-        assert!(screen.contains("○ rev-4r"), "rev-4r debe permanecer inactivo en '○'");
+        assert!(
+            screen.contains("○ rev-4r"),
+            "rev-4r debe permanecer inactivo en '○'"
+        );
     }
 
     #[test]
@@ -6330,7 +6900,9 @@ api-keys:
 
     #[test]
     fn test_saldos_api_card_and_dynamic_quota_projection_with_tasks() {
-        use hudr2::models::{AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, QuotaPool};
+        use hudr2::models::{
+            AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, QuotaPool,
+        };
 
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
@@ -6341,7 +6913,13 @@ api-keys:
         }
 
         // 1. Guardar saldo prepago de $20.00 para tavoclaude
-        let _ = hudr2::state::save_account_budget(&cfg_path, "tavoclaude", Some(20.0), 0.0, Some("sess-01".to_string()));
+        let _ = hudr2::state::save_account_budget(
+            &cfg_path,
+            "tavoclaude",
+            Some(20.0),
+            0.0,
+            Some("sess-01".to_string()),
+        );
 
         let mut state = AppState::with_config(Some(cfg_path), None);
         state.collapsed_cards[4] = false; // Orquestadores
@@ -6379,14 +6957,12 @@ api-keys:
             reset_wk: "plus".to_string(),
             rem_5h: 100,
             rem_wk: 100,
-            pools: vec![
-                QuotaPool {
-                    label: "Codex Plus".to_string(),
-                    percent: 100,
-                    reset: "plus".to_string(),
-                    pace: "Suscripción".to_string(),
-                },
-            ],
+            pools: vec![QuotaPool {
+                label: "Codex Plus".to_string(),
+                percent: 100,
+                reset: "plus".to_string(),
+                pace: "Suscripción".to_string(),
+            }],
             ..Default::default()
         };
 
@@ -6399,15 +6975,13 @@ api-keys:
             model_short: "claude-opus-5-5".to_string(),
             prefix: Some("tavoclaude".to_string()),
             status: OrchestratorStatus::Working,
-            subagents: vec![
-                hudr2::models::SubAgentProfile {
-                    role: "worker".to_string(),
-                    model: "claude-opus-5-5".to_string(),
-                    model_short: "claude-opus-5-5".to_string(),
-                    prefix: Some("tavoclaude".to_string()),
-                    thinking: None,
-                },
-            ],
+            subagents: vec![hudr2::models::SubAgentProfile {
+                role: "worker".to_string(),
+                model: "claude-opus-5-5".to_string(),
+                model_short: "claude-opus-5-5".to_string(),
+                prefix: Some("tavoclaude".to_string()),
+                thinking: None,
+            }],
             ..Default::default()
         };
         state.snapshot.orchestrators = vec![orch_tavo];
@@ -6445,10 +7019,20 @@ api-keys:
         assert!(screen.contains("[visitar ->]"));
 
         // Bounds interactivos registrados
-        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("edit_balance")
-            && b.action_path.as_deref() == Some("tavoclaude")));
-        assert!(render_out.bounds.iter().any(|b| b.action_type == Some("open_billing_url")
-            && b.action_path.as_deref() == Some("https://platform.claude.com/spending")));
+        assert!(
+            render_out
+                .bounds
+                .iter()
+                .any(|b| b.action_type == Some("edit_balance")
+                    && b.action_path.as_deref() == Some("tavoclaude"))
+        );
+        assert!(
+            render_out
+                .bounds
+                .iter()
+                .any(|b| b.action_type == Some("open_billing_url")
+                    && b.action_path.as_deref() == Some("https://platform.claude.com/spending"))
+        );
 
         // Verificar sincronización en Cuota de Modelos
         assert!(screen.contains("Cuota de Modelos · tavoclaude"));
@@ -6584,8 +7168,14 @@ api-keys:
 
         let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 54);
         let screen = ui::strip_ansi(&render_out.lines.join("\n"));
-        assert!(screen.contains("○ worker"), "wrong-account worker must stay inactive");
-        assert!(!screen.contains("> worker"), "role alone must not mark a subagent active");
+        assert!(
+            screen.contains("○ worker"),
+            "wrong-account worker must stay inactive"
+        );
+        assert!(
+            !screen.contains("> worker"),
+            "role alone must not mark a subagent active"
+        );
     }
 
     #[test]
@@ -6713,6 +7303,89 @@ api-keys:
     }
 
     #[test]
+    fn test_zenwarp_usage_is_actor_driven_dynamic_and_route_aware() {
+        use hudr2::models::AgentSession;
+        let payload = serde_json::json!({ "data": [
+            { "id": "ses_root", "agent": "gentle-orchestrator", "model": {"providerID": "zenwarp", "id": "new-model-free"}, "time": {"created": 10, "updated": 50, "busy": 11}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_worker_a", "parentID": "ses_root", "agent": "worker-a", "model": {"providerID": "cliproxy", "id": "zen/glm-5.3-flash-free"}, "time": {"created": 20, "updated": 40, "busy": 21}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_worker_b", "parentID": "ses_root", "agent": "worker-b", "model": {"providerID": "cliproxy", "id": "zen/glm-5.3-flash-free"}, "time": {"created": 25, "updated": 45, "busy": 26, "idle": 46}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_unrelated", "parentID": "ses_root", "agent": "explore", "model": {"providerID": "cliproxy", "id": "zenith/not-zenwarp"}, "time": {"created": 30, "updated": 35, "busy": 31}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_similar_provider", "parentID": "ses_root", "agent": "fix", "model": {"providerID": "zenwarp-proxy", "id": "almost-zen"}, "time": {"created": 31, "updated": 36, "busy": 32}, "location": {"directory": "D:/workspace"} },
+            { "id": "ses_direct_qualified", "parentID": "ses_root", "agent": "verify", "model": {"id": "zenwarp/future-model-free"}, "time": {"created": 32, "updated": 34, "busy": 33}, "location": {"directory": "D:/workspace"} }
+        ]});
+        let mut session = AgentSession::default();
+        hudr2::opencode::apply_api_session_telemetry(&mut session, "D:/workspace", &[], &payload);
+        let usages = session.zenwarp_usages();
+        assert_eq!(usages.len(), 4, "only observed ZenWarp actors create rows");
+        assert_eq!(
+            (&usages[0].actor_id, &usages[0].model_id, &usages[0].route),
+            (
+                &"ses_root".to_string(),
+                &"new-model-free".to_string(),
+                &"direct".to_string()
+            )
+        );
+        assert_eq!(usages[1].parent_actor_id.as_deref(), Some("ses_root"));
+        assert_eq!(
+            (&usages[1].model_id, &usages[1].route),
+            (&"glm-5.3-flash-free".to_string(), &"cliproxy".to_string())
+        );
+        assert_eq!(
+            (
+                &usages[2].actor_id,
+                &usages[2].activity_state,
+                usages[2].finished_at
+            ),
+            (&"ses_worker_b".to_string(), &"idle".to_string(), Some(46))
+        );
+        assert_eq!(
+            (&usages[3].model_id, &usages[3].route),
+            (&"future-model-free".to_string(), &"direct".to_string())
+        );
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_ignores_runtime_only_zenwarp_rows() {
+        use hudr2::models::AgentSession;
+        let mut state = AppState::new();
+        state.collapsed_cards[5] = false;
+        state.snapshot.agent_session = AgentSession {
+            session_id: Some("ses_root".to_string()),
+            provider_name: "opencode".to_string(),
+            agent: "gentle-orchestrator".to_string(),
+            model: "zenwarp/new-model-free".to_string(),
+            model_short: "new-model-free".to_string(),
+            agent_status: "working".to_string(),
+            subagent_invocations: vec![hudr2::models::SubagentInvocation {
+                session_id: "ses_worker".to_string(),
+                role: "worker".to_string(),
+                model: "cliproxy/zen/glm-5.3-flash-free".to_string(),
+                model_short: "glm-5.3-flash-free".to_string(),
+                status: "idle".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let rendered = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 120);
+        let pools = rendered
+            .bounds
+            .iter()
+            .find(|bound| bound.id == "pools")
+            .unwrap();
+        let screen = ui::strip_ansi(&rendered.lines[pools.start_line..=pools.end_line].join("\n"));
+        assert!(!screen.contains("ZenWarp usage"));
+        assert!(!screen.contains("new-model-free"));
+        assert!(!screen.contains("glm-5.3-flash-free"));
+        state.snapshot.agent_session = AgentSession::default();
+        let empty = ui::strip_ansi(
+            &ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 120)
+                .lines
+                .join("\n"),
+        );
+        assert!(!empty.contains("ZenWarp usage"));
+    }
+
+    #[test]
     fn test_tabbed_sidebar_rendering_and_card_distribution() {
         use hudr2::state::ActiveTab;
         let mut state = AppState::new();
@@ -6732,12 +7405,27 @@ api-keys:
         );
         let text_sesion = out_sesion.lines.join("\n");
         assert!(text_sesion.contains("Estado"), "Sesión debe incluir Estado");
-        assert!(text_sesion.contains("Contexto"), "Sesión debe incluir Contexto");
+        assert!(
+            text_sesion.contains("Contexto"),
+            "Sesión debe incluir Contexto"
+        );
         assert!(text_sesion.contains("MCP"), "Sesión debe incluir MCP");
-        assert!(!text_sesion.contains("Integraciones"), "Sesión no debe incluir Integraciones");
-        assert!(!text_sesion.contains("Orquestadores"), "Sesión no debe incluir Orquestadores");
-        assert!(!text_sesion.contains("Cambios"), "Sesión no debe incluir Cambios (Git)");
-        assert!(!text_sesion.contains("Engram"), "Sesión no debe incluir Engram");
+        assert!(
+            !text_sesion.contains("Integraciones"),
+            "Sesión no debe incluir Integraciones"
+        );
+        assert!(
+            !text_sesion.contains("Orquestadores"),
+            "Sesión no debe incluir Orquestadores"
+        );
+        assert!(
+            !text_sesion.contains("Cambios"),
+            "Sesión no debe incluir Cambios (Git)"
+        );
+        assert!(
+            !text_sesion.contains("Engram"),
+            "Sesión no debe incluir Engram"
+        );
 
         // 2. Pestaña 2: Código -> Proyecto, Cambios, Herramientas en ese orden exacto
         let out_codigo = ui::render_screen_tabbed(
@@ -6752,19 +7440,43 @@ api-keys:
             Some(ActiveTab::Codigo),
         );
         let text_codigo = out_codigo.lines.join("\n");
-        assert!(text_codigo.contains("Proyecto"), "Código debe incluir Proyecto");
-        assert!(text_codigo.contains("Cambios"), "Código debe incluir Cambios (Git)");
-        assert!(text_codigo.contains("Herramientas"), "Código debe incluir Herramientas");
-        assert!(!text_codigo.contains("Estado"), "Código no debe incluir Estado");
-        assert!(!text_codigo.contains("Integraciones"), "Código no debe incluir Integraciones");
-        assert!(!text_codigo.contains("Orquestadores"), "Código no debe incluir Orquestadores");
+        assert!(
+            text_codigo.contains("Proyecto"),
+            "Código debe incluir Proyecto"
+        );
+        assert!(
+            text_codigo.contains("Cambios"),
+            "Código debe incluir Cambios (Git)"
+        );
+        assert!(
+            text_codigo.contains("Herramientas"),
+            "Código debe incluir Herramientas"
+        );
+        assert!(
+            !text_codigo.contains("Estado"),
+            "Código no debe incluir Estado"
+        );
+        assert!(
+            !text_codigo.contains("Integraciones"),
+            "Código no debe incluir Integraciones"
+        );
+        assert!(
+            !text_codigo.contains("Orquestadores"),
+            "Código no debe incluir Orquestadores"
+        );
 
         // Verificar orden relativo en Código: Proyecto < Cambios < Herramientas
         let pos_proj = text_codigo.find("Proyecto").unwrap();
         let pos_git = text_codigo.find("Cambios").unwrap();
         let pos_tools = text_codigo.find("Herramientas").unwrap();
-        assert!(pos_proj < pos_git, "Proyecto debe aparecer antes de Cambios");
-        assert!(pos_git < pos_tools, "Cambios debe aparecer antes de Herramientas");
+        assert!(
+            pos_proj < pos_git,
+            "Proyecto debe aparecer antes de Cambios"
+        );
+        assert!(
+            pos_git < pos_tools,
+            "Cambios debe aparecer antes de Herramientas"
+        );
 
         // 3. Pestaña 3: Modelos -> Integraciones, Orquestadores, Cuota de Modelos, Saldos API
         state.snapshot.accounts.push(hudr2::models::AccountQuota {
@@ -6788,21 +7500,51 @@ api-keys:
             Some(ActiveTab::Modelos),
         );
         let text_modelos = out_modelos.lines.join("\n");
-        assert!(text_modelos.contains("Integraciones"), "Modelos debe incluir Integraciones");
-        assert!(text_modelos.contains("Orquestadores"), "Modelos debe incluir Orquestadores");
-        assert!(text_modelos.contains("Cuota de Modelos"), "Modelos debe incluir Cuota de Modelos");
-        assert!(text_modelos.contains("Saldos API"), "Modelos debe incluir Saldos API");
-        assert!(!text_modelos.contains("Estado"), "Modelos no debe incluir Estado");
-        assert!(!text_modelos.contains("Proyecto"), "Modelos no debe incluir Proyecto");
-        assert!(!text_modelos.contains("Cambios"), "Modelos no debe incluir Cambios");
+        assert!(
+            text_modelos.contains("Integraciones"),
+            "Modelos debe incluir Integraciones"
+        );
+        assert!(
+            text_modelos.contains("Orquestadores"),
+            "Modelos debe incluir Orquestadores"
+        );
+        assert!(
+            text_modelos.contains("Cuota de Modelos"),
+            "Modelos debe incluir Cuota de Modelos"
+        );
+        assert!(
+            text_modelos.contains("Saldos API"),
+            "Modelos debe incluir Saldos API"
+        );
+        assert!(
+            !text_modelos.contains("Estado"),
+            "Modelos no debe incluir Estado"
+        );
+        assert!(
+            !text_modelos.contains("Proyecto"),
+            "Modelos no debe incluir Proyecto"
+        );
+        assert!(
+            !text_modelos.contains("Cambios"),
+            "Modelos no debe incluir Cambios"
+        );
 
         let pos_int = text_modelos.find("Integraciones").unwrap();
         let pos_orch = text_modelos.find("Orquestadores").unwrap();
         let pos_pools = text_modelos.find("Cuota de Modelos").unwrap();
         let pos_saldos = text_modelos.find("Saldos API").unwrap();
-        assert!(pos_int < pos_orch, "Integraciones debe aparecer antes de Orquestadores");
-        assert!(pos_orch < pos_pools, "Orquestadores debe aparecer antes de Cuota de Modelos");
-        assert!(pos_pools < pos_saldos, "Cuota de Modelos debe aparecer antes de Saldos API");
+        assert!(
+            pos_int < pos_orch,
+            "Integraciones debe aparecer antes de Orquestadores"
+        );
+        assert!(
+            pos_orch < pos_pools,
+            "Orquestadores debe aparecer antes de Cuota de Modelos"
+        );
+        assert!(
+            pos_pools < pos_saldos,
+            "Cuota de Modelos debe aparecer antes de Saldos API"
+        );
 
         // 4. Pestaña 4: Stack -> Engram, Stack · Ecosistema
         let out_stack = ui::render_screen_tabbed(
@@ -6818,9 +7560,18 @@ api-keys:
         );
         let text_stack = out_stack.lines.join("\n");
         assert!(text_stack.contains("Engram"), "Stack debe incluir Engram");
-        assert!(text_stack.contains("Stack"), "Stack debe incluir Stack · Ecosistema");
-        assert!(!text_stack.contains("Estado"), "Stack no debe incluir Estado");
-        assert!(!text_stack.contains("Proyecto"), "Stack no debe incluir Proyecto");
+        assert!(
+            text_stack.contains("Stack"),
+            "Stack debe incluir Stack · Ecosistema"
+        );
+        assert!(
+            !text_stack.contains("Estado"),
+            "Stack no debe incluir Estado"
+        );
+        assert!(
+            !text_stack.contains("Proyecto"),
+            "Stack no debe incluir Proyecto"
+        );
 
         // 5. Pestaña 5: Ajustes -> Personalizar (siempre expandida)
         let out_ajustes = ui::render_screen_tabbed(
@@ -6835,11 +7586,26 @@ api-keys:
             Some(ActiveTab::Ajustes),
         );
         let text_ajustes = out_ajustes.lines.join("\n");
-        assert!(text_ajustes.contains("Personalizar"), "Ajustes debe incluir Personalizar");
-        assert!(text_ajustes.contains("Nombre"), "Ajustes debe mostrar la fila Nombre");
-        assert!(text_ajustes.contains("Tema"), "Ajustes debe mostrar la fila Tema");
-        assert!(text_ajustes.contains("Updates"), "Ajustes debe mostrar la fila Updates");
-        assert!(text_ajustes.contains("Alertas sonoras"), "Ajustes debe mostrar la fila Alertas sonoras");
+        assert!(
+            text_ajustes.contains("Personalizar"),
+            "Ajustes debe incluir Personalizar"
+        );
+        assert!(
+            text_ajustes.contains("Nombre"),
+            "Ajustes debe mostrar la fila Nombre"
+        );
+        assert!(
+            text_ajustes.contains("Tema"),
+            "Ajustes debe mostrar la fila Tema"
+        );
+        assert!(
+            text_ajustes.contains("Updates"),
+            "Ajustes debe mostrar la fila Updates"
+        );
+        assert!(
+            text_ajustes.contains("Alertas sonoras"),
+            "Ajustes debe mostrar la fila Alertas sonoras"
+        );
     }
 
     #[test]
@@ -6950,7 +7716,10 @@ api-keys:
 
         // Verificar persistencia en disco
         let st2 = AppState::with_config(Some(cfg_path.clone()), None);
-        assert!(!st2.tabbed, "El modo vertical (tabbed: false) debe persistir en hudr2.json");
+        assert!(
+            !st2.tabbed,
+            "El modo vertical (tabbed: false) debe persistir en hudr2.json"
+        );
         assert!(!st2.snapshot.tabbed_view);
 
         // Simular segundo clic: false -> true (modo pestañas)
@@ -6960,7 +7729,10 @@ api-keys:
         assert!(st.snapshot.tabbed_view);
 
         let st3 = AppState::with_config(Some(cfg_path), None);
-        assert!(st3.tabbed, "El modo pestañas (tabbed: true) debe persistir en hudr2.json");
+        assert!(
+            st3.tabbed,
+            "El modo pestañas (tabbed: true) debe persistir en hudr2.json"
+        );
         assert!(st3.snapshot.tabbed_view);
     }
 }

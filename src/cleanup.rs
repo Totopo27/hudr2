@@ -60,7 +60,11 @@ fn is_cmd_safe_arg(arg: &str) -> bool {
         .any(|b| matches!(b, b'&' | b'|' | b'<' | b'>' | b'^' | b'%' | b'\r' | b'\n'))
 }
 
-fn build_opencode_api_command(cli: &OpenCodeCli, endpoint: &str, json_body: &str) -> Option<Command> {
+fn build_opencode_api_command(
+    cli: &OpenCodeCli,
+    endpoint: &str,
+    json_body: &str,
+) -> Option<Command> {
     match cli {
         OpenCodeCli::Direct(exe) => {
             let mut cmd = Command::new(exe);
@@ -247,9 +251,10 @@ fn infer_provider_from_model_str(s: &str) -> Option<&'static str> {
         .is_some_and(|h| h.eq_ignore_ascii_case("cpamc/") || h.eq_ignore_ascii_case("cpamc:"))
     {
         Some("cpamc")
-    } else if trimmed.get(..9).is_some_and(|h| {
-        h.eq_ignore_ascii_case("cliproxy/") || h.eq_ignore_ascii_case("cliproxy:")
-    }) {
+    } else if trimmed
+        .get(..9)
+        .is_some_and(|h| h.eq_ignore_ascii_case("cliproxy/") || h.eq_ignore_ascii_case("cliproxy:"))
+    {
         Some("cliproxy")
     } else {
         None
@@ -267,10 +272,7 @@ fn rewrite_migrated_model(
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .and_then(|v| {
             v.get("providerID")
-                .or_else(|| {
-                    v.get("model")
-                        .and_then(|m| m.get("providerID"))
-                })
+                .or_else(|| v.get("model").and_then(|m| m.get("providerID")))
                 .and_then(|p| p.as_str())
                 .filter(|s| !s.trim().is_empty())
                 .map(str::to_string)
@@ -452,8 +454,9 @@ fn update_latest_message_for_migration(
     } else {
         "rowid"
     };
-    let sel_sql =
-        format!("SELECT rowid, data FROM {msg_tbl} WHERE session_id = ? ORDER BY {order_col} DESC LIMIT 1");
+    let sel_sql = format!(
+        "SELECT rowid, data FROM {msg_tbl} WHERE session_id = ? ORDER BY {order_col} DESC LIMIT 1"
+    );
     let Ok((rowid, raw)) = conn.query_row(&sel_sql, [ses_id], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
     }) else {
@@ -568,13 +571,8 @@ pub fn migrate_critical_sessions_for_model(
     };
 
     for (ses_id, raw_agent_opt, raw_model_opt) in session_rows {
-        let (agent_opt, model_opt) = hydrate_row_agent_model(
-            &conn,
-            table,
-            &ses_id,
-            raw_agent_opt,
-            raw_model_opt,
-        );
+        let (agent_opt, model_opt) =
+            hydrate_row_agent_model(&conn, table, &ses_id, raw_agent_opt, raw_model_opt);
         let Some(from_prefix) = match_critical_prefix_for_session(
             agent_opt.as_deref(),
             model_opt.as_deref(),
@@ -595,8 +593,11 @@ pub fn migrate_critical_sessions_for_model(
 
         let changes = if has_agent && has_model {
             let update_sql = format!("UPDATE {table} SET agent = ?, model = ? WHERE id = ?");
-            conn.execute(&update_sql, rusqlite::params![to_agent, to_model_json, ses_id])
-                .unwrap_or(0)
+            conn.execute(
+                &update_sql,
+                rusqlite::params![to_agent, to_model_json, ses_id],
+            )
+            .unwrap_or(0)
         } else if has_model {
             let update_sql = format!("UPDATE {table} SET model = ? WHERE id = ?");
             conn.execute(&update_sql, rusqlite::params![to_model_json, ses_id])
@@ -803,10 +804,7 @@ pub fn release_inactive_sessions(
 
         if let Some(ref session_rec) = s {
             let update_archived_sql = format!("UPDATE {table} SET time_archived = ? WHERE id = ?");
-            let _ = conn.execute(
-                &update_archived_sql,
-                rusqlite::params![now, session_rec.id],
-            );
+            let _ = conn.execute(&update_archived_sql, rusqlite::params![now, session_rec.id]);
             closed_count += 1;
 
             if let Some(pfx) = extract_prefix(
@@ -838,7 +836,11 @@ pub fn release_inactive_sessions(
     let has_dir = has_column(&conn, table, "directory");
     let agent_expr = if has_agent { "agent" } else { "NULL AS agent" };
     let model_expr = if has_model { "model" } else { "NULL AS model" };
-    let dir_expr = if has_dir { "directory" } else { "NULL AS directory" };
+    let dir_expr = if has_dir {
+        "directory"
+    } else {
+        "NULL AS directory"
+    };
     let orphan_sql = format!(
         "SELECT id, {agent_expr}, {model_expr}, {dir_expr} FROM {table} WHERE time_archived IS NULL OR (time_updated IS NOT NULL AND time_archived IS NOT NULL AND time_updated > time_archived)"
     );
@@ -874,18 +876,13 @@ pub fn release_inactive_sessions(
                     continue;
                 }
 
-                let (agent_opt, model_opt) = hydrate_row_agent_model(
-                    &conn,
-                    table,
-                    &orphan_id,
-                    raw_agent_opt,
-                    raw_model_opt,
-                );
+                let (agent_opt, model_opt) =
+                    hydrate_row_agent_model(&conn, table, &orphan_id, raw_agent_opt, raw_model_opt);
 
-                if let Ok(affected) = conn.execute(
-                    &orphan_update_sql,
-                    rusqlite::params![now, orphan_id],
-                ) && affected > 0 {
+                if let Ok(affected) =
+                    conn.execute(&orphan_update_sql, rusqlite::params![now, orphan_id])
+                    && affected > 0
+                {
                     closed_count += 1;
                     if let Some(pfx) = extract_prefix(
                         agent_opt.as_deref().unwrap_or(""),

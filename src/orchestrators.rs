@@ -1,7 +1,9 @@
-use crate::models::{AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus};
+use crate::models::{
+    AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus,
+};
 use crate::paths::{gentle_ai_profiles_candidates, opencode_config_candidates};
 
-/// Descubre y evalúa los perfiles de orquestador configurados en Gentle AI (`profiles.json`)
+/// Descubre y eval├║a los perfiles de orquestador configurados en Gentle AI (`profiles.json`)
 /// y OpenCode (`opencode.json`), determinando su estado operativo (`Working`, `Idle`, `Offline`)
 /// y su salud de cuota soberana basada estrictamente en el modelo asignado al orquestador.
 pub fn discover_orchestrators(
@@ -19,10 +21,7 @@ pub fn discover_orchestrators(
         if let Ok(content) = crate::paths::read_config_string(&cfg_path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&content)
         {
-            let default_name = val
-                .get("default")
-                .and_then(|d| d.as_str())
-                .unwrap_or("");
+            let default_name = val.get("default").and_then(|d| d.as_str()).unwrap_or("");
 
             if let Some(map) = val.get("profiles").and_then(|p| p.as_object()) {
                 for (name, prof) in map {
@@ -37,8 +36,14 @@ pub fn discover_orchestrators(
                         .map(|s| s.to_string());
 
                     let clean = crate::opencode::normalize_model_str(model_raw);
-                    let (mut prefix, model_short) = resolve_prefix_and_short_model(name, &clean, &known_prefixes);
-                    let (display_name, mapped_prefix) = resolve_friendly_orchestrator_name(name, prefix.as_deref(), &clean, &known_prefixes);
+                    let (mut prefix, model_short) =
+                        resolve_prefix_and_short_model(name, &clean, &known_prefixes);
+                    let (display_name, mapped_prefix) = resolve_friendly_orchestrator_name(
+                        name,
+                        prefix.as_deref(),
+                        &clean,
+                        &known_prefixes,
+                    );
                     if prefix.is_none() && mapped_prefix.is_some() {
                         prefix = mapped_prefix;
                     }
@@ -51,17 +56,23 @@ pub fn discover_orchestrators(
                     seen_names.insert(name_low);
                     seen_names.insert(disp_low.clone());
 
-                    let (is_critical, is_warning, rem_pct) =
-                        evaluate_orchestrator_quota_health(accounts, prefix.as_deref(), &model_short, &clean);
+                    let (is_critical, is_warning, rem_pct) = evaluate_orchestrator_quota_health(
+                        accounts,
+                        prefix.as_deref(),
+                        &model_short,
+                        &clean,
+                    );
 
                     let mut subagents = Vec::new();
                     let mut seen_roles = std::collections::HashSet::new();
                     if let Some(prof_map) = prof.as_object() {
-                        if let Some(agents_map) = prof_map.get("agents").and_then(|a| a.as_object()) {
+                        if let Some(agents_map) = prof_map.get("agents").and_then(|a| a.as_object())
+                        {
                             for (role, a_val) in agents_map {
                                 let role_low = role.to_lowercase();
                                 if seen_roles.insert(role_low)
-                                    && let Some(mut sub) = parse_subagent_entry(role, a_val, &known_prefixes)
+                                    && let Some(mut sub) =
+                                        parse_subagent_entry(role, a_val, &known_prefixes)
                                 {
                                     if sub.prefix.is_none() {
                                         sub.prefix = prefix.clone();
@@ -76,7 +87,8 @@ pub fn discover_orchestrators(
                                 && role != "agents"
                                 && a_val.is_object()
                                 && seen_roles.insert(role_low)
-                                && let Some(mut sub) = parse_subagent_entry(role, a_val, &known_prefixes)
+                                && let Some(mut sub) =
+                                    parse_subagent_entry(role, a_val, &known_prefixes)
                             {
                                 if sub.prefix.is_none() {
                                     sub.prefix = prefix.clone();
@@ -138,10 +150,14 @@ pub fn discover_orchestrators(
                         continue;
                     }
 
-                    // Debe ser explícitamente un orquestador
+                    // Debe ser expl├¡citamente un orquestador
                     let is_orch = name_low.contains("orchestrator")
                         || agent_val.get("mode").and_then(|m| m.as_str()) == Some("primary")
-                        || (agent_val.get("permission").and_then(|p| p.get("task")).and_then(|t| t.as_object()).is_some());
+                        || (agent_val
+                            .get("permission")
+                            .and_then(|p| p.get("task"))
+                            .and_then(|t| t.as_object())
+                            .is_some());
                     if !is_orch {
                         continue;
                     }
@@ -151,8 +167,14 @@ pub fn discover_orchestrators(
                         .and_then(|m| m.as_str())
                         .unwrap_or("gpt-5.6-sol");
                     let clean = crate::opencode::normalize_model_str(model_raw);
-                    let (mut prefix, model_short) = resolve_prefix_and_short_model(name, &clean, &known_prefixes);
-                    let (display_name, mapped_prefix) = resolve_friendly_orchestrator_name(name, prefix.as_deref(), &clean, &known_prefixes);
+                    let (mut prefix, model_short) =
+                        resolve_prefix_and_short_model(name, &clean, &known_prefixes);
+                    let (display_name, mapped_prefix) = resolve_friendly_orchestrator_name(
+                        name,
+                        prefix.as_deref(),
+                        &clean,
+                        &known_prefixes,
+                    );
                     if prefix.is_none() && mapped_prefix.is_some() {
                         prefix = mapped_prefix;
                     }
@@ -164,8 +186,12 @@ pub fn discover_orchestrators(
                     seen_names.insert(name_low);
                     seen_names.insert(disp_low.clone());
 
-                    let (is_critical, is_warning, rem_pct) =
-                        evaluate_orchestrator_quota_health(accounts, prefix.as_deref(), &model_short, &clean);
+                    let (is_critical, is_warning, rem_pct) = evaluate_orchestrator_quota_health(
+                        accounts,
+                        prefix.as_deref(),
+                        &model_short,
+                        &clean,
+                    );
 
                     let mut subagents = Vec::new();
                     let mut seen_roles = std::collections::HashSet::new();
@@ -176,11 +202,15 @@ pub fn discover_orchestrators(
                         for am in &agent_maps {
                             for (sub_name, sub_val) in *am {
                                 let sub_low = sub_name.to_lowercase();
-                                if sub_low.starts_with("sdd-") && !sub_low.starts_with("sdd-orchestrator-") {
+                                if sub_low.starts_with("sdd-")
+                                    && !sub_low.starts_with("sdd-orchestrator-")
+                                {
                                     // Verificar si este subagente SDD pertenece a este perfil
-                                    if (sub_low.ends_with(&format!("-{target_suffix}")) || sub_low.ends_with(&format!("_{target_suffix}")))
+                                    if (sub_low.ends_with(&format!("-{target_suffix}"))
+                                        || sub_low.ends_with(&format!("_{target_suffix}")))
                                         && seen_roles.insert(sub_low.clone())
-                                        && let Some(mut sub) = parse_subagent_entry(sub_name, sub_val, &known_prefixes)
+                                        && let Some(mut sub) =
+                                            parse_subagent_entry(sub_name, sub_val, &known_prefixes)
                                     {
                                         if sub.prefix.is_none() {
                                             sub.prefix = prefix.clone();
@@ -191,7 +221,7 @@ pub fn discover_orchestrators(
                             }
                         }
                     } else {
-                        // Orquestador estándar: añadir subagentes explícitos si los declara
+                        // Orquestador est├índar: a├▒adir subagentes expl├¡citos si los declara
                         for am in &agent_maps {
                             for (sub_name, sub_val) in *am {
                                 let sub_low = sub_name.to_lowercase();
@@ -199,7 +229,8 @@ pub fn discover_orchestrators(
                                     && sub_val.is_object()
                                     && is_known_subagent(&sub_low, sub_val)
                                     && seen_roles.insert(sub_low)
-                                    && let Some(mut sub) = parse_subagent_entry(sub_name, sub_val, &known_prefixes)
+                                    && let Some(mut sub) =
+                                        parse_subagent_entry(sub_name, sub_val, &known_prefixes)
                                 {
                                     if sub.prefix.is_none() {
                                         sub.prefix = prefix.clone();
@@ -241,8 +272,8 @@ pub fn discover_orchestrators(
         }
     }
 
-    // Ordenamiento: Primero los que están Working, luego Idle, luego Offline.
-    // Entre el mismo estado: los default primero, y luego orden alfabético por display_name.
+    // Ordenamiento: Primero los que est├ín Working, luego Idle, luego Offline.
+    // Entre el mismo estado: los default primero, y luego orden alfab├®tico por display_name.
     profiles.sort_by(|a, b| {
         let status_order = |s: OrchestratorStatus| match s {
             OrchestratorStatus::Working => 0,
@@ -301,9 +332,10 @@ pub fn resolve_friendly_orchestrator_name(
     let matches_id = |id: &str| {
         pfx_low.as_deref() == Some(id)
             || model_low.contains(id)
-            || known_prefixes
-                .iter()
-                .any(|p| p.to_lowercase() == id && (pfx_low.as_deref() == Some(p.as_str()) || model_low.contains(p.as_str())))
+            || known_prefixes.iter().any(|p| {
+                p.to_lowercase() == id
+                    && (pfx_low.as_deref() == Some(p.as_str()) || model_low.contains(p.as_str()))
+            })
     };
 
     // 1. Gentle AI fleets
@@ -315,10 +347,16 @@ pub fn resolve_friendly_orchestrator_name(
             .or_else(|| Some("tavocodex".to_string()));
         return ("tavocodex".to_string(), pfx);
     }
-    if name_low == "fleet-gianni" || name_low == "gentle-orchestrator-gianni" || name_low == "gianniclaude" {
+    if name_low == "fleet-gianni"
+        || name_low == "gentle-orchestrator-gianni"
+        || name_low == "gianniclaude"
+    {
         return ("gianniclaude".to_string(), Some("gianniclaude".to_string()));
     }
-    if name_low == "fleet-clas" || name_low == "gentle-orchestrator-clas" || name_low == "clasclaude" {
+    if name_low == "fleet-clas"
+        || name_low == "gentle-orchestrator-clas"
+        || name_low == "clasclaude"
+    {
         return ("clasclaude".to_string(), Some("clasclaude".to_string()));
     }
     if name_low == "fleet-tavo" || name_low == "tavoclaude" {
@@ -351,7 +389,13 @@ pub fn resolve_friendly_orchestrator_name(
         return (name_low.to_string(), Some(suffix.to_string()));
     }
 
-    if let Some(rest) = name_low.strip_prefix("fleet-") {
+    // OpenCode `gentle-orchestrator-<x>` and Gentle AI `fleet-<x>` describe the same
+    // orchestrator; both display as the short `<x>` so discovery merges them.
+    if let Some(rest) = name_low
+        .strip_prefix("fleet-")
+        .or_else(|| name_low.strip_prefix("gentle-orchestrator-"))
+        .filter(|rest| !rest.is_empty())
+    {
         let pfx = prefix_opt
             .map(|s| s.to_string())
             .or_else(|| known_prefixes.iter().find(|p| p.contains(rest)).cloned());
@@ -404,7 +448,7 @@ fn resolve_prefix_and_short_model(
     (pfx, clean_model.to_string())
 }
 
-/// Evalúa la salud de cuota de forma SOBERANA para el modelo específico del orquestador.
+/// Eval├║a la salud de cuota de forma SOBERANA para el modelo espec├¡fico del orquestador.
 fn evaluate_orchestrator_quota_health(
     accounts: &[AccountQuota],
     prefix_opt: Option<&str>,
@@ -457,7 +501,7 @@ fn match_boundary(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// Determina si un perfil de orquestador está Working, Idle o Offline,
+/// Determina si un perfil de orquestador est├í Working, Idle o Offline,
 /// evaluando tanto la identidad del orquestador como la pertenencia estricta de subagentes activos.
 #[allow(clippy::too_many_arguments)]
 fn resolve_orchestrator_status(
@@ -478,8 +522,22 @@ fn resolve_orchestrator_status(
         let pane_prof = p.tokens.get("profile").map(|s| s.as_str());
         let pane_agent = p.agent.as_deref();
         let pane_title = p.terminal_title.as_deref().unwrap_or("");
-        let hit = pane_prof.map(|pr| pr.eq_ignore_ascii_case(profile_name) || pr.eq_ignore_ascii_case(display_name) || match_boundary(&pr.to_lowercase(), &name_low) || match_boundary(&pr.to_lowercase(), &disp_low)).unwrap_or(false)
-            || pane_agent.map(|ag| ag.eq_ignore_ascii_case(profile_name) || ag.eq_ignore_ascii_case(display_name) || match_boundary(&ag.to_lowercase(), &name_low) || match_boundary(&ag.to_lowercase(), &disp_low)).unwrap_or(false)
+        let hit = pane_prof
+            .map(|pr| {
+                pr.eq_ignore_ascii_case(profile_name)
+                    || pr.eq_ignore_ascii_case(display_name)
+                    || match_boundary(&pr.to_lowercase(), &name_low)
+                    || match_boundary(&pr.to_lowercase(), &disp_low)
+            })
+            .unwrap_or(false)
+            || pane_agent
+                .map(|ag| {
+                    ag.eq_ignore_ascii_case(profile_name)
+                        || ag.eq_ignore_ascii_case(display_name)
+                        || match_boundary(&ag.to_lowercase(), &name_low)
+                        || match_boundary(&ag.to_lowercase(), &disp_low)
+                })
+                .unwrap_or(false)
             || match_boundary(&pane_title.to_lowercase(), &name_low)
             || match_boundary(&pane_title.to_lowercase(), &disp_low);
 
@@ -491,20 +549,24 @@ fn resolve_orchestrator_status(
         }
     }
 
-    // 2. Coincidencia directa de la sesión activa con el orquestador mismo
+    // 2. Coincidencia directa de la sesi├│n activa con el orquestador mismo
     let sess_low = active_session.agent.to_lowercase();
 
     let is_orch_name = sess_low == name_low
         || sess_low == disp_low
         || match_boundary(&sess_low, &name_low)
         || match_boundary(&sess_low, &disp_low)
-        || (disp_low == "tavocodex" && (match_boundary(&sess_low, "codex") || sess_low == "gentle-orchestrator-codex"))
-        || (disp_low == "tavoclaude" && (sess_low == "gentle-orchestrator" || match_boundary(&sess_low, "tavo")))
+        || (disp_low == "tavocodex"
+            && (match_boundary(&sess_low, "codex") || sess_low == "gentle-orchestrator-codex"))
+        || (disp_low == "tavoclaude"
+            && (sess_low == "gentle-orchestrator" || match_boundary(&sess_low, "tavo")))
         || (disp_low == "gianniclaude" && match_boundary(&sess_low, "gianni"))
         || (disp_low == "clasclaude" && match_boundary(&sess_low, "clas"));
 
     let is_generic_orch = active_session.agent.eq_ignore_ascii_case("orchestrator")
-        || active_session.agent.eq_ignore_ascii_case("gentle-orchestrator")
+        || active_session
+            .agent
+            .eq_ignore_ascii_case("gentle-orchestrator")
         || active_session.agent.eq_ignore_ascii_case("pi")
         || active_session.agent.eq_ignore_ascii_case("gentle-shell")
         || active_session.agent.to_lowercase().contains("orchestrator");
@@ -548,9 +610,14 @@ fn resolve_orchestrator_status(
                 .as_deref()
                 .map(|lp| lp.eq_ignore_ascii_case(spfx))
                 .unwrap_or(false)
-                || active_session.model.to_lowercase().contains(&spfx.to_lowercase())
+                || active_session
+                    .model
+                    .to_lowercase()
+                    .contains(&spfx.to_lowercase())
         } else {
-            active_session.model_short.eq_ignore_ascii_case(&sub.model_short)
+            active_session
+                .model_short
+                .eq_ignore_ascii_case(&sub.model_short)
                 || active_session.model.eq_ignore_ascii_case(&sub.model)
         }
     });

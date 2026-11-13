@@ -24,6 +24,7 @@ pub const UNFETCHED_RESET: &str = "...";
 
 /// Segundos de enfriamiento preventivo para cuentas inactivas tras recibir HTTP 429 de Google.
 const RATE_LIMIT_COOLDOWN_SECS: i64 = 90;
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
 static RATE_LIMIT_UNTIL_EPOCH: AtomicI64 = AtomicI64::new(0);
 
@@ -210,11 +211,19 @@ pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Op
 
         let now_epoch = chrono::Utc::now().timestamp();
         if let Some(ref data) = rec.data {
-            apply_quota_data(acc, data);
+            if is_codex_account(acc) {
+                if !apply_codex_quota_data(acc, data) {
+                    mark_quota_unknown(acc, "respuesta sin cuota");
+                }
+            } else {
+                apply_quota_data(acc, data);
+            }
         }
         if let Some(status) = rec.error_status {
             let ttl = error_retry_ttl_secs(status);
-            if rec.data.is_none() || matches!(status, 401 | 403) || (now_epoch - rec.fetched_at) < ttl
+            if rec.data.is_none()
+                || matches!(status, 401 | 403)
+                || (now_epoch - rec.fetched_at) < ttl
             {
                 if status == 0 {
                     acc.has_error = true;
@@ -322,6 +331,9 @@ pub fn needs_refresh(acc: &AccountQuota) -> bool {
     if let Some(status) = rec.error_status {
         return (now_epoch - rec.fetched_at) >= error_retry_ttl_secs(status);
     }
+    if is_codex_account(acc) {
+        return now_epoch - rec.fetched_at >= 60;
+    }
     if let Some(ref data) = rec.data {
         has_expired_bucket_window(data, rec.fetched_at, now_epoch)
     } else {
@@ -350,16 +362,17 @@ pub fn is_fresh_within(acc: &AccountQuota, max_age_secs: i64) -> bool {
 
 /// Indica si una cuenta aún no ha recibido ninguna respuesta (ni datos ni error) del endpoint de cuotas.
 pub fn is_unfetched(acc: &AccountQuota) -> bool {
-    !is_api_key(acc)
-        && !acc.has_error
-        && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
+    !is_api_key(acc) && !acc.has_error && (acc.pools.is_empty() || acc.reset_5h == UNFETCHED_RESET)
 }
 
 /// Comprueba si una cuenta corresponde a una suscripción o autenticación OAuth de OpenAI Codex
 pub fn is_codex_account(acc: &AccountQuota) -> bool {
     acc.prefix.to_lowercase().contains("codex")
         || acc.auth_file.to_lowercase().contains("codex")
-        || matches!(acc.reset_5h.as_str(), "plus" | "pro" | "team" | "free" | "codex")
+        || matches!(
+            acc.reset_5h.as_str(),
+            "plus" | "pro" | "team" | "free" | "codex"
+        )
 }
 
 /// Comprueba si una cuenta corresponde a un perfil configurado vía API Key (prepago/saldo por tokens)
@@ -573,8 +586,8 @@ pub fn is_available_for(target_dir: &str) -> bool {
     }
 
     // Comprobar modelos en opencode.json si no hay entorno de auths explícito
-    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
-        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    let has_explicit_auths =
+        std::env::var("CLIPROXY_AUTHS_DIR").is_ok() || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
         for cfg in opencode_config_candidates(target_dir) {
             if let Ok(c) = crate::paths::read_config_string(&cfg)
@@ -798,7 +811,10 @@ pub fn api_account_attributed_usage(
             )
         })
         .fold((0.0, 0usize), |(cost, tasks), invocation| {
-            (cost + invocation.cost, tasks + usize::from(invocation.cost > 0.0))
+            (
+                cost + invocation.cost,
+                tasks + usize::from(invocation.cost > 0.0),
+            )
         });
     if child_cost > 0.0 || child_tasks > 0 {
         return (child_cost, child_tasks);
@@ -841,7 +857,10 @@ pub fn calculate_api_key_balance(
             let (budget, baseline, saved_sid) = if let Some(b) = custom.as_f64() {
                 (b, 0.0, None)
             } else if let Some(b) = custom.get("budget").and_then(|v| v.as_f64()) {
-                let base = custom.get("baseline_cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let base = custom
+                    .get("baseline_cost")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 let sid = custom.get("session_id").and_then(|v| v.as_str());
                 (b, base, sid)
             } else {
@@ -964,10 +983,7 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     .or_else(|| raw_stem.strip_prefix("oauth-"))
                     .unwrap_or(raw_stem);
 
-                let cred_type = val
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let cred_type = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 let is_antigravity = cred_type.eq_ignore_ascii_case("antigravity")
                     || raw_stem.to_ascii_lowercase().contains("antigravity")
                     || raw_stem.to_ascii_lowercase().contains("google")
@@ -1034,10 +1050,13 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         }
                     };
 
-                    let plan = val
-                        .get("plan_type")
-                        .and_then(|p| p.as_str())
-                        .unwrap_or(if provider_name == "Codex" { "plus" } else { "sub" });
+                    let plan = val.get("plan_type").and_then(|p| p.as_str()).unwrap_or(
+                        if provider_name == "Codex" {
+                            "plus"
+                        } else {
+                            "sub"
+                        },
+                    );
 
                     let badge = if plan.is_empty() {
                         provider_name.to_lowercase()
@@ -1054,21 +1073,12 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         _ => plan,
                     };
 
-                    let mut pools = vec![QuotaPool {
+                    let pools = vec![QuotaPool {
                         label: format!("{provider_name} {plan_display}"),
-                        percent: 100,
-                        reset: badge.clone(),
-                        pace: "Suscripción".to_string(),
+                        percent: 0,
+                        reset: UNFETCHED_RESET.to_string(),
+                        pace: "sin consultar".to_string(),
                     }];
-
-                    if let Some(user_budget) = get_user_configured_budget(&prefix) {
-                        pools.push(QuotaPool {
-                            label: format!("{provider_name} Saldo"),
-                            percent: 100,
-                            reset: badge.clone(),
-                            pace: format!("${user_budget:.2}"),
-                        });
-                    }
 
                     let is_disabled = val
                         .get("disabled")
@@ -1095,8 +1105,10 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     {
                         existing.prefix = prefix;
                         existing.auth_file = path_str;
-                        existing.reset_5h = badge.clone();
-                        existing.reset_wk = badge;
+                        existing.rem_5h = 0;
+                        existing.rem_wk = 0;
+                        existing.reset_5h = UNFETCHED_RESET.to_string();
+                        existing.reset_wk = UNFETCHED_RESET.to_string();
                         existing.has_error = has_error;
                         existing.error_msg = error_msg;
                         if existing.pools.is_empty()
@@ -1108,10 +1120,10 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         target_list.push(AccountQuota {
                             prefix,
                             auth_file: path_str,
-                            rem_5h: 100,
-                            reset_5h: badge.clone(),
-                            rem_wk: 100,
-                            reset_wk: badge,
+                            rem_5h: 0,
+                            reset_5h: UNFETCHED_RESET.to_string(),
+                            rem_wk: 0,
+                            reset_wk: UNFETCHED_RESET.to_string(),
                             is_critical: false,
                             is_warning: false,
                             has_error,
@@ -1192,8 +1204,8 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
     }
 
     // 3. Descubrimiento de perfiles de orquestador / modelos en opencode.json
-    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
-        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    let has_explicit_auths =
+        std::env::var("CLIPROXY_AUTHS_DIR").is_ok() || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
         for cfg_path in opencode_config_candidates(target_dir) {
             if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
@@ -1208,7 +1220,12 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     }
                     seen_prefixes.insert(p_low);
 
-                    register_or_update_api_key_account(target_list, &prefix, &provider, &auth_file_str);
+                    register_or_update_api_key_account(
+                        target_list,
+                        &prefix,
+                        &provider,
+                        &auth_file_str,
+                    );
                 }
             }
         }
@@ -1229,7 +1246,12 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                     }
                     seen_prefixes.insert(p_low);
 
-                    register_or_update_api_key_account(target_list, &prefix, &provider, &auth_file_str);
+                    register_or_update_api_key_account(
+                        target_list,
+                        &prefix,
+                        &provider,
+                        &auth_file_str,
+                    );
                 }
             }
         }
@@ -1283,7 +1305,106 @@ pub async fn fetch_quota_for_account_with_cache(
         return 200;
     }
 
-    // 2. Cuentas OAuth de plataforma / suscripción (Codex, Claude OAuth, Kimi, Muse, xAI, etc.):
+    // 2. Suscripciones Codex: consultar las ventanas reales de uso de OpenAI.
+    if is_codex_account(acc) {
+        let raw = match crate::paths::read_config_string(Path::new(&acc.auth_file)) {
+            Ok(raw) => raw,
+            Err(_) => {
+                mark_quota_unknown(acc, "credencial no disponible");
+                return 0;
+            }
+        };
+        let credential: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => {
+                mark_quota_unknown(acc, "credencial inválida");
+                return 0;
+            }
+        };
+        if credential.get("disabled").and_then(|v| v.as_bool()) == Some(true) {
+            mark_quota_unknown(acc, "deshabilitado");
+            return 200;
+        }
+        if let Some(exp_str) = credential.get("expired").and_then(|v| v.as_str())
+            && let Ok(expiry) = chrono::DateTime::parse_from_rfc3339(exp_str)
+            && expiry.timestamp() < chrono::Utc::now().timestamp()
+        {
+            mark_quota_unknown(acc, "expirado");
+            return 200;
+        }
+
+        let token = credential
+            .get("access_token")
+            .or_else(|| credential.pointer("/tokens/access_token"))
+            .and_then(|v| v.as_str());
+        let Some(token) = token else {
+            mark_quota_unknown(acc, "token no disponible");
+            return 0;
+        };
+        let account_id = credential
+            .get("account_id")
+            .or_else(|| credential.pointer("/tokens/account_id"))
+            .and_then(|v| v.as_str());
+
+        let mut request = crate::config::HTTP_CLIENT
+            .get(CODEX_USAGE_URL)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/json")
+            .header("OpenAI-Beta", "codex-1")
+            .header("originator", "codex_cli_rs")
+            .header("User-Agent", USER_AGENT);
+        if let Some(account_id) = account_id {
+            request = request.header("ChatGPT-Account-ID", account_id);
+        }
+
+        match request.send().await {
+            Ok(response) => {
+                let status = response.status().as_u16();
+                if response.status().is_success() {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(data) if apply_codex_quota_data(acc, &data) => {
+                            record_cached_codex_quota_at(
+                                acc,
+                                &data,
+                                chrono::Utc::now().timestamp(),
+                                cache_path,
+                            );
+                        }
+                        _ => mark_quota_unknown(acc, "respuesta sin cuota"),
+                    }
+                } else {
+                    let message = match status {
+                        401 => "expirado",
+                        403 => "acceso denegado",
+                        429 => "rate limited",
+                        _ => "cuota no disponible",
+                    };
+                    mark_quota_unknown(acc, message);
+                    record_cached_quota_error_at(
+                        acc,
+                        status,
+                        &serde_json::Value::Null,
+                        chrono::Utc::now().timestamp(),
+                        cache_path,
+                    );
+                }
+                return status;
+            }
+            Err(_) => {
+                mark_quota_unknown(acc, "sin red");
+                record_cached_quota_error_at(
+                    acc,
+                    0,
+                    &serde_json::Value::Null,
+                    chrono::Utc::now().timestamp(),
+                    cache_path,
+                );
+                return 0;
+            }
+        }
+    }
+
+    // 3. Cuentas OAuth de plataforma / suscripción (Claude OAuth, Kimi, Muse, xAI, etc.):
     // Tienen pools asignados y reset propio (no UNFETCHED_RESET), validan vigencia en disco
     // sin enviar tokens a QUOTA_URL de Google
     if !is_antigravity_account(acc) && (!acc.pools.is_empty() && acc.reset_5h != UNFETCHED_RESET) {
@@ -1313,7 +1434,7 @@ pub async fn fetch_quota_for_account_with_cache(
         return 200;
     }
 
-    // 3. Cuentas Google Antigravity (y mocks de prueba) que consultan QUOTA_URL de Google
+    // 4. Cuentas Google Antigravity (y mocks de prueba) que consultan QUOTA_URL de Google
     if !Path::new(&acc.auth_file).exists() {
         return 0;
     }
@@ -1410,6 +1531,160 @@ pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_js
     }
 }
 
+fn mark_quota_unknown(acc: &mut AccountQuota, message: &str) {
+    acc.rem_5h = 0;
+    acc.rem_wk = 0;
+    acc.reset_5h = UNFETCHED_RESET.to_string();
+    acc.reset_wk = UNFETCHED_RESET.to_string();
+    acc.is_critical = false;
+    acc.is_warning = false;
+    acc.has_error = true;
+    acc.error_msg = message.to_string();
+    for pool in &mut acc.pools {
+        pool.percent = 0;
+        pool.reset = UNFETCHED_RESET.to_string();
+        pool.pace = "desconocida".to_string();
+    }
+}
+
+fn codex_plan_label(data: &serde_json::Value, acc: &AccountQuota) -> String {
+    let raw = data
+        .get("plan_type")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            acc.pools.first().and_then(|pool| {
+                pool.label
+                    .strip_prefix("Codex ")
+                    .and_then(|rest| rest.split_whitespace().next())
+            })
+        })
+        .unwrap_or("Codex");
+    match raw.to_ascii_lowercase().as_str() {
+        "plus" => "Plus".to_string(),
+        "pro" => "Pro".to_string(),
+        "team" => "Team".to_string(),
+        "free" => "Free".to_string(),
+        _ => raw.replace('_', " "),
+    }
+}
+
+fn codex_reset_label(window: &serde_json::Value) -> String {
+    if let Some(reset_at) = window.get("reset_at").and_then(|value| value.as_i64()) {
+        let now = chrono::Utc::now().timestamp();
+        let remaining = reset_at.saturating_sub(now);
+        let days = remaining / 86_400;
+        let hours = (remaining % 86_400) / 3_600;
+        return if days > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{hours}h")
+        };
+    }
+    if let Some(seconds) = window
+        .get("reset_after_seconds")
+        .and_then(|value| value.as_i64())
+    {
+        let days = seconds / 86_400;
+        let hours = (seconds % 86_400) / 3_600;
+        return if days > 0 {
+            format!("{days}d {hours}h")
+        } else {
+            format!("{hours}h")
+        };
+    }
+    UNFETCHED_RESET.to_string()
+}
+
+/// Aplica la respuesta de `wham/usage`, clasificando cada ventana por su duración real.
+/// Codex puede devolver una cuenta semanal-only en `primary_window`, por lo que la posición
+/// de la ventana no determina si es de sesión o semanal.
+pub fn apply_codex_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) -> bool {
+    let rate_limit = data.get("rate_limit").unwrap_or(data);
+    let plan = codex_plan_label(data, acc);
+    let mut five_hour: Option<(u8, String)> = None;
+    let mut weekly: Option<(u8, String)> = None;
+
+    for slot in ["primary_window", "secondary_window"] {
+        let Some(window) = rate_limit.get(slot).filter(|value| value.is_object()) else {
+            continue;
+        };
+        let Some(used) = window.get("used_percent").and_then(|value| value.as_f64()) else {
+            continue;
+        };
+        let remaining = (100.0 - used).clamp(0.0, 100.0).round() as u8;
+        let reset = codex_reset_label(window);
+        let duration = window
+            .get("limit_window_seconds")
+            .and_then(|value| value.as_i64());
+        match duration {
+            Some(seconds) if seconds >= 86_400 => weekly = Some((remaining, reset)),
+            Some(_) => five_hour = Some((remaining, reset)),
+            None if slot == "secondary_window" => weekly = Some((remaining, reset)),
+            None => five_hour = Some((remaining, reset)),
+        }
+    }
+
+    if five_hour.is_none() && weekly.is_none() {
+        return false;
+    }
+
+    let summary = five_hour.as_ref().or(weekly.as_ref()).unwrap();
+    let weekly_summary = weekly.as_ref().unwrap_or(summary);
+    acc.rem_5h = summary.0;
+    acc.reset_5h = summary.1.clone();
+    acc.rem_wk = weekly_summary.0;
+    acc.reset_wk = weekly_summary.1.clone();
+    let worst_remaining = acc.rem_5h.min(acc.rem_wk);
+    acc.is_critical = worst_remaining <= 15;
+    acc.is_warning = !acc.is_critical && worst_remaining <= 30;
+    acc.has_error = false;
+    acc.error_msg.clear();
+
+    let mut pools = Vec::new();
+    if let Some((remaining, reset)) = five_hour {
+        pools.push(QuotaPool {
+            label: format!("Codex {plan} 5h"),
+            percent: remaining,
+            reset,
+            pace: "cuota real".to_string(),
+        });
+    }
+    if let Some((remaining, reset)) = weekly {
+        pools.push(QuotaPool {
+            label: format!("Codex {plan} Wk"),
+            percent: remaining,
+            reset,
+            pace: "cuota real".to_string(),
+        });
+    }
+    acc.pools = pools;
+    true
+}
+
+fn record_cached_codex_quota_at(
+    acc: &mut AccountQuota,
+    data: &serde_json::Value,
+    fetched_at: i64,
+    cache_path: Option<&Path>,
+) {
+    let rec = CachedQuotaRecord {
+        fetched_at,
+        auth_mtime: file_mtime_secs(&acc.auth_file),
+        data: Some(data.clone()),
+        error_status: None,
+        error_body: None,
+    };
+    if let Ok(mut guard) = QUOTA_CACHE_STATE.lock() {
+        if let Some(cp) = cache_path {
+            sync_disk_cache_if_needed(&mut guard, cp);
+        }
+        guard.entries.insert(acc.prefix.to_lowercase(), rec);
+        if let Some(cp) = cache_path {
+            persist_disk_cache(&mut guard, cp);
+        }
+    }
+}
+
 /// Comprueba si una cuenta es de Antigravity (Google / agy*).
 /// Para estas cuentas, el dato soberano y principal es `GEMINI MODELS` (Flash/Pro).
 /// Los pools secundarios (Argon) y terciarios (Claude/GPT) son desglosados en `Cuota de Modelos`.
@@ -1496,12 +1771,23 @@ pub fn evaluate_account_for_model(
     }
 
     if is_codex_account(acc) {
-        let rem = acc.rem_5h;
-        let is_critical = !acc.has_error && rem <= 8;
-        let is_warning = !acc.has_error && (rem > 8 && rem <= 20);
+        if is_unfetched(acc) {
+            return EffectiveAccountHealth {
+                rem_5h: acc.rem_5h,
+                reset_5h: acc.reset_5h.clone(),
+                rem_wk: acc.rem_wk,
+                reset_wk: acc.reset_wk.clone(),
+                is_critical: false,
+                is_warning: false,
+                family: "GPT",
+            };
+        }
+        let worst_remaining = acc.rem_5h.min(acc.rem_wk);
+        let is_critical = !acc.has_error && worst_remaining <= 15;
+        let is_warning = !acc.has_error && (worst_remaining > 15 && worst_remaining <= 30);
         let family = resolve_model_family(active_model).unwrap_or("GPT");
         return EffectiveAccountHealth {
-            rem_5h: rem,
+            rem_5h: acc.rem_5h,
             reset_5h: acc.reset_5h.clone(),
             rem_wk: acc.rem_wk,
             reset_wk: acc.reset_wk.clone(),
@@ -1755,8 +2041,7 @@ pub fn apply_quota_data(acc: &mut AccountQuota, data: &serde_json::Value) {
         // Por defecto (sin sesión o con Gemini), las métricas base reflejan Gemini;
         // evaluate_account_for_model / sync_account_health_for_model las adapta dinámicamente
         // cuando la sesión activa usa Claude, GPT, DeepSeek, Qwen u otro modelo.
-        let worst_used =
-            std::cmp::max(100u8.saturating_sub(gem_5h), 100u8.saturating_sub(gem_wk));
+        let worst_used = std::cmp::max(100u8.saturating_sub(gem_5h), 100u8.saturating_sub(gem_wk));
         acc.is_critical = worst_used >= 85;
         acc.is_warning = (70..85).contains(&worst_used);
 

@@ -352,11 +352,7 @@ impl HerdrClient {
     }
 
     /// Crea un split derecho del 20% en Herdr/Telar y lanza `hudr2` dentro del nuevo panel sin secuestrar el actual.
-    pub fn attach_sidebar_split(
-        exe_path: &Path,
-        cwd: &str,
-        config_path: Option<&Path>,
-    ) -> bool {
+    pub fn attach_sidebar_split(exe_path: &Path, cwd: &str, config_path: Option<&Path>) -> bool {
         if std::env::var_os("HERDR_PANE_ID").is_none() && Self::resolve_ipc_path().is_none() {
             return false;
         }
@@ -381,7 +377,8 @@ impl HerdrClient {
         };
 
         let parent_pane = std::env::var("HERDR_PANE_ID").ok();
-        let cmd_line = Self::build_attach_cmd_line(exe_path, cwd, parent_pane.as_deref(), config_path);
+        let cmd_line =
+            Self::build_attach_cmd_line(exe_path, cwd, parent_pane.as_deref(), config_path);
 
         let _ = Self::run_herdr_cli(&["pane", "run", &new_pane_id, &cmd_line]);
         true
@@ -441,7 +438,10 @@ impl HerdrClient {
     pub fn get_panes() -> Vec<HerdrPane> {
         // 1. Prioridad: IPC directo (socket / pipe) sin crear subproceso
         if let Some(res) = Self::request_ipc("pane.list", json!({}))
-            && let Some(arr) = res.get("panes").and_then(|p| p.as_array()).or_else(|| res.as_array())
+            && let Some(arr) = res
+                .get("panes")
+                .and_then(|p| p.as_array())
+                .or_else(|| res.as_array())
         {
             return arr.iter().filter_map(Self::parse_pane_json).collect();
         }

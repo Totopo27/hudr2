@@ -33,6 +33,7 @@ logs/
 .opencode/
 .atl/
 .local/
+odd/tasks/
 
 # Archivos de depuración y sistema operativo
 .DS_Store

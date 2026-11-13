@@ -118,6 +118,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         }
         if let Ok(mut eco) = eco_res {
             crate::ecosystem::hydrate_ecosystem_upstream(&mut eco, state.config_path.as_deref());
+            crate::ecosystem::preserve_in_flight_update_state(&mut eco, &prev_snapshot.ecosystem);
             state.snapshot.ecosystem = eco;
         }
 
@@ -268,8 +269,11 @@ pub fn select_yellow_zone_prewarm_candidates(
         return Vec::new();
     }
 
-    let ranked_prefixes =
-        crate::cleanup::rank_migration_candidates_for_model(accounts, active_prefixes, active_model);
+    let ranked_prefixes = crate::cleanup::rank_migration_candidates_for_model(
+        accounts,
+        active_prefixes,
+        active_model,
+    );
     ranked_prefixes
         .into_iter()
         .filter_map(|pfx| {
@@ -330,6 +334,8 @@ pub async fn force_refresh_with_notify(
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
             drop(state);
             wake();
+        } else {
+            clear_stale_quota_progress_notice(app_state, &wake).await;
         }
         return;
     }
@@ -371,6 +377,8 @@ pub async fn force_refresh_with_notify(
             state.set_flash_notice(Some("+ Contexto actualizado".to_string()), 4000);
             drop(state);
             wake();
+        } else {
+            clear_stale_quota_progress_notice(app_state, &wake).await;
         }
         return;
     }
@@ -401,7 +409,11 @@ pub async fn force_refresh_with_notify(
 
         if total > 1 {
             let progress_msg = if force_all && interactive {
-                format!("+ Auditando cuotas ({}/{total} \u{00b7} {})...", idx + 1, acc.prefix)
+                format!(
+                    "+ Auditando cuotas ({}/{total} \u{00b7} {})...",
+                    idx + 1,
+                    acc.prefix
+                )
             } else {
                 format!("+ Cuotas ({}/{total} \u{00b7} {})...", idx + 1, acc.prefix)
             };
@@ -433,7 +445,10 @@ pub async fn force_refresh_with_notify(
         {
             *existing = acc;
         }
-        state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+        state
+            .snapshot
+            .accounts
+            .sort_by(|a, b| a.prefix.cmp(&b.prefix));
         state.needs_redraw = true;
         drop(state);
         wake();
@@ -473,8 +488,7 @@ pub async fn force_refresh_with_notify(
             prewarm_checks += 1;
             calls_made += 1;
 
-            quotas::fetch_quota_for_account_with_cache(&mut cand, cache_path.as_deref())
-                .await;
+            quotas::fetch_quota_for_account_with_cache(&mut cand, cache_path.as_deref()).await;
 
             let mut state = app_state.write().await;
             let active_model = state.snapshot.agent_session.effective_model().to_string();
@@ -487,7 +501,10 @@ pub async fn force_refresh_with_notify(
             {
                 *existing = cand;
             }
-            state.snapshot.accounts.sort_by(|a, b| a.prefix.cmp(&b.prefix));
+            state
+                .snapshot
+                .accounts
+                .sort_by(|a, b| a.prefix.cmp(&b.prefix));
             state.needs_redraw = true;
             drop(state);
             wake();
@@ -511,14 +528,27 @@ pub async fn force_refresh_with_notify(
         drop(state);
         wake();
     } else {
-        let mut state = app_state.write().await;
-        if state.flash_notice.as_deref().is_some_and(|n| n.starts_with("+ Cuotas (")) {
-            state.flash_notice = None;
-            state.flash_notice_until = None;
-            state.needs_redraw = true;
-            drop(state);
-            wake();
-        }
+        clear_stale_quota_progress_notice(app_state, &wake).await;
+    }
+}
+
+/// Clears a leftover silent quota progress notice (`+ Cuotas (n/m ...`) once a
+/// non-interactive sweep ends, including sweeps that exit early with nothing to fetch.
+async fn clear_stale_quota_progress_notice(
+    app_state: &Arc<RwLock<AppState>>,
+    wake: &(dyn Fn() + Sync),
+) {
+    let mut state = app_state.write().await;
+    if state
+        .flash_notice
+        .as_deref()
+        .is_some_and(|n| n.starts_with("+ Cuotas ("))
+    {
+        state.flash_notice = None;
+        state.flash_notice_until = None;
+        state.needs_redraw = true;
+        drop(state);
+        wake();
     }
 }
 
@@ -747,11 +777,7 @@ pub async fn migrate_sessions_action(app_state: &Arc<RwLock<AppState>>) {
         {
             break;
         }
-        quotas::fetch_quota_for_account_with_cache(
-            &mut accounts[idx],
-            cache_path.as_deref(),
-        )
-        .await;
+        quotas::fetch_quota_for_account_with_cache(&mut accounts[idx], cache_path.as_deref()).await;
         quotas::sync_account_health_for_model(&mut accounts[idx], &active_model);
         let refreshed = accounts[idx].clone();
         {

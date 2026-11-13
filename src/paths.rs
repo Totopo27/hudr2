@@ -181,8 +181,8 @@ pub fn cliproxy_config_candidates_for(target_dir: &str) -> Vec<PathBuf> {
 
     // Si se forzó un entorno de auths explícito (p.ej. CLIPROXY_AUTHS_DIR en tests),
     // buscar únicamente en su entorno local y no en unidades ni perfiles globales del sistema
-    let has_explicit_auths = std::env::var("CLIPROXY_AUTHS_DIR").is_ok()
-        || std::env::var("CPAMC_AUTHS_DIR").is_ok();
+    let has_explicit_auths =
+        std::env::var("CLIPROXY_AUTHS_DIR").is_ok() || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if has_explicit_auths {
         let auths_dir = resolve_auths_dir_for(target_dir);
         if let Some(parent) = auths_dir.parent() {
@@ -229,8 +229,12 @@ pub fn cliproxy_config_candidates_for(target_dir: &str) -> Vec<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Ok(system_drive) = std::env::var("SystemDrive") {
-            candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/config.yaml")));
-            candidates.push(PathBuf::from(format!("{system_drive}/cliproxyapi/config.yml")));
+            candidates.push(PathBuf::from(format!(
+                "{system_drive}/cliproxyapi/config.yaml"
+            )));
+            candidates.push(PathBuf::from(format!(
+                "{system_drive}/cliproxyapi/config.yml"
+            )));
         }
         push_windows_drive_candidates(
             &mut candidates,
@@ -266,8 +270,17 @@ pub fn gentle_ai_profiles_candidates(target_dir: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
-    candidates.push(Path::new(target_dir).join(".gentle-ai").join("profiles.json"));
-    candidates.push(Path::new(target_dir).join(".pi").join("gentle-ai").join("profiles.json"));
+    candidates.push(
+        Path::new(target_dir)
+            .join(".gentle-ai")
+            .join("profiles.json"),
+    );
+    candidates.push(
+        Path::new(target_dir)
+            .join(".pi")
+            .join("gentle-ai")
+            .join("profiles.json"),
+    );
     candidates.push(home.join(".gentle-ai").join("profiles.json"));
     candidates.push(home.join(".pi").join("gentle-ai").join("profiles.json"));
     candidates.push(home.join(".gentle-shell").join("profiles.json"));

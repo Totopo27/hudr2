@@ -76,11 +76,7 @@ pub fn run_git_cmd(cwd: &Path, args: &[&str], timeout_secs: u64) -> Option<Strin
     let stdout = out_handle.join().unwrap_or_default();
     let _stderr = err_handle.join().unwrap_or_default();
 
-    if status.success() {
-        Some(stdout)
-    } else {
-        None
-    }
+    if status.success() { Some(stdout) } else { None }
 }
 
 /// Resuelve `(repo_root, git_dir)` subiendo por los directorios sin lanzar subprocesos.
@@ -597,8 +593,11 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
 
     // 3. Estadísticas de líneas añadidas/eliminadas (--numstat -z)
     if !git.is_clean
-        && let Some(numstat_out) =
-            run_git_cmd(&repo_root, &["diff", "HEAD", "--numstat", "-z", "--no-renames"], 3)
+        && let Some(numstat_out) = run_git_cmd(
+            &repo_root,
+            &["diff", "HEAD", "--numstat", "-z", "--no-renames"],
+            3,
+        )
     {
         let (added, deleted) = apply_numstat_z(&mut git.files, &numstat_out);
         git.lines_added = added;

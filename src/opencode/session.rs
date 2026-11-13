@@ -47,7 +47,8 @@ impl DbSessionRecord {
             if !a.trim().is_empty() {
                 session.agent = a.clone();
             }
-        } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(self.model.as_deref().unwrap_or(""))
+        } else if let Ok(parsed) =
+            serde_json::from_str::<serde_json::Value>(self.model.as_deref().unwrap_or(""))
             && let Some(agent_val) = parsed
                 .get("agent")
                 .or_else(|| parsed.get("role"))
@@ -134,19 +135,41 @@ pub fn session_select_columns(conn: &Connection, table: &str) -> String {
     let has_title = has_column(conn, table, "title");
     let title_expr = if has_title { "title" } else { "NULL AS title" };
     let has_dir = has_column(conn, table, "directory");
-    let dir_expr = if has_dir { "directory" } else { "NULL AS directory" };
+    let dir_expr = if has_dir {
+        "directory"
+    } else {
+        "NULL AS directory"
+    };
     let has_tu = has_column(conn, table, "time_updated");
-    let tu_expr = if has_tu { "time_updated" } else { "NULL AS time_updated" };
+    let tu_expr = if has_tu {
+        "time_updated"
+    } else {
+        "NULL AS time_updated"
+    };
     let has_ta = has_column(conn, table, "time_archived");
-    let ta_expr = if has_ta { "time_archived" } else { "NULL AS time_archived" };
+    let ta_expr = if has_ta {
+        "time_archived"
+    } else {
+        "NULL AS time_archived"
+    };
     let has_ti = has_column(conn, table, "tokens_input");
-    let ti_expr = if has_ti { "tokens_input" } else { "NULL AS tokens_input" };
+    let ti_expr = if has_ti {
+        "tokens_input"
+    } else {
+        "NULL AS tokens_input"
+    };
     let has_to = has_column(conn, table, "tokens_output");
-    let to_expr = if has_to { "tokens_output" } else { "NULL AS tokens_output" };
+    let to_expr = if has_to {
+        "tokens_output"
+    } else {
+        "NULL AS tokens_output"
+    };
     let has_cost = has_column(conn, table, "cost");
     let cost_expr = if has_cost { "cost" } else { "NULL AS cost" };
 
-    format!("id, {agent_expr}, {model_expr}, {dir_expr}, {title_expr}, {tu_expr}, {ta_expr}, {ti_expr}, {to_expr}, {cost_expr}")
+    format!(
+        "id, {agent_expr}, {model_expr}, {dir_expr}, {title_expr}, {tu_expr}, {ta_expr}, {ti_expr}, {to_expr}, {cost_expr}"
+    )
 }
 
 /// Empareja las tablas de mensajes y partes correspondientes a la tabla de sesiones activa.

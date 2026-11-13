@@ -49,7 +49,7 @@
 
 ## 4. `Orquestadores` (`id: "orquestadores"`, index `4`)
 - **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `CORAL` when an orchestrator's sovereign model has exhausted quota).
-- **Discovery & Subagent Exclusion:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json` `"agent"` and `"agents"`). Filters subagents via `is_known_subagent` (`subagent`, `deny`, `gentle-ai-*`, `jd-*`, `review-*`, `sdd-explore-*`, etc.) so subagents NEVER pollute this card. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
+- **Discovery & Subagent Exclusion:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json` `"agent"` and `"agents"`). Filters subagents via `is_known_subagent` (`subagent`, `deny`, `gentle-ai-*`, `jd-*`, `review-*`, `sdd-explore-*`, etc.) so subagents NEVER pollute this card, but never hides a configured primary orchestrator by naming convention. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
 - **Friendly Display Names:** Maps technical fleet identifiers to user-sovereign names: `fleet-codex` / `gentle-orchestrator-codex` → `tavocodex`, `fleet-tavo` / `gentle-orchestrator` → `tavoclaude`, `fleet-gianni` → `gianniclaude`, `fleet-clas` → `clasclaude`, and `sdd-orchestrator-agy*` → `sdd-agy*`.
 - **Compact Model Format:** Formats model strings compactly (e.g. `(5.6-sol [high])`, `(opus-5-5 [high])`, `(3.8-flash)`).
 - **Status Lifecycle:**
@@ -71,6 +71,7 @@
 - **Orchestrator Fleet Breakdown (Diseño Compacto con roles limpios y colapso rev-4r):**
   - Identifies the active orchestrator from Card 4 `Orquestadores` (`Working` -> `Idle` -> `is_default` -> first profile).
   - Inspects only the subagents and orchestrator models configured for that specific orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`). Never mixes subagents from other orchestrators.
+  - Runtime-only observations (including ZenWarp actors) never create extra inventory rows; a model appears only when it belongs to the selected configured fleet.
   - Role simplification: Shortens role identifiers to eliminate redundant prefixes (`gentle-ai-*`, `sdd-*`): `orch`, `worker`, `fix`, `explore`, `verify`, `deep-rsch`, `news-rsch`, `judge-a`, `judge-b`, `ui-design`.
   - Review consolidation: Groups the 4 review lenses (`review-risk`, `review-readability`, `review-reliability`, `review-resilience`) into a single collapsed active row: `rev-4r (sonnet-5-5)`.
   - Model abbreviation: Formats model names cleanly: `sonnet-5-5`, `opus-5-5`, `5.6-sol`, `5.6-terra`, `5.6-luna`, `codex-review`, `3.8-flash`.
@@ -129,7 +130,7 @@
 - **Rows:** One row per tool (`pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram`, `herdr`):
   - Up-to-date: `● <name> <version>` (`MINT`).
   - Update available: `● <name> <version> ↑<upstream>` (`AMBER`) accompanied by an interactive clickable `[actualizar]` button (or adaptive `[↑]` when `width < 44`) mapped to `action_type: Some("update_tool")`. For `hudr2` itself, renders `[asistido]` and displays non-blocking instructions in flash notice to prevent Windows executable file-locking (`os error 5`) and CPU compilation spikes.
-  - In progress: Displays dynamic Braille spinner frame and real-time percent `[⠋ 45%]` alongside responsive `[actualizando]` or `[↑]` while the background worker runs the official upgrade command non-blockingly, with flash notice updates and live TUI repaints.
+  - In progress / Completed: Retains in-flight update state across periodic/event-driven refresh cycles (`preserve_in_flight_update_state`), displaying dynamic Braille spinner frame and real-time percent `[⠋ 45%]` alongside responsive `[actualizando]` or `[↑]`. Upon reaching 100%, displays `[✓ 100%] [completado]` in `MINT` for ~1.2s before clearing the monitor and returning to the up-to-date state.
   - Missing/Not installed: `○ <name> -` or `○ <name> - (disp <upstream>)` (`TEXT_DIM`).
 - **Upstream Cache:** Cached in `upstream_cache.json` with 3-hour TTL, queried in background via GitHub Releases API (`/repos/{owner}/{repo}/releases/latest`).
 

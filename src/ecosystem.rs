@@ -279,8 +279,16 @@ pub fn repo_for_tool(name: &str) -> Option<&'static str> {
 /// de archivo en Windows (`os error 5`) y saturación de CPU por compilación de Rust.
 pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str>)> {
     match name {
-        "pi" => Some(("npm", vec!["install", "-g", "@earendil-works/pi-coding-agent@latest"])),
-        "gentle-shell" => Some(("npm", vec!["install", "-g", "gentle-pi@latest"])),
+        "pi" => Some((
+            "npm",
+            vec![
+                "install",
+                "-g",
+                "--force",
+                "@earendil-works/pi-coding-agent@latest",
+            ],
+        )),
+        "gentle-shell" => Some(("npm", vec!["install", "-g", "--force", "gentle-pi@latest"])),
         "gentle-ai" => {
             if cfg!(target_os = "windows") {
                 Some((
@@ -304,7 +312,9 @@ pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str
 /// del proceso activo (como hudr2, para evitar bloqueos de archivo en Windows y sobrecarga de CPU).
 pub fn assisted_update_notice(name: &str) -> Option<&'static str> {
     match name {
-        "hudr2" => Some("hudr2: para actualizar, ejecute en otra terminal: cargo install --git https://github.com/Totopo27/hudr2"),
+        "hudr2" => Some(
+            "hudr2: para actualizar, ejecute en otra terminal: cargo install --git https://github.com/Totopo27/hudr2",
+        ),
         _ => None,
     }
 }
@@ -367,7 +377,7 @@ pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
             .rev()
             .collect();
         if let Ok(pct) = num_str.parse::<u8>() {
-            return (pct.clamp(5, 99), "descargando".to_string());
+            return (pct.clamp(5, 95), "descargando".to_string());
         }
     }
 
@@ -390,9 +400,11 @@ pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
     } else if lower.contains("verif") || lower.contains("clean") || lower.contains("limp") {
         (92.max(current_pct), "limpiando".to_string())
     } else if lower.contains("[ok]")
+        || lower.starts_with("added ")
+        || lower.starts_with("changed ")
+        || lower.contains("up to date")
         || lower.contains("success")
         || lower.contains("succeeded")
-        || lower.contains("complet")
     {
         (100, "completado".to_string())
     } else {
@@ -479,14 +491,10 @@ where
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let out_handle = std::thread::spawn(move || {
-        stream_pipe_chunks(stdout_pipe, tx_out, false)
-    });
+    let out_handle = std::thread::spawn(move || stream_pipe_chunks(stdout_pipe, tx_out, false));
 
     let tx_err = tx_lines.clone();
-    let err_handle = std::thread::spawn(move || {
-        stream_pipe_chunks(stderr_pipe, tx_err, true)
-    });
+    let err_handle = std::thread::spawn(move || stream_pipe_chunks(stderr_pipe, tx_err, true));
     drop(tx_lines);
 
     let deadline = Instant::now() + Duration::from_secs(120);
@@ -521,7 +529,9 @@ where
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(format!("tiempo límite de actualización agotado (120s) para '{name}'"));
+                    return Err(format!(
+                        "tiempo límite de actualización agotado (120s) para '{name}'"
+                    ));
                 }
                 if last_progress_emit.elapsed() >= Duration::from_millis(180) {
                     spinner_idx = (spinner_idx + 1) % 10;
@@ -642,10 +652,27 @@ pub fn apply_upstream_cache_to_ecosystem(eco: &mut EcosystemTelemetry, cache: &U
     }
 }
 
-pub fn hydrate_ecosystem_upstream(eco: &mut EcosystemTelemetry, config_path: Option<&std::path::Path>) {
+pub fn hydrate_ecosystem_upstream(
+    eco: &mut EcosystemTelemetry,
+    config_path: Option<&std::path::Path>,
+) {
     let path = upstream_cache_path_for(config_path);
     if let Some(cache) = load_upstream_cache(&path) {
         apply_upstream_cache_to_ecosystem(eco, &cache);
+    }
+}
+
+/// Preserva el estado de actualización en curso (`is_updating` y `update_progress`)
+/// de herramientas que se están actualizando en segundo plano cuando un ciclo de refresco
+/// general (`refresh_all`) genera un nuevo `EcosystemTelemetry`.
+pub fn preserve_in_flight_update_state(dest: &mut EcosystemTelemetry, source: &EcosystemTelemetry) {
+    for current_tool in &source.tools {
+        if current_tool.is_updating
+            && let Some(dest_tool) = dest.tools.iter_mut().find(|t| t.name == current_tool.name)
+        {
+            dest_tool.is_updating = true;
+            dest_tool.update_progress = current_tool.update_progress.clone();
+        }
     }
 }
 
@@ -724,6 +751,7 @@ pub async fn fetch_upstream_versions_with_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::ToolUpdateProgress;
 
     #[test]
     fn test_clean_version_output() {
@@ -733,7 +761,10 @@ mod tests {
         assert_eq!(clean_version_output("hudr2", "0.1.0"), "v0.1.0");
         assert_eq!(clean_version_output("engram", "engram 3.6.2"), "v3.6.2");
         assert_eq!(clean_version_output("herdr", "herdr 0.9.5"), "v0.9.5");
-        assert_eq!(clean_version_output("gentle-ai", "gentle-ai 4.3.1"), "v4.3.1");
+        assert_eq!(
+            clean_version_output("gentle-ai", "gentle-ai 4.3.1"),
+            "v4.3.1"
+        );
         assert_eq!(
             clean_version_output("gentle-shell", "gentle-shell v4.5.1-main.14f44d\npi 0.87.0"),
             "v4.5.1-main.14f44d"
@@ -827,10 +858,12 @@ mod tests {
 
         let (bin_pi, args_pi) = update_cmd_for_tool("pi").unwrap();
         assert_eq!(bin_pi, "npm");
+        assert!(args_pi.contains(&"--force"));
         assert!(args_pi.contains(&"@earendil-works/pi-coding-agent@latest"));
 
         let (bin_gs, args_gs) = update_cmd_for_tool("gentle-shell").unwrap();
         assert_eq!(bin_gs, "npm");
+        assert!(args_gs.contains(&"--force"));
         assert!(args_gs.contains(&"gentle-pi@latest"));
 
         let (bin_engram, args_engram) = update_cmd_for_tool("engram").unwrap();
@@ -857,7 +890,8 @@ mod tests {
         assert_eq!(pct2, 30);
         assert_eq!(stage2, "backup");
 
-        let (pct3, stage3) = parse_line_progress("Upgrading engram via binary (3.6.2 -> 3.7.0)...", 30);
+        let (pct3, stage3) =
+            parse_line_progress("Upgrading engram via binary (3.6.2 -> 3.7.0)...", 30);
         assert_eq!(pct3, 75);
         assert_eq!(stage3, "instalando");
 
@@ -868,5 +902,70 @@ mod tests {
         let (pct5, stage5) = parse_line_progress("[ok] engram 3.6.2 -> 3.7.0", 75);
         assert_eq!(pct5, 100);
         assert_eq!(stage5, "completado");
+
+        let (pct6, stage6) =
+            parse_line_progress("added 107 packages, and changed 16 packages in 16s", 75);
+        assert_eq!(pct6, 100);
+        assert_eq!(stage6, "completado");
+    }
+
+    #[test]
+    fn test_preserve_in_flight_update_state() {
+        let source = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "pi".to_string(),
+                    version: Some("v0.87.0".to_string()),
+                    is_installed: true,
+                    is_updating: true,
+                    update_progress: Some(ToolUpdateProgress {
+                        percent: 60,
+                        stage: "instalando".to_string(),
+                        spinner_idx: 4,
+                        elapsed_secs: 5,
+                    }),
+                    ..Default::default()
+                },
+                ToolVersionInfo {
+                    name: "herdr".to_string(),
+                    version: Some("v0.9.5".to_string()),
+                    is_installed: true,
+                    is_updating: false,
+                    update_progress: None,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let mut dest = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "pi".to_string(),
+                    version: Some("v0.87.0".to_string()),
+                    is_installed: true,
+                    is_updating: false,
+                    update_progress: None,
+                    ..Default::default()
+                },
+                ToolVersionInfo {
+                    name: "herdr".to_string(),
+                    version: Some("v0.9.5".to_string()),
+                    is_installed: true,
+                    is_updating: false,
+                    update_progress: None,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        preserve_in_flight_update_state(&mut dest, &source);
+
+        assert!(dest.tools[0].is_updating);
+        assert_eq!(
+            dest.tools[0].update_progress,
+            source.tools[0].update_progress
+        );
+        assert!(!dest.tools[1].is_updating);
+        assert_eq!(dest.tools[1].update_progress, None);
     }
 }

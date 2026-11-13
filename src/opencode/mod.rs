@@ -122,11 +122,7 @@ pub fn apply_api_session_telemetry(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     if !root_model_id.is_empty() {
-        session.model = if root_provider.is_empty() || root_model_id.contains('/') {
-            root_model_id.to_string()
-        } else {
-            format!("{root_provider}/{root_model_id}")
-        };
+        session.model = qualified_runtime_model(root_provider, root_model_id);
         session.model_short = clean_model_name(&session.model)
             .rsplit('/')
             .next()
@@ -186,11 +182,7 @@ pub fn apply_api_session_telemetry(
             .or_else(|| item.pointer("/model/modelID"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
-        let model = if provider.is_empty() || model_id.contains('/') {
-            model_id.to_string()
-        } else {
-            format!("{provider}/{model_id}")
-        };
+        let model = qualified_runtime_model(provider, model_id);
         let model_short = clean_model_name(&model)
             .rsplit('/')
             .next()
@@ -204,7 +196,11 @@ pub fn apply_api_session_telemetry(
             .pointer("/time/idle")
             .or_else(|| item.pointer("/time/archived"))
             .and_then(serde_json::Value::as_i64);
-        let status = if finished_at.is_some() { "idle" } else { "working" };
+        let status = if finished_at.is_some() {
+            "idle"
+        } else {
+            "working"
+        };
 
         session.subagent_invocations.push(SubagentInvocation {
             session_id: item
@@ -232,6 +228,21 @@ pub fn apply_api_session_telemetry(
             started_at,
             finished_at,
         });
+    }
+}
+
+fn qualified_runtime_model(provider: &str, model_id: &str) -> String {
+    if provider.eq_ignore_ascii_case("zenwarp") {
+        format!(
+            "zenwarp/{}",
+            model_id.strip_prefix("zenwarp/").unwrap_or(model_id)
+        )
+    } else if provider.eq_ignore_ascii_case("cliproxy") && model_id.starts_with("zen/") {
+        format!("cliproxy/{model_id}")
+    } else if provider.is_empty() || model_id.contains('/') {
+        model_id.to_string()
+    } else {
+        format!("{provider}/{model_id}")
     }
 }
 
@@ -382,18 +393,24 @@ pub fn read_opencode_session(
         herdr_panes.iter().find(|p| {
             p.tab_id.as_deref() == Some(tid)
                 && my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true)
-                && (p.agent_session_id.is_some() || p.agent.as_deref() == Some("opencode") || is_same_cwd(p))
+                && (p.agent_session_id.is_some()
+                    || p.agent.as_deref() == Some("opencode")
+                    || is_same_cwd(p))
         })
     });
 
     // Prioridad para este espacio: panes que pertenezcan exactamente a este cwd (norm_target)
     let cwd_focused = herdr_panes.iter().find(|p| is_same_cwd(p) && p.focused);
-    let cwd_working = herdr_panes.iter().find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working"));
+    let cwd_working = herdr_panes
+        .iter()
+        .find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working"));
     let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p));
 
     // Fallback global sólo si ningún pane está en este directorio
     let global_focused = herdr_panes.iter().find(|p| p.focused);
-    let global_working = herdr_panes.iter().find(|p| p.agent_status.as_deref() == Some("working"));
+    let global_working = herdr_panes
+        .iter()
+        .find(|p| p.agent_status.as_deref() == Some("working"));
 
     let primary_pane = sibling_pane
         .or(cwd_focused)
@@ -468,9 +485,18 @@ pub fn read_opencode_session(
 
 fn parse_tokens_from_value(val: &serde_json::Value) -> Option<i64> {
     let tokens_obj = val.get("tokens").or_else(|| val.get("usage"))?;
-    let inp = tokens_obj.get("input").and_then(|v| v.as_i64()).unwrap_or(0);
-    let outp = tokens_obj.get("output").and_then(|v| v.as_i64()).unwrap_or(0);
-    let reasoning = tokens_obj.get("reasoning").and_then(|v| v.as_i64()).unwrap_or(0);
+    let inp = tokens_obj
+        .get("input")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let outp = tokens_obj
+        .get("output")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let reasoning = tokens_obj
+        .get("reasoning")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let cache_read = tokens_obj
         .get("cache")
         .and_then(|c| c.get("read"))
@@ -500,7 +526,11 @@ fn record_tool_item(
         if let Some(path_str) = extract_tool_path(item) {
             modified_files.insert(path_str);
         }
-    } else if lower.contains("bash") || lower.contains("shell") || lower.contains("exec") || lower.contains("cmd") {
+    } else if lower.contains("bash")
+        || lower.contains("shell")
+        || lower.contains("exec")
+        || lower.contains("cmd")
+    {
         session.tool_bash += 1;
     } else if lower.contains("engram") || lower.contains("mem_") {
         session.tool_engram += 1;
@@ -582,8 +612,9 @@ fn collect_message_stats(
         } else {
             "rowid"
         };
-        let sql =
-            format!("SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC");
+        let sql = format!(
+            "SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC"
+        );
 
         if let Ok(mut msg_stmt) = conn.prepare(&sql)
             && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| row.get::<_, String>(0))
@@ -604,9 +635,7 @@ fn collect_message_stats(
                 }
 
                 // Tokens de turno activo y acumulado de sesión desde message.data
-                if !found_active_tokens
-                    && let Some(toks) = parse_tokens_from_value(&val)
-                {
+                if !found_active_tokens && let Some(toks) = parse_tokens_from_value(&val) {
                     session.active_turn_tokens = toks;
                     found_active_tokens = true;
                 }
@@ -641,9 +670,10 @@ fn collect_message_stats(
                 msg_turns += 1;
 
                 if turn_cost <= 0.0 && (turn_in > 0 || turn_out > 0 || turn_cr > 0 || turn_cw > 0) {
-                    let msg_model = extract_model_name_from_val(&val)
-                        .unwrap_or_else(|| session.model.clone());
-                    turn_cost = estimate_tokens_cost(&msg_model, turn_in, turn_out, turn_cr, turn_cw);
+                    let msg_model =
+                        extract_model_name_from_val(&val).unwrap_or_else(|| session.model.clone());
+                    turn_cost =
+                        estimate_tokens_cost(&msg_model, turn_in, turn_out, turn_cr, turn_cw);
                 }
 
                 if msg_last_cost.is_none() && turn_cost > 0.0 {
@@ -736,9 +766,7 @@ fn collect_message_stats(
                     || val.get("usage").is_some();
 
                 if is_step_tokens {
-                    if !found_active_tokens
-                        && let Some(toks) = parse_tokens_from_value(&val)
-                    {
+                    if !found_active_tokens && let Some(toks) = parse_tokens_from_value(&val) {
                         session.active_turn_tokens = toks;
                         found_active_tokens = true;
                     }
@@ -771,10 +799,13 @@ fn collect_message_stats(
                     }
                     part_turns += 1;
 
-                    if turn_cost <= 0.0 && (turn_in > 0 || turn_out > 0 || turn_cr > 0 || turn_cw > 0) {
+                    if turn_cost <= 0.0
+                        && (turn_in > 0 || turn_out > 0 || turn_cr > 0 || turn_cw > 0)
+                    {
                         let part_model = extract_model_name_from_val(&val)
                             .unwrap_or_else(|| session.model.clone());
-                        turn_cost = estimate_tokens_cost(&part_model, turn_in, turn_out, turn_cr, turn_cw);
+                        turn_cost =
+                            estimate_tokens_cost(&part_model, turn_in, turn_out, turn_cr, turn_cw);
                     }
 
                     if part_last_cost.is_none() && turn_cost > 0.0 {
@@ -824,8 +855,13 @@ fn collect_message_stats(
             session.cost = resolved_cost;
             cached_cost = Some(resolved_cost);
         } else if session.tokens_input > 0 || session.tokens_output > 0 {
-            let fallback_cost =
-                estimate_tokens_cost(&session.model, session.tokens_input, session.tokens_output, 0, 0);
+            let fallback_cost = estimate_tokens_cost(
+                &session.model,
+                session.tokens_input,
+                session.tokens_output,
+                0,
+                0,
+            );
             if fallback_cost > 0.0 {
                 session.cost = fallback_cost;
                 cached_cost = Some(fallback_cost);

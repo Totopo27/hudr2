@@ -63,10 +63,7 @@ fn matches_pool_num(pfx: &str, pool_num: u32) -> bool {
     if let Ok(n) = num_part.parse::<u32>() {
         return n == pool_num;
     }
-    if pool_num == 1 && num_part.is_empty() {
-        return true;
-    }
-    false
+    pool_num == 1 && num_part.is_empty()
 }
 
 pub fn resolve_pool_account_prefixes(model_str: &str, known_prefixes: &[String]) -> Vec<String> {
@@ -137,10 +134,7 @@ fn extract_model_prefix_candidate(clean_model: &str) -> Option<String> {
         if ch == '/' {
             let before = &clean_model[..idx];
             let after = &clean_model[idx + 1..];
-            let seg = before
-                .rsplit(['/', '\\', '\'', '"'])
-                .next()
-                .unwrap_or("");
+            let seg = before.rsplit(['/', '\\', '\'', '"']).next().unwrap_or("");
             if !seg.is_empty()
                 && seg
                     .chars()
@@ -323,7 +317,11 @@ mod tests {
         assert_eq!(p2, vec!["agy2", "agy2_1"]);
 
         // Detección dinámica con prefijos no-agy
-        let non_agy = vec!["cuenta1".to_string(), "cuenta2".to_string(), "cuenta2_1".to_string()];
+        let non_agy = vec![
+            "cuenta1".to_string(),
+            "cuenta2".to_string(),
+            "cuenta2_1".to_string(),
+        ];
         let np1 = resolve_pool_account_prefixes("pool-01/gemini-1.5", &non_agy);
         assert_eq!(np1, vec!["cuenta1"]);
         let np2 = resolve_pool_account_prefixes("models/pool-2/claude", &non_agy);
