@@ -389,7 +389,13 @@ pub fn resolve_friendly_orchestrator_name(
         return (name_low.to_string(), Some(suffix.to_string()));
     }
 
-    if let Some(rest) = name_low.strip_prefix("fleet-") {
+    // OpenCode `gentle-orchestrator-<x>` and Gentle AI `fleet-<x>` describe the same
+    // orchestrator; both display as the short `<x>` so discovery merges them.
+    if let Some(rest) = name_low
+        .strip_prefix("fleet-")
+        .or_else(|| name_low.strip_prefix("gentle-orchestrator-"))
+        .filter(|rest| !rest.is_empty())
+    {
         let pfx = prefix_opt
             .map(|s| s.to_string())
             .or_else(|| known_prefixes.iter().find(|p| p.contains(rest)).cloned());

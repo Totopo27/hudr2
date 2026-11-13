@@ -6543,6 +6543,88 @@ api-keys:
     }
 
     #[test]
+    fn test_gentle_orchestrator_agents_use_short_names_and_merge_with_fleet_profiles() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{AccountQuota, AgentSession};
+        use hudr2::orchestrators::discover_orchestrators;
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        let profiles_json = serde_json::json!({
+            "profiles": {
+                "fleet-zengem": {
+                    "orchestrator": { "model": "cliproxy/agy/gemini-3.8-flash" }
+                }
+            }
+        });
+        let profiles_file = tmp.path().join("profiles.json");
+        std::fs::write(
+            &profiles_file,
+            serde_json::to_string(&profiles_json).unwrap(),
+        )
+        .unwrap();
+
+        let opencode_json = serde_json::json!({
+            "agent": {
+                "gentle-orchestrator-zengem": {
+                    "mode": "primary",
+                    "model": "cliproxy/agy/gemini-3.8-flash"
+                },
+                "gentle-orchestrator-agy2": {
+                    "mode": "primary",
+                    "model": "cliproxy/agy2/gemini-3.8-flash"
+                },
+                "gentle-orchestrator-codex": {
+                    "mode": "primary",
+                    "model": "cliproxy/tavocodex/gpt-5.6-sol"
+                }
+            }
+        });
+        let opencode_file = tmp.path().join("opencode.json");
+        std::fs::write(
+            &opencode_file,
+            serde_json::to_string(&opencode_json).unwrap(),
+        )
+        .unwrap();
+
+        unsafe {
+            std::env::set_var("OPENCODE_CONFIG_PATH", opencode_file.to_str().unwrap());
+            std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_file.to_str().unwrap());
+        }
+
+        let accounts = vec![AccountQuota {
+            prefix: "agy2".to_string(),
+            auth_file: "agy2.json".to_string(),
+            ..Default::default()
+        }];
+        let discovered = discover_orchestrators(
+            tmp.path().to_str().unwrap(),
+            &accounts,
+            &AgentSession::default(),
+            &[],
+        );
+
+        unsafe {
+            std::env::remove_var("OPENCODE_CONFIG_PATH");
+            std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+        }
+
+        let mut names: Vec<&str> = discovered.iter().map(|o| o.display_name()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["agy2", "tavocodex", "zengem"],
+            "gentle-orchestrator-<x> must display as <x> and merge with fleet-<x>"
+        );
+        let agy2 = discovered
+            .iter()
+            .find(|o| o.display_name() == "agy2")
+            .unwrap();
+        assert_eq!(agy2.name, "gentle-orchestrator-agy2");
+        assert_eq!(agy2.prefix.as_deref(), Some("agy2"));
+    }
+
+    #[test]
     fn test_configured_sdd_orchestrators_are_discovered_from_opencode() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use hudr2::models::{AccountQuota, AgentSession};
