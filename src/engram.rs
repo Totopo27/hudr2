@@ -34,9 +34,7 @@ pub fn http_json_local(port: u16, path: &str) -> Option<Value> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(120)).ok()?;
     let _ = stream.set_read_timeout(Some(Duration::from_millis(350)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(150)));
-    let req = format!(
-        "GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n\r\n"
-    );
+    let req = format!("GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\nAccept: application/json\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     let mut buf = Vec::new();
     stream.take(128 * 1024).read_to_end(&mut buf).ok()?;
@@ -133,7 +131,8 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
     {
         let mut cached = entry.telemetry.clone();
         if let Some(ref mut handoff) = cached.last_handoff {
-            handoff.relative_time = format_relative_time(handoff.created_at_epoch, now_epoch_secs());
+            handoff.relative_time =
+                format_relative_time(handoff.created_at_epoch, now_epoch_secs());
         }
         return cached;
     }
@@ -191,8 +190,8 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
     }
 
     // 4. Estado opcional del daemon local (solo si ENGRAM_PORT está definido o no estamos en un DB de test aislado)
-    let is_custom_test_db = std::env::var("ENGRAM_DB_PATH").is_ok()
-        && std::env::var("ENGRAM_PORT").is_err();
+    let is_custom_test_db =
+        std::env::var("ENGRAM_DB_PATH").is_ok() && std::env::var("ENGRAM_PORT").is_err();
     if !is_custom_test_db {
         let port: u16 = std::env::var("ENGRAM_PORT")
             .ok()
@@ -208,19 +207,14 @@ pub fn read_engram_telemetry(project_dir: &str) -> EngramTelemetry {
                     &format!("/sync/status?project={}", query_escape(&tele.project)),
                 )
             {
-                let phase = sync_v
-                    .get("phase")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("ok");
+                let phase = sync_v.get("phase").and_then(|s| s.as_str()).unwrap_or("ok");
                 let last_sync_epoch = sync_v
                     .get("last_sync_at")
                     .and_then(|s| s.as_str())
                     .and_then(|ts| {
-                        conn.query_row(
-                            "SELECT CAST(strftime('%s', ?1) AS INTEGER)",
-                            [ts],
-                            |r| r.get::<_, i64>(0),
-                        )
+                        conn.query_row("SELECT CAST(strftime('%s', ?1) AS INTEGER)", [ts], |r| {
+                            r.get::<_, i64>(0)
+                        })
                         .ok()
                     });
                 let ago_str = format_relative_time(last_sync_epoch, now);

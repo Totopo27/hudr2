@@ -549,8 +549,12 @@ pub fn try_read_pi_session(
                 && is_pi_pane(p)
         })
     });
-    let cwd_focused = herdr_panes.iter().find(|p| is_same_cwd(p) && p.focused && is_pi_pane(p));
-    let cwd_working = herdr_panes.iter().find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
+    let cwd_focused = herdr_panes
+        .iter()
+        .find(|p| is_same_cwd(p) && p.focused && is_pi_pane(p));
+    let cwd_working = herdr_panes
+        .iter()
+        .find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
     let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p) && is_pi_pane(p));
 
     let global_focused = herdr_panes.iter().find(|p| p.focused && is_pi_pane(p));

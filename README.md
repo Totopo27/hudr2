@@ -59,7 +59,7 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 | **Proyecto** | Filesystem | Conteo de directorios y archivos con explorador de árbol desplegable (`o` para abrir en explorador). |
 | **Integraciones** | Cliproxy tokens | Porcentaje restante por pool de cuentas, temporizador de reset (`en 4h 59m`) y semáforo dinámico. |
 | **Orquestadores** | Perfiles / sesiones | Estado de orquestadores y subagentes, modelo activo y alertas críticas. |
-| **Cuota de Modelos** | Runtime + Cliproxy API | Estado de cuota por familia y uso ZenWarp observado por actor. Solo aparecen modelos ZenWarp usados por una sesión real; el catálogo no crea filas activas. |
+| **Cuota de Modelos** | Perfiles + proveedores de cuota | Flota configurada del orquestador activo (orquestador y subagentes asignados) con cuota o saldo real. Las observaciones de runtime no crean filas de inventario adicionales. |
 | **Saldos API** | `hudr2.json` / sesión | Presupuesto, saldo restante y costo atribuido de cuentas API key. |
 | **Cambios (Git)** | `.git/HEAD` directo | Líneas agregadas/borradas (`+`/`-`), archivos en staging/worktree y previsualización de diff inline segura. |
 | **Engram** | `engram.db` (SQLite) | Observaciones acumuladas, estado del daemon (`7437`) y último handoff de sesión estructurado. |

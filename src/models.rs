@@ -98,19 +98,27 @@ impl AgentSession {
             normalize_zenwarp_model(self.effective_model()),
         ) {
             usages.push(ZenWarpUsage {
-                actor_id: actor_id.to_string(), parent_actor_id: None,
-                actor_role: self.agent.clone(), model_id: route.model_id,
-                route: route.route, activity_state: self.agent_status.clone(),
-                started_at: None, finished_at: None,
+                actor_id: actor_id.to_string(),
+                parent_actor_id: None,
+                actor_role: self.agent.clone(),
+                model_id: route.model_id,
+                route: route.route,
+                activity_state: self.agent_status.clone(),
+                started_at: None,
+                finished_at: None,
             });
         }
         usages.extend(self.subagent_invocations.iter().filter_map(|invocation| {
             let route = normalize_zenwarp_model(&invocation.model)?;
             Some(ZenWarpUsage {
-                actor_id: invocation.session_id.clone(), parent_actor_id: self.session_id.clone(),
-                actor_role: invocation.role.clone(), model_id: route.model_id,
-                route: route.route, activity_state: invocation.status.clone(),
-                started_at: invocation.started_at, finished_at: invocation.finished_at,
+                actor_id: invocation.session_id.clone(),
+                parent_actor_id: self.session_id.clone(),
+                actor_role: invocation.role.clone(),
+                model_id: route.model_id,
+                route: route.route,
+                activity_state: invocation.status.clone(),
+                started_at: invocation.started_at,
+                finished_at: invocation.finished_at,
             })
         }));
         usages
@@ -129,7 +137,10 @@ pub struct ZenWarpUsage {
     pub finished_at: Option<i64>,
 }
 
-struct ZenWarpRoute { model_id: String, route: String }
+struct ZenWarpRoute {
+    model_id: String,
+    route: String,
+}
 
 fn normalize_zenwarp_model(model: &str) -> Option<ZenWarpRoute> {
     let model = model.trim();
@@ -139,8 +150,13 @@ fn normalize_zenwarp_model(model: &str) -> Option<ZenWarpRoute> {
         let model_id = model.strip_prefix("cliproxy/zen/")?;
         ("cliproxy", model_id)
     };
-    if model_id.is_empty() { return None; }
-    Some(ZenWarpRoute { model_id: model_id.to_string(), route: route.to_string() })
+    if model_id.is_empty() {
+        return None;
+    }
+    Some(ZenWarpRoute {
+        model_id: model_id.to_string(),
+        route: route.to_string(),
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -266,21 +282,21 @@ pub enum OrchestratorStatus {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct SubAgentProfile {
-    pub role: String,             // e.g. "worker", "explore", "verify", "jd-judge-a", "review-risk"
-    pub model: String,            // e.g. "agy2/gemini-3.8-flash-high"
-    pub model_short: String,      // e.g. "gemini-3.8-flash-high"
-    pub prefix: Option<String>,   // e.g. "agy2"
+    pub role: String,  // e.g. "worker", "explore", "verify", "jd-judge-a", "review-risk"
+    pub model: String, // e.g. "agy2/gemini-3.8-flash-high"
+    pub model_short: String, // e.g. "gemini-3.8-flash-high"
+    pub prefix: Option<String>, // e.g. "agy2"
     pub thinking: Option<String>, // e.g. "high", "medium"
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct OrchestratorProfile {
-    pub name: String,             // e.g. "fleet-codex", "fleet-tavo", "sdd-orchestrator-agy3"
+    pub name: String, // e.g. "fleet-codex", "fleet-tavo", "sdd-orchestrator-agy3"
     #[serde(default)]
-    pub display_name: String,     // e.g. "tavocodex", "tavoclaude", "sdd-agy3"
-    pub model: String,            // e.g. "gpt-5.6-sol", "tavoclaude/claude-opus-5-5"
-    pub model_short: String,      // e.g. "gpt-5.6-sol", "claude-opus-5-5"
-    pub prefix: Option<String>,   // e.g. "tavocodex", "tavoclaude", "gianniclaude"
+    pub display_name: String, // e.g. "tavocodex", "tavoclaude", "sdd-agy3"
+    pub model: String, // e.g. "gpt-5.6-sol", "tavoclaude/claude-opus-5-5"
+    pub model_short: String, // e.g. "gpt-5.6-sol", "claude-opus-5-5"
+    pub prefix: Option<String>, // e.g. "tavocodex", "tavoclaude", "gianniclaude"
     pub thinking: Option<String>, // e.g. "high", "medium"
     pub is_default: bool,
     pub status: OrchestratorStatus,

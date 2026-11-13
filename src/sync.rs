@@ -191,7 +191,10 @@ fn resolve_default_orchestrator_model<V>(
         return format!("{provider_key}/{gemini_key}");
     }
 
-    if let Some(any_key) = sorted_models.keys().find(|k| k.starts_with(&profile_prefix)) {
+    if let Some(any_key) = sorted_models
+        .keys()
+        .find(|k| k.starts_with(&profile_prefix))
+    {
         return format!("{provider_key}/{any_key}");
     }
 
@@ -235,7 +238,9 @@ pub async fn sync_integrations_for_path(
     } else if raw_config.get("provider").is_some() {
         "provider"
     } else {
-        return Err("No se encontró la sección 'provider'/'providers' en opencode.json".to_string());
+        return Err(
+            "No se encontró la sección 'provider'/'providers' en opencode.json".to_string(),
+        );
     };
 
     let providers_obj = raw_config[providers_key]
@@ -299,7 +304,10 @@ pub async fn sync_integrations_for_path(
         .map_err(|e| format!("No se pudo conectar con {provider_name} ({models_endpoint}): {e}"))?;
 
     if !res.status().is_success() {
-        return Err(format!("{provider_name} retornó status HTTP {}", res.status()));
+        return Err(format!(
+            "{provider_name} retornó status HTTP {}",
+            res.status()
+        ));
     }
 
     let remote_data: serde_json::Value = res

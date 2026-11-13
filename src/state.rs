@@ -134,7 +134,11 @@ pub fn load_config(path: &Path) -> ConfigData {
     if let Some(arr) = v.get("collapsed").and_then(Value::as_array) {
         collapsed = [false; 13];
         for item in arr.iter().filter_map(Value::as_str) {
-            let normalized = if item == "tarjetas" { "personalizar" } else { item };
+            let normalized = if item == "tarjetas" {
+                "personalizar"
+            } else {
+                item
+            };
             if let Some(idx) = CARD_KEYS.iter().position(|&k| k == normalized) {
                 collapsed[idx] = true;
             }
@@ -144,7 +148,11 @@ pub fn load_config(path: &Path) -> ConfigData {
     let mut hidden = HashSet::new();
     if let Some(arr) = v.get("hidden").and_then(Value::as_array) {
         for item in arr.iter().filter_map(Value::as_str) {
-            let normalized = if item == "tarjetas" { "personalizar" } else { item };
+            let normalized = if item == "tarjetas" {
+                "personalizar"
+            } else {
+                item
+            };
             if normalized != "personalizar" && CARD_KEYS.contains(&normalized) {
                 hidden.insert(normalized.to_string());
             }
@@ -565,10 +573,7 @@ impl AppState {
             );
         } else {
             self.set_sidebar_name(Some(trimmed.clone()));
-            self.set_flash_notice(
-                Some(format!("Nombre actualizado: {trimmed}")),
-                3000,
-            );
+            self.set_flash_notice(Some(format!("Nombre actualizado: {trimmed}")), 3000);
         }
         self.is_editing_sidebar_name = false;
         self.name_input_buffer.clear();
@@ -628,15 +633,9 @@ impl AppState {
             let _ = save_account_budget(&cfg_path, pfx, parsed, current_cost, current_sid);
 
             if let Some(val) = parsed {
-                self.set_flash_notice(
-                    Some(format!("Saldo para {pfx}: ${val:.2}")),
-                    3000,
-                );
+                self.set_flash_notice(Some(format!("Saldo para {pfx}: ${val:.2}")), 3000);
             } else {
-                self.set_flash_notice(
-                    Some(format!("Saldo restablecido para {pfx}")),
-                    3000,
-                );
+                self.set_flash_notice(Some(format!("Saldo restablecido para {pfx}")), 3000);
             }
         }
         self.is_editing_balance = false;
@@ -953,9 +952,9 @@ impl AppState {
         //   tarjeta abierta (como Contexto) y el encabezado de la tarjeta siguiente (como Proyecto).
         for bound in &self.card_bounds {
             if bound.action_type.is_none()
-                && let Some(idx) = CARD_KEYS.iter().position(|&k| {
-                    k == bound.id || (k == "personalizar" && bound.id == "tarjetas")
-                })
+                && let Some(idx) = CARD_KEYS
+                    .iter()
+                    .position(|&k| k == bound.id || (k == "personalizar" && bound.id == "tarjetas"))
             {
                 let is_collapsed = self.collapsed_cards[idx];
                 let hit = if is_collapsed {

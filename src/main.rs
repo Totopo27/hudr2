@@ -155,7 +155,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    if cli.attach && !cli.once
+    if cli.attach
+        && !cli.once
         && let Ok(exe_path) = std::env::current_exe()
     {
         let attach_cwd = cli.cwd.clone().unwrap_or_else(|| {
@@ -171,10 +172,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let resolved_config = cli
         .config_path
         .or_else(|| Some(hudr2::paths::resolve_hudr2_config_path()));
-    let mut initial_state = state::AppState::with_config(
-        resolved_config,
-        cli.cwd.clone(),
-    );
+    let mut initial_state = state::AppState::with_config(resolved_config, cli.cwd.clone());
 
     if let Some(ref name) = cli.sidebar_name {
         initial_state.set_sidebar_name(Some(name.clone()));
@@ -189,9 +187,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let target_theme_str = initial_state.theme.as_deref().unwrap_or("auto");
     let active_theme = match target_theme_str {
         "auto" | "herdr" => hudr2::theme::resolve_adaptive_theme(),
-        name => hudr2::theme::find_theme(name).unwrap_or_else(|| {
-            hudr2::theme::resolve_adaptive_theme()
-        }),
+        name => {
+            hudr2::theme::find_theme(name).unwrap_or_else(|| hudr2::theme::resolve_adaptive_theme())
+        }
     };
     hudr2::theme::set_active_theme(active_theme);
 
@@ -311,14 +309,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tx_watch = tx.clone();
     std::thread::spawn(move || {
         let (raw_tx, raw_rx) = std::sync::mpsc::channel::<notify::Event>();
-        let mut watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-            if let Ok(ev) = res {
-                let _ = raw_tx.send(ev);
-            }
-        }) {
-            Ok(w) => w,
-            Err(_) => return,
-        };
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                if let Ok(ev) = res {
+                    let _ = raw_tx.send(ev);
+                }
+            }) {
+                Ok(w) => w,
+                Err(_) => return,
+            };
 
         // Vigilar .git (HEAD, index, refs)
         if let Some(git_dir) = hudr2::git::find_git_dir_for_watch(&project_dir_for_watch) {
@@ -378,7 +377,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         let name = p.file_name().unwrap_or_default();
                         name == "HEAD"
                             || name == "index"
-                            || p.components().any(|c| c.as_os_str() == ".git" || c.as_os_str() == "refs")
+                            || p.components()
+                                .any(|c| c.as_os_str() == ".git" || c.as_os_str() == "refs")
                     });
                     if is_git {
                         pending_git = true;
@@ -743,8 +743,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 // Seguridad de atajos: Los atajos de una sola tecla (incluyendo 'd: liberar',
                                 // 's: sync', 'r: act', 'q: salir', etc.) NUNCA deben dispararse si el usuario
                                 // presionó modificadores como Ctrl o Alt (ej. Ctrl+D para EOF de shell, Alt+D, etc.).
-                                let has_control_or_alt = key.modifiers.contains(KeyModifiers::CONTROL)
-                                    || key.modifiers.contains(KeyModifiers::ALT);
+                                let has_control_or_alt =
+                                    key.modifiers.contains(KeyModifiers::CONTROL)
+                                        || key.modifiers.contains(KeyModifiers::ALT);
 
                                 if !has_control_or_alt {
                                     match norm_code {
@@ -760,9 +761,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         KeyCode::Char('v') => {
                                             state.toggle_tabbed();
                                             let msg = if state.tabbed {
-                                                "+ Vista: Navegación por pestañas activada".to_string()
+                                                "+ Vista: Navegación por pestañas activada"
+                                                    .to_string()
                                             } else {
-                                                "+ Vista: Modo vertical en cascada activado".to_string()
+                                                "+ Vista: Modo vertical en cascada activado"
+                                                    .to_string()
                                             };
                                             state.set_flash_notice(Some(msg), 2500);
                                         }
@@ -902,7 +905,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     .snapshot
                                                     .accounts
                                                     .iter()
-                                                    .find(|a| a.prefix.eq_ignore_ascii_case(active_pfx))
+                                                    .find(|a| {
+                                                        a.prefix.eq_ignore_ascii_case(active_pfx)
+                                                    })
                                                     .map(hudr2::quotas::is_api_key)
                                                     .unwrap_or(false);
                                                 if is_api {
@@ -918,7 +923,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         KeyCode::Char('u') => {
                                             let now_enabled = state.toggle_check_updates();
                                             let msg = if now_enabled {
-                                                "+ Updates: Chequeo online activado (3h)".to_string()
+                                                "+ Updates: Chequeo online activado (3h)"
+                                                    .to_string()
                                             } else {
                                                 "+ Updates: Chequeo online apagado".to_string()
                                             };
@@ -950,8 +956,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     Some(&notify_cb),
                                                 )
                                                 .await;
-                                                let _ = tx_done
-                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                                let _ = tx_done.send(MainMsg::DataChanged {
+                                                    git_touched: false,
+                                                });
                                             });
                                         }
                                         KeyCode::Char('r') => {
@@ -968,8 +975,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     }),
                                                 )
                                                 .await;
-                                                let _ = tx_done
-                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                                let _ = tx_done.send(MainMsg::DataChanged {
+                                                    git_touched: false,
+                                                });
                                             });
                                         }
                                         KeyCode::Char('a') => {
@@ -986,8 +994,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     }),
                                                 )
                                                 .await;
-                                                let _ = tx_done
-                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                                let _ = tx_done.send(MainMsg::DataChanged {
+                                                    git_touched: false,
+                                                });
                                             });
                                         }
                                         KeyCode::Char('o') => {
@@ -998,7 +1007,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 .unwrap_or(&proj_dir)
                                                 .to_string();
                                             state.set_flash_notice(
-                                                Some(format!("+ Abierto en explorador: {folder_name}")),
+                                                Some(format!(
+                                                    "+ Abierto en explorador: {folder_name}"
+                                                )),
                                                 4000,
                                             );
                                             tokio::task::spawn_blocking(move || {
@@ -1010,8 +1021,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             let tx_done = tx.clone();
                                             tokio::spawn(async move {
                                                 app::release_sessions_action(&state_ref).await;
-                                                let _ = tx_done
-                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                                let _ = tx_done.send(MainMsg::DataChanged {
+                                                    git_touched: false,
+                                                });
                                             });
                                         }
                                         KeyCode::Char('x') => {
@@ -1019,8 +1031,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             let tx_done = tx.clone();
                                             tokio::spawn(async move {
                                                 app::migrate_sessions_action(&state_ref).await;
-                                                let _ = tx_done
-                                                    .send(MainMsg::DataChanged { git_touched: false });
+                                                let _ = tx_done.send(MainMsg::DataChanged {
+                                                    git_touched: false,
+                                                });
                                             });
                                         }
                                         KeyCode::Esc => state.close_quick_peek(),
@@ -1176,6 +1189,12 @@ fn spawn_tool_update(
             st.config_path.clone()
         };
         hudr2::ecosystem::hydrate_ecosystem_upstream(&mut fresh_eco, cfg_path.as_deref());
+
+        // Si terminó exitosamente, pausar brevemente (~1200ms) para que el usuario
+        // pueda ver el indicador al 100% completado en la tarjeta antes de retirar el monitor.
+        if res.is_ok() {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+        }
 
         // 4. Actualizar estado y notificar resultado
         {
