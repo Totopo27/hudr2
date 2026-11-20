@@ -919,6 +919,24 @@ impl AppState {
                 && let Some(p) = action_path
             {
                 return Some(ClickAction::UpdateTool(p));
+            } else if action == "toggle_mcp"
+                && let Some(p) = action_path.as_deref()
+                && let Some((source, name)) = p.split_once('\u{1f}')
+            {
+                let target = self
+                    .snapshot
+                    .mcps
+                    .iter()
+                    .find(|m| m.source == source && m.name == name)
+                    .map(|m| (m.shape, !m.enabled));
+                if let Some((shape, enable)) = target {
+                    return Some(ClickAction::ToggleMcp {
+                        source: source.to_string(),
+                        name: name.to_string(),
+                        shape,
+                        enable,
+                    });
+                }
             } else if action == "edit_balance"
                 && let Some(p) = action_path
             {
@@ -992,6 +1010,12 @@ pub enum ClickAction {
     StartEditSidebarName,
     ToggleCheckUpdates(bool),
     UpdateTool(String),
+    ToggleMcp {
+        source: String,
+        name: String,
+        shape: crate::models::McpConfigShape,
+        enable: bool,
+    },
     StartEditBalance(String),
     OpenBillingUrl(String),
     CycleSoundMode(crate::sound::SoundMode),

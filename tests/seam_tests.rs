@@ -179,6 +179,261 @@ mod tests {
     }
 
     #[test]
+    fn test_mcp_disabled_field_is_read_as_off() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opencode_json = dir.path().join("opencode.json");
+        std::fs::write(
+            &opencode_json,
+            r#"{
+                "mcp": {
+                    "servers": {
+                        "hudr2-fixture-off": { "type": "local", "disabled": true },
+                        "hudr2-fixture-on": { "type": "remote" }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mcps = read_mcp_servers(dir.path().to_str().unwrap());
+        let off = mcps
+            .iter()
+            .find(|m| m.name == "hudr2-fixture-off")
+            .expect("el servidor con disabled:true debe listarse");
+        let on = mcps
+            .iter()
+            .find(|m| m.name == "hudr2-fixture-on")
+            .expect("el servidor sin campo de control debe listarse");
+
+        assert!(!off.enabled, "disabled:true debe leerse como deshabilitado");
+        assert!(on.enabled, "sin campo de control el servidor está activo");
+        assert_eq!(off.shape, hudr2::models::McpConfigShape::Servers);
+        assert_eq!(off.scope, hudr2::models::McpScope::Project);
+        assert_eq!(off.source, opencode_json.display().to_string());
+        assert!(off.toggleable(), "la forma V2 admite interruptor");
+    }
+
+    #[test]
+    fn test_mcp_legacy_enabled_false_is_read_as_off() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let opencode_json = dir.path().join("opencode.json");
+        std::fs::write(
+            &opencode_json,
+            r#"{"mcp":{"hudr2-legacy-off":{"type":"local","enabled":false}}}"#,
+        )
+        .unwrap();
+
+        let mcps = read_mcp_servers(dir.path().to_str().unwrap());
+        let legacy = mcps
+            .iter()
+            .find(|m| m.name == "hudr2-legacy-off")
+            .expect("la forma V1 debe listarse");
+
+        assert!(!legacy.enabled, "enabled:false debe leerse como deshabilitado");
+        assert_eq!(legacy.shape, hudr2::models::McpConfigShape::Legacy);
+    }
+
+    #[test]
+    fn test_mcp_card_reports_configured_and_off_not_online() {
+        let mut state = AppState::new();
+        state.snapshot.mcps = vec![
+            hudr2::models::McpServer {
+                name: "hudr2-render-on".to_string(),
+                mcp_type: "local".to_string(),
+                enabled: true,
+                scope: hudr2::models::McpScope::Project,
+                shape: hudr2::models::McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+            hudr2::models::McpServer {
+                name: "hudr2-render-off".to_string(),
+                mcp_type: "remote".to_string(),
+                enabled: false,
+                scope: hudr2::models::McpScope::Global,
+                shape: hudr2::models::McpConfigShape::Legacy,
+                source: "global.json".to_string(),
+            },
+        ];
+
+        let out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 60);
+        let joined = out.lines.join("\n");
+
+        assert!(
+            joined.contains("2 configurados"),
+            "la cabecera debe contar los configurados, no los conectados: {joined}"
+        );
+        assert!(
+            joined.contains("1 deshabilitado"),
+            "la cabecera debe informar cuántos están deshabilitados: {joined}"
+        );
+        assert!(
+            joined.contains("hudr2-render-off"),
+            "los deshabilitados deben seguir visibles"
+        );
+        assert!(!joined.contains("en línea"), "no debe afirmarse conexión");
+        assert!(!joined.contains("activos"), "no debe decir «activos»");
+        assert!(
+            joined.contains("[apagar]") && joined.contains("[encender]"),
+            "cada fila con control debe ofrecer su acción: {joined}"
+        );
+        assert!(
+            joined.contains("[local\u{00b7}proj]") && joined.contains("[remote\u{00b7}global]"),
+            "el alcance debe quedar visible en la fila"
+        );
+    }
+
+    #[test]
+    fn test_set_mcp_enabled_flips_legacy_enabled_without_reordering() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let original = r#"{"zeta":1,"mcp":{"hudr2-legacy-flag":{"type":"local","enabled":true},"alpha":2},"beta":3}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let changed = hudr2::tree::set_mcp_enabled(
+            &path.display().to_string(),
+            "hudr2-legacy-flag",
+            hudr2::models::McpConfigShape::Legacy,
+            false,
+        )
+        .expect("la forma V1 debe poder deshabilitarse");
+
+        assert!(changed);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains(r#""enabled":false"#),
+            "debe escribir enabled:false: {after}"
+        );
+        assert!(
+            after.starts_with(r#"{"zeta":1,"mcp":"#),
+            "el orden de las claves debe preservarse: {after}"
+        );
+
+        let again = hudr2::tree::set_mcp_enabled(
+            &path.display().to_string(),
+            "hudr2-legacy-flag",
+            hudr2::models::McpConfigShape::Legacy,
+            false,
+        )
+        .unwrap();
+        assert!(!again, "repetir el mismo estado no debe reescribir");
+    }
+
+    #[test]
+    fn test_set_mcp_enabled_inserts_disabled_for_servers_shape() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            r#"{"mcp":{"servers":{"hudr2-insert":{"type":"local"}}}}"#,
+        )
+        .unwrap();
+
+        hudr2::tree::set_mcp_enabled(
+            &path.display().to_string(),
+            "hudr2-insert",
+            hudr2::models::McpConfigShape::Servers,
+            false,
+        )
+        .expect("la forma V2 debe aceptar la inserción de disabled");
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            after.contains("\"disabled\": true"),
+            "debe insertar disabled junto al resto del objeto: {after}"
+        );
+
+        let mcps = read_mcp_servers(dir.path().to_str().unwrap());
+        let entry = mcps
+            .iter()
+            .find(|m| m.name == "hudr2-insert")
+            .expect("el servidor debe seguir leyéndose");
+        assert!(!entry.enabled, "tras escribir, la lectura debe verlo off");
+    }
+
+    #[test]
+    fn test_set_mcp_enabled_rejects_non_strict_json_and_agent_host() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        // Coma final: JSON no estricto. Se niega a editarlo en vez de reescribir.
+        let original = r#"{"mcp":{"hudr2-loose":{"type":"local","enabled":true},}}"#;
+        std::fs::write(&path, original).unwrap();
+
+        let err = hudr2::tree::set_mcp_enabled(
+            &path.display().to_string(),
+            "hudr2-loose",
+            hudr2::models::McpConfigShape::Legacy,
+            false,
+        )
+        .expect_err("el JSON no estricto debe rechazarse");
+        assert!(err.contains("JSON"), "el error debe explicar el motivo: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "el archivo debe quedar intacto"
+        );
+
+        let agent_err = hudr2::tree::set_mcp_enabled(
+            &path.display().to_string(),
+            "hudr2-loose",
+            hudr2::models::McpConfigShape::AgentHost,
+            false,
+        )
+        .expect_err("los entornos de agente no tienen interruptor verificado");
+        assert!(
+            agent_err.contains("verificado"),
+            "el error debe explicar la falta de interruptor: {agent_err}"
+        );
+    }
+
+    #[test]
+    fn test_mcp_row_click_requests_toggle_from_snapshot() {
+        let mut state = AppState::new();
+        state.snapshot.mcps = vec![hudr2::models::McpServer {
+            name: "hudr2-click".to_string(),
+            mcp_type: "local".to_string(),
+            enabled: true,
+            scope: hudr2::models::McpScope::Global,
+            shape: hudr2::models::McpConfigShape::Servers,
+            source: "C:/tmp/opencode.json".to_string(),
+        }];
+        state.collapsed_cards[10] = false;
+
+        let render_out = ui::render_screen_with_diff(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            60,
+        );
+        state.card_bounds = render_out.bounds;
+
+        let row = state
+            .card_bounds
+            .iter()
+            .find(|b| b.action_type == Some("toggle_mcp"))
+            .expect("cada fila con control debe declarar la acción toggle_mcp");
+
+        let click = state.handle_mouse_click(row.start_line, 0);
+        assert_eq!(
+            click,
+            Some(ClickAction::ToggleMcp {
+                source: "C:/tmp/opencode.json".to_string(),
+                name: "hudr2-click".to_string(),
+                shape: hudr2::models::McpConfigShape::Servers,
+                enable: false,
+            }),
+            "el clic debe pedir el estado contrario al actual"
+        );
+    }
+
+    #[test]
     fn test_mcp_config_larger_than_one_mib_is_ignored() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();

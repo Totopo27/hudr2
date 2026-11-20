@@ -651,6 +651,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     state::ClickAction::UpdateTool(tool_name) => {
                                         spawn_tool_update(tool_name, app_state.clone(), tx.clone());
                                     }
+                                    state::ClickAction::ToggleMcp {
+                                        source,
+                                        name,
+                                        shape,
+                                        enable,
+                                    } => {
+                                        let state_word =
+                                            if enable { "habilitado" } else { "deshabilitado" };
+                                        match hudr2::tree::set_mcp_enabled(
+                                            &source, &name, shape, enable,
+                                        ) {
+                                            Ok(true) => state.set_flash_notice(
+                                                Some(format!("+ MCP «{name}»: {state_word}")),
+                                                4000,
+                                            ),
+                                            Ok(false) => state.set_flash_notice(
+                                                Some(format!(
+                                                    "+ MCP «{name}» ya estaba {state_word}"
+                                                )),
+                                                3000,
+                                            ),
+                                            Err(err) => state.set_flash_notice(
+                                                Some(format!("MCP «{name}»: {err}")),
+                                                6000,
+                                            ),
+                                        }
+                                        refresh_needed = true;
+                                    }
                                     state::ClickAction::OpenBillingUrl(url) => {
                                         let url_clone = url.clone();
                                         state.set_flash_notice(

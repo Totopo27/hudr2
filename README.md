@@ -65,7 +65,7 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 | **Engram** | `engram.db` (SQLite) | Observaciones acumuladas, estado del daemon (`7437`) y último handoff de sesión estructurado. |
 | **Stack · Ecosistema**| CLI probes | Versiones instaladas de `pi`, `hudr2`, `gentle-shell`, `gentle-ai`, `engram` y `herdr`. |
 | **Herramientas** | SQLite / IPC | Llamadas a herramientas en el turno (lecturas, escrituras, comandos bash, engram). |
-| **MCP** | IPC / configs | Servidores MCP activos y conectados al entorno. |
+| **MCP** | IPC / configs | Servidores MCP configurados, con su alcance (proyecto/global) y su estado real; incluye interruptor `[apagar]`/`[encender]` en OpenCode. |
 | **Personalizar** | `hudr2.json` | Panel de ajustes: visibilidad de módulos, tema activo y nombre personalizado del sidebar. |
 
 ---

@@ -123,7 +123,7 @@
 - `Herramientas` is index `9` (key `9`).
 - `MCP` is index `10` (toggleable via mouse click).
 - **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
-- **`MCP · <N> activos`:** Lists deduplicated MCP servers (`● <name> [local|remote] en línea`).
+- **`MCP · <N> configurados` (· `<M> deshabilitado(s)` cuando aplica):** Lists deduplicated MCP servers with their real state: `● <name> [<tipo>·<scope>]` where `scope` is `proj` (archivo del proyecto), `global` (config de usuario) or `agente` (Pi / Gentle Shell). The row shows `[apagar]` / `[encender]` only when the configuration shape has a verified persistent control field (`disabled` in `mcp.servers.<name>`, `enabled` in the legacy `mcp.<name>`); otherwise it shows `sin interruptor`. A row click emits `toggle_mcp` and rewrites only that field in the source file, preserving key order; the card never claims a live connection.
 
 ## 11. `Stack · Ecosistema` (`id: "ecosystem"`, index `11`, key `e`)
 - **Header:** `Stack · Ecosistema` (or `Stack · Ecosistema ↑<N>` in `AMBER` when updates are available).

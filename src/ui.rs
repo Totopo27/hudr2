@@ -2334,29 +2334,57 @@ pub fn render_screen_tabbed(
     // 9. MCP Card (idx 9)
     if !hidden_cards.contains("mcp") && should_render_card("mcp", tab) {
         let mcp_start = lines.len();
+        let configured = snap.mcps.len();
+        let off = snap.mcps.iter().filter(|m| !m.enabled).count();
+        let header_right = if off > 0 {
+            let noun = if off == 1 {
+                "deshabilitado"
+            } else {
+                "deshabilitados"
+            };
+            format!("{TEXT_DIM}\u{00b7} {configured} configurados \u{00b7} {off} {noun}{RESET}")
+        } else {
+            format!("{TEXT_DIM}\u{00b7} {configured} configurados{RESET}")
+        };
         lines.push(draw_top(
-            &format!(
-                "{BOLD}{title_color}MCP{RESET} {TEXT_DIM}\u{00b7} {} activos{RESET}",
-                snap.mcps.len()
-            ),
+            &format!("{BOLD}{title_color}MCP{RESET} {header_right}"),
             collapsed[10],
             width,
         ));
         if !collapsed[10] {
             for m in &snap.mcps {
+                let row_start = lines.len();
                 let dot = if m.enabled {
                     format!("{MINT}\u{25cf}{RESET}")
                 } else {
                     format!("{AMBER}\u{25cb}{RESET}")
                 };
-                let badge = format!("{TEXT_DIM}[{}]{RESET}", m.mcp_type);
+                let badge = format!(
+                    "{TEXT_DIM}[{}\u{00b7}{}]{RESET}",
+                    m.mcp_type,
+                    m.scope.badge()
+                );
                 let left = format!("{dot} {BOLD}{TEXT_PRIMARY}{}{RESET} {badge}", m.name);
-                let right = if m.enabled {
-                    format!("{MINT}en línea{RESET}")
+                let right = if m.toggleable() {
+                    if m.enabled {
+                        format!("{TEXT_DIM}[apagar]{RESET}")
+                    } else {
+                        format!("{TEXT_DIM}[encender]{RESET}")
+                    }
                 } else {
-                    format!("{TEXT_MUTED}desactivado{RESET}")
+                    format!("{TEXT_MUTED}sin interruptor{RESET}")
                 };
                 lines.push(draw_row(&left, &right, width));
+
+                if m.toggleable() {
+                    bounds.push(CardBounds {
+                        id: "mcp",
+                        start_line: row_start,
+                        end_line: row_start,
+                        action_type: Some("toggle_mcp"),
+                        action_path: Some(format!("{}\u{1f}{}", m.source, m.name)),
+                    });
+                }
             }
         }
         lines.push(draw_bottom(width));

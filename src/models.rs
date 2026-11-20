@@ -226,11 +226,66 @@ pub struct AccountQuota {
     pub pools: Vec<QuotaPool>,
 }
 
+/// Dónde vive la definición MCP, para que la tarjeta muestre el alcance real
+/// antes de permitir un cambio persistente.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpScope {
+    #[default]
+    Project,
+    Global,
+    Agent,
+}
+
+impl McpScope {
+    pub fn badge(self) -> &'static str {
+        match self {
+            McpScope::Project => "proj",
+            McpScope::Global => "global",
+            McpScope::Agent => "agente",
+        }
+    }
+}
+
+/// Forma de configuración que define el servidor. Determina qué campo gobierna
+/// su estado (`disabled` en V2, `enabled` en la forma V1 compatible).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum McpConfigShape {
+    /// `mcp.servers.<name>` (OpenCode V2). Campo de control: `disabled`.
+    #[default]
+    Servers,
+    /// `mcp.<name>` (forma V1, aún compatible). Campo de control: `enabled`.
+    Legacy,
+    /// `mcpServers.<name>` (Pi / Gentle Shell). Sin toggle hasta verificar su semántica.
+    AgentHost,
+}
+
+impl McpConfigShape {
+    /// Campo persistente que controla el estado, o `None` si no está verificado.
+    pub fn control_key(self) -> Option<&'static str> {
+        match self {
+            McpConfigShape::Servers => Some("disabled"),
+            McpConfigShape::Legacy => Some("enabled"),
+            McpConfigShape::AgentHost => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct McpServer {
     pub name: String,
     pub mcp_type: String, // "local" | "remote"
     pub enabled: bool,
+    pub scope: McpScope,
+    pub shape: McpConfigShape,
+    /// Ruta absoluta del archivo que define este servidor.
+    pub source: String,
+}
+
+impl McpServer {
+    /// Solo se ofrece toggle cuando existe un campo documentado para escribir.
+    pub fn toggleable(&self) -> bool {
+        self.shape.control_key().is_some() && !self.source.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
