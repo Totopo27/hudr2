@@ -143,12 +143,20 @@ pub fn apply_api_session_telemetry(
         .pointer("/tokens/output")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(session.tokens_output);
-    session.agent_status =
-        if root.pointer("/time/idle").is_some() || root.pointer("/time/archived").is_some() {
-            "idle".to_string()
-        } else {
-            "working".to_string()
-        };
+    let busy_ts = root.pointer("/time/busy").and_then(serde_json::Value::as_i64);
+    let idle_ts = root.pointer("/time/idle").and_then(serde_json::Value::as_i64);
+    let archived_ts = root
+        .pointer("/time/archived")
+        .and_then(serde_json::Value::as_i64);
+    if archived_ts.is_some() {
+        session.agent_status = "idle".to_string();
+    } else if let (Some(b), Some(i)) = (busy_ts, idle_ts) {
+        session.agent_status = if b > i { "working" } else { "idle" }.to_string();
+    } else if idle_ts.is_some() {
+        session.agent_status = "idle".to_string();
+    } else if busy_ts.is_some() {
+        session.agent_status = "working".to_string();
+    }
 
     session.subagent_invocations.clear();
     for item in items {
@@ -318,13 +326,13 @@ pub fn read_opencode_session(
     my_pane_id: Option<&str>,
     my_tab_id: Option<&str>,
 ) -> AgentSession {
-    let default_model = "gemini-3.8-flash-high".to_string();
+    let default_model = "sin-modelo".to_string();
     let default_limit = resolve_model_context_limit(&default_model);
     let mut session = AgentSession {
         provider_name: "opencode".to_string(),
         agent: "orchestrator".to_string(),
         model: default_model,
-        model_short: "gemini-3.8-flash-h".to_string(),
+        model_short: "sin-modelo".to_string(),
         context_limit: default_limit,
         agent_status: "idle".to_string(),
         ..Default::default()
@@ -344,9 +352,22 @@ pub fn read_opencode_session(
 
     let norm_target = crate::paths::normalize_path(target_dir);
     let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, Some(""));
+    let is_not_self = |p: &HerdrPane| my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true);
+    let is_pi_pane = |p: &HerdrPane| -> bool {
+        matches!(
+            p.agent.as_deref(),
+            Some("pi") | Some("gentle-shell") | Some("gs2")
+        ) || p
+            .agent_session_id
+            .as_deref()
+            .is_some_and(|s| s.ends_with(".jsonl"))
+    };
 
     // 1. Recolectar TODAS las cuentas activas desde los panes vivos de Herdr
     for p in herdr_panes {
+        if is_pi_pane(p) {
+            continue;
+        }
         // Solo considerar panes que realmente estén ejecutando OpenCode o pertenezcan al espacio actual
         let is_agent_pane = p.agent_session_id.is_some()
             || p.agent.as_deref() == Some("opencode")
@@ -392,7 +413,8 @@ pub fn read_opencode_session(
     let sibling_pane = my_tab_id.and_then(|tid| {
         herdr_panes.iter().find(|p| {
             p.tab_id.as_deref() == Some(tid)
-                && my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true)
+                && is_not_self(p)
+                && !is_pi_pane(p)
                 && (p.agent_session_id.is_some()
                     || p.agent.as_deref() == Some("opencode")
                     || is_same_cwd(p))
@@ -400,17 +422,26 @@ pub fn read_opencode_session(
     });
 
     // Prioridad para este espacio: panes que pertenezcan exactamente a este cwd (norm_target)
-    let cwd_focused = herdr_panes.iter().find(|p| is_same_cwd(p) && p.focused);
-    let cwd_working = herdr_panes
+    let cwd_focused = herdr_panes
         .iter()
-        .find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working"));
-    let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p));
+        .find(|p| is_same_cwd(p) && is_not_self(p) && !is_pi_pane(p) && p.focused);
+    let cwd_working = herdr_panes.iter().find(|p| {
+        is_same_cwd(p)
+            && is_not_self(p)
+            && !is_pi_pane(p)
+            && p.agent_status.as_deref() == Some("working")
+    });
+    let cwd_any = herdr_panes
+        .iter()
+        .find(|p| is_same_cwd(p) && is_not_self(p) && !is_pi_pane(p));
 
     // Fallback global sólo si ningún pane está en este directorio
-    let global_focused = herdr_panes.iter().find(|p| p.focused);
-    let global_working = herdr_panes
+    let global_focused = herdr_panes
         .iter()
-        .find(|p| p.agent_status.as_deref() == Some("working"));
+        .find(|p| is_not_self(p) && !is_pi_pane(p) && p.focused);
+    let global_working = herdr_panes.iter().find(|p| {
+        is_not_self(p) && !is_pi_pane(p) && p.agent_status.as_deref() == Some("working")
+    });
 
     let primary_pane = sibling_pane
         .or(cwd_focused)

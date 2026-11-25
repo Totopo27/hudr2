@@ -15,12 +15,12 @@
 ---
 
 ## 0. `Estado` (`id: "estado"`, index `0`)
-- **Header:** `Estado · ● trabajando` (cyan), `-- idle` (muted), `! bloqueado` (coral), or `+ listo` (mint).
+- **Header:** `Estado · >> WORKING` (amber), `-- idle` (dim), `! bloqueado` (coral), or `+ listo` (mint).
 - **Rows:**
   - `Proyecto`: shortened workspace path (`~/.../name`).
-  - `Rama`: `# <branch> ±<dirty_count>` (or `sin git`).
+  - `Rama`: `# <branch> limpio` / `# <branch> ±<unique_dirty_count>` (using unique `git.files.len()` when available), or `sin git` when `git.has_git == false`.
   - `Modelo`: active model short name (`snap.agent_session.model_short`) + optional `[thinking_level]`.
-  - Footer summary row: `mem: <project> · <N> MCPs · <agent_or_provider>`.
+  - Footer summary row: `mem: <engram_project_or_folder> · <enabled_MCPs> MCPs · <sorted_agent_or_provider>`.
   - Optional `Tareas` preview when `snap.agent_session.todos` is non-empty (`✓`, `◉`, `○`).
 
 ## 1. `Contexto` (`id: "contexto"`, index `1`)

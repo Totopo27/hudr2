@@ -506,6 +506,21 @@ impl HerdrClient {
         Self::run_herdr_cli(&["pane", "close", pane_id]).is_some()
     }
 
+    pub fn build_subscribe_payload() -> Value {
+        json!({
+            "id": "events",
+            "method": "events.subscribe",
+            "params": {
+                "subscriptions": [
+                    {"type": "pane.updated"},
+                    {"type": "pane.closed"},
+                    {"type": "workspace.focused"},
+                    {"type": "pane.agent_status_changed"}
+                ]
+            }
+        })
+    }
+
     /// Inicia un hilo suscriptor al stream NDJSON `events.subscribe` de Herdr cuando el socket/pipe existe.
     pub fn spawn_event_subscriber<F>(bound_pane_id: Option<String>, on_event: F)
     where
@@ -518,22 +533,7 @@ impl HerdrClient {
         std::thread::spawn(move || {
             let mut backoff_secs = 1u64;
             loop {
-                let mut subs = vec![
-                    json!({"type": "pane.updated"}),
-                    json!({"type": "pane.closed"}),
-                    json!({"type": "workspace.focused"}),
-                ];
-                if let Some(ref pid) = bound_pane_id {
-                    subs.push(json!({"type": "pane.agent_status_changed", "pane_id": pid}));
-                } else {
-                    subs.push(json!({"type": "pane.agent_status_changed"}));
-                }
-
-                let subscribe_msg = json!({
-                    "id": "events",
-                    "method": "events.subscribe",
-                    "params": { "subscriptions": subs }
-                });
+                let subscribe_msg = Self::build_subscribe_payload();
 
                 #[cfg(unix)]
                 let connected = {

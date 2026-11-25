@@ -316,22 +316,26 @@ pub fn read_pi_session_file(
         }
     }
 
-    // Fallback a settings.json si la sesión es recién creada y aún no tiene turno de asistente
-    if tail.session.model.is_empty()
+    // Fallback a settings.json cuando falta modelo o thinking_level en .jsonl
+    if (tail.session.model.is_empty() || tail.session.thinking_level.is_none())
         && let Some(ref ad) = agent_dir
         && let Ok(raw) = crate::paths::read_config_bytes(ad.join("settings.json"))
         && let Ok(settings) = serde_json::from_slice::<Value>(&raw)
     {
-        let def_model = json_str(&settings, "defaultModel");
-        let def_prov = json_str(&settings, "defaultProvider");
-        let def_think = json_str(&settings, "defaultThinkingLevel");
-        if !def_model.is_empty() {
-            tail.raw_model_id = def_model.to_string();
-            tail.raw_provider = def_prov.to_string();
-            tail.sync_model_fields();
+        if tail.session.model.is_empty() {
+            let def_model = json_str(&settings, "defaultModel");
+            let def_prov = json_str(&settings, "defaultProvider");
+            if !def_model.is_empty() {
+                tail.raw_model_id = def_model.to_string();
+                tail.raw_provider = def_prov.to_string();
+                tail.sync_model_fields();
+            }
         }
-        if tail.session.thinking_level.is_none() && !def_think.is_empty() {
-            tail.session.thinking_level = Some(def_think.to_string());
+        if tail.session.thinking_level.is_none() {
+            let def_think = json_str(&settings, "defaultThinkingLevel");
+            if !def_think.is_empty() {
+                tail.session.thinking_level = Some(def_think.to_string());
+            }
         }
     }
 
@@ -399,6 +403,14 @@ pub fn apply_pane_metadata_tokens(
 ) {
     if tokens.is_empty() {
         return;
+    }
+
+    if let Some(status) = tokens
+        .get("agent_status")
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
+    {
+        session.agent_status = status.to_string();
     }
 
     if let Some(profile) = tokens
@@ -526,6 +538,12 @@ pub fn try_read_pi_session(
 
     let norm_target = crate::paths::normalize_path(target_dir);
 
+    let is_not_self = |p: &HerdrPane| my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true);
+    let is_opencode_agent = |p: &HerdrPane| {
+        p.agent
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case("opencode"))
+    };
     let is_pi_pane = |p: &HerdrPane| -> bool {
         let has_jsonl = p
             .agent_session_id
@@ -535,7 +553,17 @@ pub fn try_read_pi_session(
             p.agent.as_deref(),
             Some("pi") | Some("gentle-shell") | Some("gs2")
         );
-        has_jsonl || is_pi_agent || !p.tokens.is_empty()
+        has_jsonl || is_pi_agent || (!is_opencode_agent(p) && !p.tokens.is_empty())
+    };
+    let is_opencode_pane = |p: &HerdrPane| -> bool {
+        !is_pi_pane(p)
+            && (is_opencode_agent(p)
+                || p.agent_session_id
+                    .as_deref()
+                    .is_some_and(|s| !s.is_empty() && !s.ends_with(".jsonl"))
+                || p.terminal_title
+                    .as_deref()
+                    .is_some_and(|t| t.to_lowercase().contains("opencode")))
     };
 
     let is_same_cwd = |p: &HerdrPane| -> bool {
@@ -543,24 +571,54 @@ pub fn try_read_pi_session(
     };
 
     let sibling = my_tab_id.and_then(|tid| {
-        herdr_panes.iter().find(|p| {
-            p.tab_id.as_deref() == Some(tid)
-                && my_pane_id.map(|mp| mp != p.pane_id).unwrap_or(true)
-                && is_pi_pane(p)
-        })
+        herdr_panes
+            .iter()
+            .find(|p| p.tab_id.as_deref() == Some(tid) && is_not_self(p) && is_pi_pane(p))
     });
+    if sibling.is_none()
+        && let Some(tid) = my_tab_id
+        && herdr_panes
+            .iter()
+            .any(|p| p.tab_id.as_deref() == Some(tid) && is_not_self(p) && is_opencode_pane(p))
+    {
+        return None;
+    }
+
     let cwd_focused = herdr_panes
         .iter()
-        .find(|p| is_same_cwd(p) && p.focused && is_pi_pane(p));
-    let cwd_working = herdr_panes
+        .find(|p| is_same_cwd(p) && is_not_self(p) && p.focused && is_pi_pane(p));
+    let cwd_working = herdr_panes.iter().find(|p| {
+        is_same_cwd(p)
+            && is_not_self(p)
+            && p.agent_status.as_deref() == Some("working")
+            && is_pi_pane(p)
+    });
+    let cwd_any = herdr_panes
         .iter()
-        .find(|p| is_same_cwd(p) && p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
-    let cwd_any = herdr_panes.iter().find(|p| is_same_cwd(p) && is_pi_pane(p));
+        .find(|p| is_same_cwd(p) && is_not_self(p) && is_pi_pane(p));
 
-    let global_focused = herdr_panes.iter().find(|p| p.focused && is_pi_pane(p));
+    if sibling.is_none()
+        && cwd_focused.is_none()
+        && cwd_working.is_none()
+        && cwd_any.is_none()
+        && herdr_panes
+            .iter()
+            .any(|p| is_same_cwd(p) && is_not_self(p) && is_opencode_pane(p))
+    {
+        return None;
+    }
+
+    let allows_global_pi = |p: &HerdrPane| -> bool {
+        is_not_self(p)
+            && is_pi_pane(p)
+            && (norm_target.is_empty() || p.cwd.is_none() || is_same_cwd(p))
+    };
+    let global_focused = herdr_panes
+        .iter()
+        .find(|p| p.focused && allows_global_pi(p));
     let global_working = herdr_panes
         .iter()
-        .find(|p| p.agent_status.as_deref() == Some("working") && is_pi_pane(p));
+        .find(|p| p.agent_status.as_deref() == Some("working") && allows_global_pi(p));
 
     let target_pane = sibling
         .or(cwd_focused)

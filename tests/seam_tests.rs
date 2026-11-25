@@ -8044,4 +8044,356 @@ api-keys:
         );
         assert!(st3.snapshot.tabbed_view);
     }
+
+    #[test]
+    fn test_estado_card_renders_all_statuses_non_git_unique_dirty_and_enabled_mcps() {
+        use hudr2::models::{GitFileChange, McpConfigShape, McpScope, McpServer};
+        use hudr2::state::ActiveTab;
+
+        let mut state = AppState::new();
+        state.snapshot.project_dir = "D:/workspace/demo".to_string();
+        state.snapshot.engram.project = "hudr2-x".to_string();
+        state.snapshot.agent_session.model_short = "gemini-3.8-flash-high".to_string();
+        state.snapshot.agent_session.all_active_prefixes.insert("agy2".to_string());
+        state.snapshot.agent_session.all_active_prefixes.insert("agy".to_string());
+        state.snapshot.mcps = vec![
+            McpServer {
+                name: "engram".to_string(),
+                mcp_type: "local".to_string(),
+                enabled: true,
+                scope: McpScope::Global,
+                shape: McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+            McpServer {
+                name: "context7".to_string(),
+                mcp_type: "remote".to_string(),
+                enabled: true,
+                scope: McpScope::Global,
+                shape: McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+            McpServer {
+                name: "disabled-srv".to_string(),
+                mcp_type: "local".to_string(),
+                enabled: false,
+                scope: McpScope::Global,
+                shape: McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+        ];
+
+        // 1. Status states + non-git ("sin git")
+        let cases = [
+            ("working", ">> WORKING"),
+            ("blocked", "! bloqueado"),
+            ("ready", "+ listo"),
+            ("idle", "-- idle"),
+        ];
+        for (status, expected_badge) in cases {
+            state.snapshot.agent_session.agent_status = status.to_string();
+            state.snapshot.git.has_git = false;
+            state.snapshot.git.branch = "main".to_string();
+
+            let out = ui::render_screen_tabbed(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                48,
+                hudr2::theme::active_theme(),
+                Some(ActiveTab::Sesion),
+            );
+            let plain = ui::strip_ansi(&out.lines.join("\n"));
+            assert!(
+                plain.contains(expected_badge),
+                "status '{status}' debe renderizar '{expected_badge}':\n{plain}"
+            );
+            assert!(
+                plain.contains("sin git") && !plain.contains("# main"),
+                "has_git=false debe renderizar 'sin git' y no '# main':\n{plain}"
+            );
+        }
+
+        // 2. Untracked-only dirty count -> ±2 (not ±0)
+        state.snapshot.git.has_git = true;
+        state.snapshot.git.is_clean = false;
+        state.snapshot.git.modified = 0;
+        state.snapshot.git.staged = 0;
+        state.snapshot.git.untracked = 2;
+        state.snapshot.git.files = vec![
+            GitFileChange {
+                path: "new1.rs".to_string(),
+                status_code: "?".to_string(),
+                added: 0,
+                deleted: 0,
+            },
+            GitFileChange {
+                path: "new2.rs".to_string(),
+                status_code: "?".to_string(),
+                added: 0,
+                deleted: 0,
+            },
+        ];
+        let out_untracked = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let plain_untracked = ui::strip_ansi(&out_untracked.lines.join("\n"));
+        assert!(
+            plain_untracked.contains("# main ±2"),
+            "2 untracked deben mostrarse como ±2:\n{plain_untracked}"
+        );
+
+        // 3. Single MM file (modified=1, staged=1, files.len()=1) -> ±1 (not ±2)
+        state.snapshot.git.modified = 1;
+        state.snapshot.git.staged = 1;
+        state.snapshot.git.untracked = 0;
+        state.snapshot.git.files = vec![GitFileChange {
+            path: "src/lib.rs".to_string(),
+            status_code: "M".to_string(),
+            added: 1,
+            deleted: 0,
+        }];
+        let out_mm = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let plain_mm = ui::strip_ansi(&out_mm.lines.join("\n"));
+        assert!(
+            plain_mm.contains("# main ±1"),
+            "1 archivo MM debe mostrarse como ±1:\n{plain_mm}"
+        );
+
+        // 4. Footer counts only enabled MCPs (2, not 3), uses engram.project, and sorts prefixes deterministically
+        assert!(
+            plain_mm.contains("2 MCPs") && !plain_mm.contains("3 MCPs"),
+            "Estado debe contar solo MCPs habilitados (2 MCPs):\n{plain_mm}"
+        );
+        assert!(
+            plain_mm.contains("mem: hudr2-x"),
+            "Estado debe mostrar engram.project en footer:\n{plain_mm}"
+        );
+        assert!(
+            plain_mm.contains("* agy * * agy2 *"),
+            "all_active_prefixes debe renderizarse en orden alfabético determinista:\n{plain_mm}"
+        );
+    }
+
+    #[test]
+    fn test_herdr_pi_opencode_isolation_and_estado_status_truth() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::AgentSession;
+        use hudr2::opencode::{apply_api_session_telemetry, read_opencode_session};
+        use hudr2::pi::{apply_pane_metadata_tokens, read_pi_session_file, try_read_pi_session};
+        use rusqlite::Connection;
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        struct EnvGuard {
+            prev_oc: Option<String>,
+            prev_pi: Option<String>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(ref v) = self.prev_oc {
+                        std::env::set_var("OPENCODE_DB_PATH", v);
+                    } else {
+                        std::env::remove_var("OPENCODE_DB_PATH");
+                    }
+                    if let Some(ref v) = self.prev_pi {
+                        std::env::set_var("PI_SESSION_PATH", v);
+                    } else {
+                        std::env::remove_var("PI_SESSION_PATH");
+                    }
+                }
+            }
+        }
+        let _env_guard = EnvGuard {
+            prev_oc: std::env::var("OPENCODE_DB_PATH").ok(),
+            prev_pi: std::env::var("PI_SESSION_PATH").ok(),
+        };
+        unsafe {
+            std::env::remove_var("PI_SESSION_PATH");
+        }
+
+        // 1. OpenCode pane carrying Herdr tokens must NOT be hijacked by try_read_pi_session
+        let mut oc_tokens = HashMap::new();
+        oc_tokens.insert("ctx_tok".to_string(), "12000".to_string());
+        let oc_pane = HerdrPane {
+            pane_id: "tab_oc:p_oc".to_string(),
+            tab_id: Some("tab_oc".to_string()),
+            cwd: Some("D:/my-opencode-proj".to_string()),
+            focused: true,
+            agent_status: Some("working".to_string()),
+            agent: Some("opencode".to_string()),
+            agent_session_id: Some("ses_oc_1".to_string()),
+            tokens: oc_tokens,
+            ..Default::default()
+        };
+        let pi_foreign_pane = HerdrPane {
+            pane_id: "tab_pi:p_pi".to_string(),
+            tab_id: Some("tab_pi".to_string()),
+            cwd: Some("D:/other-pi-proj".to_string()),
+            focused: true,
+            agent_status: Some("working".to_string()),
+            agent: Some("pi".to_string()),
+            agent_session_id: Some("D:/other-pi-proj/.pi/sessions/foreign.jsonl".to_string()),
+            ..Default::default()
+        };
+        let hud_self_pane = HerdrPane {
+            pane_id: "tab_oc:hud".to_string(),
+            tab_id: Some("tab_oc".to_string()),
+            cwd: Some("D:/my-opencode-proj".to_string()),
+            focused: true,
+            agent_status: None,
+            ..Default::default()
+        };
+
+        // 1a. Tab with OpenCode pane + foreign Pi pane -> try_read_pi_session returns None
+        assert!(
+            try_read_pi_session(
+                "D:/my-opencode-proj",
+                &[oc_pane.clone(), pi_foreign_pane.clone(), hud_self_pane.clone()],
+                &[],
+                Some("tab_oc:hud"),
+                Some("tab_oc"),
+            )
+            .is_none(),
+            "OpenCode pane con tokens + pane Pi ajeno no debe secuestrarse por try_read_pi_session"
+        );
+
+        // 1b. No local Pi pane at all, only foreign Pi pane -> returns None
+        assert!(
+            try_read_pi_session(
+                "D:/my-opencode-proj",
+                &[pi_foreign_pane],
+                &[],
+                Some("tab_oc:hud"),
+                Some("tab_oc"),
+            )
+            .is_none(),
+            "Pane Pi en otro cwd no debe secuestrar un workspace distinto"
+        );
+
+        // 2. read_opencode_session skips HUDR2's own focused pane and picks working OpenCode pane
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (
+                id TEXT PRIMARY KEY, agent TEXT, model TEXT, directory TEXT,
+                title TEXT, time_updated INTEGER, time_archived INTEGER,
+                tokens_input INTEGER, tokens_output INTEGER, cost REAL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_v2 (id, agent, model, directory, title, time_updated, time_archived, tokens_input, tokens_output, cost)
+             VALUES ('ses_oc_1', 'opencode-orch', 'cliproxy/agy/gemini-3.8-flash-high', 'D:/my-opencode-proj', 'oc', 2000, NULL, 100, 10, 0.01)",
+            [],
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        let oc_session = read_opencode_session(
+            "D:/my-opencode-proj",
+            &[hud_self_pane, oc_pane],
+            &[],
+            Some("tab_oc:hud"),
+            None,
+        );
+        assert_eq!(
+            oc_session.agent_status, "working",
+            "read_opencode_session debe ignorar el pane propio del HUD aunque tenga foco"
+        );
+
+        // 3. apply_api_session_telemetry status timestamp comparison & null handling
+        let mut api_ses = AgentSession {
+            session_id: Some("ses_oc_1".to_string()),
+            agent_status: "blocked".to_string(),
+            ..Default::default()
+        };
+        apply_api_session_telemetry(
+            &mut api_ses,
+            "D:/my-opencode-proj",
+            &[],
+            &json!({ "data": [{ "id": "ses_oc_1", "time": { "idle": null, "busy": 50 }, "location": { "directory": "D:/my-opencode-proj" } }] }),
+        );
+        assert_eq!(api_ses.agent_status, "working");
+
+        apply_api_session_telemetry(
+            &mut api_ses,
+            "D:/my-opencode-proj",
+            &[],
+            &json!({ "data": [{ "id": "ses_oc_1", "time": { "busy": 50, "idle": 40 }, "location": { "directory": "D:/my-opencode-proj" } }] }),
+        );
+        assert_eq!(api_ses.agent_status, "working");
+
+        apply_api_session_telemetry(
+            &mut api_ses,
+            "D:/my-opencode-proj",
+            &[],
+            &json!({ "data": [{ "id": "ses_oc_1", "time": { "busy": 40, "idle": 50 }, "location": { "directory": "D:/my-opencode-proj" } }] }),
+        );
+        assert_eq!(api_ses.agent_status, "idle");
+
+        api_ses.agent_status = "blocked".to_string();
+        apply_api_session_telemetry(
+            &mut api_ses,
+            "D:/my-opencode-proj",
+            &[],
+            &json!({ "data": [{ "id": "ses_oc_1", "time": { "created": 10, "updated": 20 }, "location": { "directory": "D:/my-opencode-proj" } }] }),
+        );
+        assert_eq!(
+            api_ses.agent_status, "blocked",
+            "Sin busy/idle/archived en /api/session debe preservar estado previo"
+        );
+
+        // 4. Pi settings.json defaultThinkingLevel loads even when .jsonl already has a model message
+        let pi_agent_dir = tmp.path().join(".pi");
+        let pi_sess_dir = pi_agent_dir.join("sessions").join("proj");
+        std::fs::create_dir_all(&pi_sess_dir).unwrap();
+        std::fs::write(
+            pi_agent_dir.join("settings.json"),
+            r#"{"defaultModel":"claude-sonnet-4","defaultThinkingLevel":"high"}"#,
+        )
+        .unwrap();
+        let jsonl_path = pi_sess_dir.join("s1.jsonl");
+        std::fs::write(
+            &jsonl_path,
+            "{\"type\":\"model_change\",\"provider\":\"anthropic\",\"modelId\":\"claude-opus-4-6\"}\n",
+        )
+        .unwrap();
+        hudr2::pi::clear_pi_tail_cache();
+        let pi_ses = read_pi_session_file(&jsonl_path, &[], "idle").unwrap();
+        assert_eq!(pi_ses.model_short, "claude-opus-4-6");
+        assert_eq!(
+            pi_ses.thinking_level.as_deref(),
+            Some("high"),
+            "defaultThinkingLevel debe cargarse si .jsonl ya tiene modelo sin thinking_level_change"
+        );
+
+        // 5. apply_pane_metadata_tokens honors tokens["agent_status"]
+        let mut meta_ses = AgentSession {
+            agent_status: "idle".to_string(),
+            ..Default::default()
+        };
+        let mut meta_tokens = HashMap::new();
+        meta_tokens.insert("agent_status".to_string(), "blocked".to_string());
+        apply_pane_metadata_tokens(&mut meta_ses, &meta_tokens, &[]);
+        assert_eq!(meta_ses.agent_status, "blocked");
+
+        // 6. HerdrClient::build_subscribe_payload subscribes to pane.agent_status_changed without pane_id lock-in
+        let sub_payload = hudr2::herdr::HerdrClient::build_subscribe_payload();
+        let subs = sub_payload["params"]["subscriptions"]
+            .as_array()
+            .expect("subscriptions debe ser un arreglo");
+        let status_sub = subs
+            .iter()
+            .find(|s| s.get("type").and_then(|v| v.as_str()) == Some("pane.agent_status_changed"))
+            .expect("debe incluir pane.agent_status_changed");
+        assert!(
+            status_sub.get("pane_id").is_none(),
+            "la suscripción de estado no debe restringirse a HERDR_PANE_ID"
+        );
+    }
 }

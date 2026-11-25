@@ -606,6 +606,7 @@ pub fn render_screen_tabbed(
     let accent_secondary = theme.accent_secondary;
     let mint = theme.mint;
     let amber = theme.amber;
+    let coral = theme.coral;
     let text_primary = theme.text_primary;
     let text_muted = theme.text_muted;
     let text_dim = theme.text_dim;
@@ -659,33 +660,43 @@ pub fn render_screen_tabbed(
     // 2. Estado Card (0)
     if !hidden_cards.contains("estado") && should_render_card("estado", tab) {
         let estado_start = lines.len();
-        let is_working = snap.agent_session.agent_status == "working";
-        let petal = if is_working {
-            format!("{BOLD}{AMBER}>> WORKING{RESET}")
-        } else {
-            format!("{TEXT_DIM}-- idle{RESET}")
+        let status_low = snap.agent_session.agent_status.to_lowercase();
+        let petal = match status_low.as_str() {
+            "working" | "busy" => format!("{BOLD}{amber}>> WORKING{RESET}"),
+            "blocked" | "waiting" | "needs_input" => {
+                format!("{BOLD}{coral}! bloqueado{RESET}")
+            }
+            "ready" | "done" => format!("{mint}+ listo{RESET}"),
+            _ => format!("{text_dim}-- idle{RESET}"),
         };
         let estado_title =
-            format!("{BOLD}{title_color}Estado{RESET} {TEXT_DIM}\u{00b7}{RESET} {petal}");
+            format!("{BOLD}{title_color}Estado{RESET} {text_dim}\u{00b7}{RESET} {petal}");
         lines.push(draw_top(&estado_title, collapsed[0], width));
         if !collapsed[0] {
             let short_proj = truncate_plain(folder, 18);
             lines.push(draw_row(
                 &format!("{label_color}Proyecto{RESET}"),
-                &format!("{TEXT_PRIMARY}~/.../{short_proj}{RESET}"),
+                &format!("{text_primary}~/.../{short_proj}{RESET}"),
                 width,
             ));
-            let dirty = if snap.git.is_clean {
-                format!("{MINT}limpio{RESET}")
+            let branch_value = if !snap.git.has_git {
+                format!("{text_dim}sin git{RESET}")
+            } else if snap.git.is_clean {
+                format!("{cyan}# {}{RESET} {mint}limpio{RESET}", snap.git.branch)
             } else {
+                let dirty_count = if !snap.git.files.is_empty() {
+                    snap.git.files.len()
+                } else {
+                    snap.git.modified + snap.git.staged + snap.git.untracked
+                };
                 format!(
-                    "{AMBER}\u{00b1}{}{RESET}",
-                    snap.git.modified + snap.git.staged
+                    "{cyan}# {}{RESET} {amber}\u{00b1}{dirty_count}{RESET}",
+                    snap.git.branch
                 )
             };
             lines.push(draw_row(
                 &format!("{label_color}Rama{RESET}"),
-                &format!("{CYAN}# {}{RESET} {dirty}", snap.git.branch),
+                &branch_value,
                 width,
             ));
             let model_disp = match snap
@@ -695,7 +706,7 @@ pub fn render_screen_tabbed(
                 .filter(|t| !t.is_empty())
             {
                 Some(lvl) => format!(
-                    "{accent_primary}{}{RESET} {TEXT_MUTED}[{lvl}]{RESET}",
+                    "{accent_primary}{}{RESET} {text_muted}[{lvl}]{RESET}",
                     snap.agent_session.model_short
                 ),
                 None => format!("{accent_primary}{}{RESET}", snap.agent_session.model_short),
@@ -726,11 +737,11 @@ pub fn render_screen_tabbed(
                     }
                 }
                 let counts = format!(
-                    "{MINT}\u{2713}{done}{RESET} {AMBER}\u{25c9}{in_prog}{RESET} {TEXT_DIM}\u{25cb}{pending}{RESET}"
+                    "{mint}\u{2713}{done}{RESET} {amber}\u{25c9}{in_prog}{RESET} {text_dim}\u{25cb}{pending}{RESET}"
                 );
                 let right_todo = if let Some(t) = active_title {
                     let short_t = truncate_plain(t, 14);
-                    format!("{counts} {TEXT_MUTED}{short_t}{RESET}")
+                    format!("{counts} {text_muted}{short_t}{RESET}")
                 } else {
                     counts
                 };
@@ -742,24 +753,36 @@ pub fn render_screen_tabbed(
             }
 
             let active_prof_labels = if let Some(ref lp) = snap.agent_session.local_prefix {
-                format!("{accent_secondary}*{RESET} {MINT}{lp}{RESET} {accent_secondary}*{RESET}")
+                format!("{accent_secondary}*{RESET} {mint}{lp}{RESET} {accent_secondary}*{RESET}")
             } else if snap.agent_session.all_active_prefixes.is_empty() {
-                format!("{TEXT_MUTED}default{RESET}")
+                format!("{text_muted}default{RESET}")
             } else {
-                snap.agent_session
+                let mut prefixes: Vec<&str> = snap
+                    .agent_session
                     .all_active_prefixes
                     .iter()
+                    .map(String::as_str)
+                    .collect();
+                prefixes.sort_unstable();
+                prefixes
+                    .into_iter()
                     .map(|p| {
                         format!(
-                            "{accent_secondary}*{RESET} {MINT}{p}{RESET} {accent_secondary}*{RESET}"
+                            "{accent_secondary}*{RESET} {mint}{p}{RESET} {accent_secondary}*{RESET}"
                         )
                     })
                     .collect::<Vec<_>>()
                     .join(" ")
             };
+            let mem_name = if !snap.engram.project.is_empty() {
+                snap.engram.project.as_str()
+            } else {
+                folder
+            };
+            let short_mem = truncate_plain(mem_name, 14);
+            let active_mcps = snap.mcps.iter().filter(|m| m.enabled).count();
             let sub_vitals = format!(
-                "{accent_primary}mem:{RESET} {TEXT_PRIMARY}{folder}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_MUTED}{} MCPs{RESET} {TEXT_DIM}\u{00b7}{RESET} {active_prof_labels}",
-                snap.mcps.len()
+                "{accent_primary}mem:{RESET} {text_primary}{short_mem}{RESET} {text_dim}\u{00b7}{RESET} {text_muted}{active_mcps} MCPs{RESET} {text_dim}\u{00b7}{RESET} {active_prof_labels}"
             );
             lines.push(draw_row(
                 &sub_vitals,
