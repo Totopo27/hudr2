@@ -182,6 +182,14 @@ impl PiTail {
                 }
                 "message" if json_str(&v["message"], "role") == "assistant" => {
                     let m = &v["message"];
+                    if let Some(mod_str) = m["model"].as_str().filter(|x| !x.is_empty()) {
+                        self.raw_model_id = mod_str.to_string();
+                    }
+                    if let Some(prov_str) = m["provider"].as_str().filter(|x| !x.is_empty()) {
+                        self.raw_provider = prov_str.to_string();
+                    }
+                    self.sync_model_fields();
+
                     let u = &m["usage"];
                     let inp = u["input"].as_i64().unwrap_or(0);
                     let outp = u["output"].as_i64().unwrap_or(0);
@@ -190,25 +198,26 @@ impl PiTail {
 
                     self.session.tokens_input += inp;
                     self.session.tokens_output += outp;
-                    if let Some(tot) = u["totalTokens"].as_i64() {
+                    if let Some(tot) = u["totalTokens"].as_i64().filter(|&t| t > 0) {
                         self.session.active_turn_tokens = tot;
                     } else if inp + outp + c_read + c_write > 0 {
                         self.session.active_turn_tokens = inp + outp + c_read + c_write;
                     }
-                    let step_cost = u["cost"]["total"].as_f64().unwrap_or(0.0);
+                    let mut step_cost = u["cost"]["total"].as_f64().unwrap_or(0.0);
+                    if step_cost <= 0.0 && (inp > 0 || outp > 0 || c_read > 0 || c_write > 0) {
+                        step_cost = crate::opencode::estimate_tokens_cost(
+                            &self.session.model,
+                            inp,
+                            outp,
+                            c_read,
+                            c_write,
+                        );
+                    }
                     self.session.cost += step_cost;
                     if step_cost > 0.0 {
                         self.session.last_turn_cost = step_cost;
                     }
                     self.session.turn_count += 1;
-
-                    if let Some(mod_str) = m["model"].as_str().filter(|x| !x.is_empty()) {
-                        self.raw_model_id = mod_str.to_string();
-                    }
-                    if let Some(prov_str) = m["provider"].as_str().filter(|x| !x.is_empty()) {
-                        self.raw_provider = prov_str.to_string();
-                    }
-                    self.sync_model_fields();
 
                     if let Some(content_arr) = m["content"].as_array() {
                         for item in content_arr {
@@ -341,6 +350,7 @@ pub fn read_pi_session_file(
 
     // Resolver contextWindow desde cpamc-models-cache.json -> models-store.json -> fallback
     if !tail.session.model.is_empty()
+        && tail.session.model != "sin-modelo"
         && tail.limit_model.as_deref() != Some(tail.session.model.as_str())
     {
         tail.limit_model = Some(tail.session.model.clone());
@@ -413,12 +423,14 @@ pub fn apply_pane_metadata_tokens(
         session.agent_status = status.to_string();
     }
 
+    let mut profile_updated = false;
     if let Some(profile) = tokens
         .get("profile")
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
     {
         let clean = clean_model_name(profile);
+        profile_updated = session.model != clean;
         session.model_short = clean.rsplit('/').next().unwrap_or(&clean).to_string();
         session.model = clean;
     }
@@ -430,7 +442,7 @@ pub fn apply_pane_metadata_tokens(
         session.context_limit = win;
     } else if !session.model.is_empty()
         && session.model != "sin-modelo"
-        && session.context_limit <= 0
+        && (profile_updated || session.context_limit <= 0)
     {
         session.context_limit = resolve_model_context_limit(&session.model);
     }
@@ -442,8 +454,9 @@ pub fn apply_pane_metadata_tokens(
         session.active_turn_tokens = tok;
     } else if let Some(pct_str) = tokens.get("ctx_pct")
         && let Ok(pct) = pct_str.parse::<f64>()
+        && pct.is_finite()
+        && (0.0..=100.0).contains(&pct)
         && session.context_limit > 0
-        && session.active_turn_tokens == 0
     {
         session.active_turn_tokens = ((pct / 100.0) * session.context_limit as f64).round() as i64;
     }
@@ -628,12 +641,19 @@ pub fn try_read_pi_session(
         .or(global_working)?;
     let status = target_pane.agent_status.as_deref().unwrap_or("idle");
 
+    let claimed_by_others: HashSet<String> = herdr_panes
+        .iter()
+        .filter(|p| p.pane_id != target_pane.pane_id)
+        .filter_map(|p| p.agent_session_id.as_deref())
+        .map(crate::paths::normalize_path)
+        .collect();
+
     if let Some(ref raw_path) = target_pane.agent_session_id {
         let path = PathBuf::from(raw_path);
         if path.exists() {
             // Si hay un archivo hermano más reciente en el mismo directorio (ej. tras `/new` en Pi),
-            // usar el más reciente.
-            let newest = newest_jsonl_in_same_dir(&path).unwrap_or(path);
+            // usar el más reciente siempre que no esté reclamado por otro pane concurrente.
+            let newest = newest_jsonl_in_same_dir(&path, &claimed_by_others).unwrap_or(path);
             let mut ses = read_pi_session_file(&newest, accounts_list, status)?;
             apply_pane_metadata_tokens(&mut ses, &target_pane.tokens, accounts_list);
             return Some((newest, ses));
@@ -668,12 +688,20 @@ pub fn try_read_pi_session(
     None
 }
 
-fn newest_jsonl_in_same_dir(current: &Path) -> Option<PathBuf> {
+fn newest_jsonl_in_same_dir(
+    current: &Path,
+    claimed_by_others: &HashSet<String>,
+) -> Option<PathBuf> {
     let parent = current.parent()?;
+    let current_norm = crate::paths::normalize_path(&current.to_string_lossy());
     let entries = fs::read_dir(parent).ok()?;
     entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "jsonl"))
+        .filter(|p| {
+            let norm = crate::paths::normalize_path(&p.to_string_lossy());
+            norm == current_norm || !claimed_by_others.contains(&norm)
+        })
         .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
 }

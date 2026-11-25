@@ -848,7 +848,16 @@ mod tests {
 
         // 1. < 50% -> Optimo, MINT, sin notice row
         state.snapshot.agent_session.active_turn_tokens = 40_000; // 40%
-        let render_opt = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 44);
+        let render_opt = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            44,
+            &hudr2::theme::LINEAR_STUDIO,
+        );
         let ctx_bounds = render_opt
             .bounds
             .iter()
@@ -873,7 +882,16 @@ mod tests {
 
         // 2. >= 50% y < 80% -> Maduro, AMBER, con notice row
         state.snapshot.agent_session.active_turn_tokens = 60_000; // 60%
-        let render_mad = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 60);
+        let render_mad = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            60,
+            &hudr2::theme::LINEAR_STUDIO,
+        );
         let ctx_bounds = render_mad
             .bounds
             .iter()
@@ -898,7 +916,16 @@ mod tests {
 
         // 3. >= 80% -> Saturado, CORAL, con notice row
         state.snapshot.agent_session.active_turn_tokens = 85_000; // 85%
-        let render_sat = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 60);
+        let render_sat = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            60,
+            &hudr2::theme::LINEAR_STUDIO,
+        );
         let ctx_bounds = render_sat
             .bounds
             .iter()
@@ -8395,5 +8422,399 @@ api-keys:
             status_sub.get("pane_id").is_none(),
             "la suscripción de estado no debe restringirse a HERDR_PANE_ID"
         );
+    }
+
+    #[test]
+    fn test_contexto_card_responsive_snew_zero_limit_and_theme_colors() {
+        let mut state = AppState::new();
+        state.collapsed_cards[1] = false;
+
+        // 1. context_limit = 0 debe mostrar "--" y 0.0% (no "0.0k" ni % explotado)
+        state.snapshot.agent_session.context_limit = 0;
+        state.snapshot.agent_session.active_turn_tokens = 15_000;
+        let out_zero = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48);
+        let ctx_zero_b = out_zero
+            .bounds
+            .iter()
+            .find(|b| b.id == "contexto")
+            .unwrap();
+        let ctx_zero = ui::strip_ansi(
+            &out_zero.lines[ctx_zero_b.start_line..=ctx_zero_b.end_line].join("\n"),
+        );
+        assert!(
+            ctx_zero.contains("15.0k / --") && ctx_zero.contains("0.0%"),
+            "context_limit=0 debe renderizar '15.0k / --' y '0.0%':\n{ctx_zero}"
+        );
+
+        // 2. Anchos reales 32..=60 con 85% Saturado: nunca excede ancho y preserva [/snew] + aviso completo
+        state.snapshot.agent_session.context_limit = 100_000;
+        state.snapshot.agent_session.active_turn_tokens = 85_000;
+        for (w, expected_notice) in [
+            (32usize, "[aviso] Usa /snew (handover)"),
+            (38usize, "[aviso] Usa /snew (handover)"),
+            (42usize, "[aviso] Usa /snew (handover)"),
+            (48usize, "[aviso] Sesion madura: usa /snew (handover)"),
+            (60usize, "[aviso] Sesion madura: usa /snew para handover limpio"),
+        ] {
+            let out = ui::render_screen_with_diff_and_theme(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                w,
+                &hudr2::theme::HERDR_CATPPUCCIN_LATTE,
+            );
+            for line in &out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let ctx_b = out.bounds.iter().find(|b| b.id == "contexto").unwrap();
+            let ctx_raw = out.lines[ctx_b.start_line..=ctx_b.end_line].join("\n");
+            let ctx_clean = ui::strip_ansi(&ctx_raw);
+            assert!(
+                ctx_clean.contains("[/snew]"),
+                "ancho {w} debe conservar badge [/snew]:\n{ctx_clean}"
+            );
+            assert!(
+                ctx_clean.contains(expected_notice),
+                "ancho {w} debe mostrar aviso completo '{expected_notice}':\n{ctx_clean}"
+            );
+            // 3. Respeta colores del tema activo (Catppuccin Latte) en vez de constantes oscuras hardcodeadas
+            assert!(
+                ctx_raw.contains(hudr2::theme::HERDR_CATPPUCCIN_LATTE.coral),
+                "Contexto debe usar theme.coral en Saturado"
+            );
+            assert!(
+                !ctx_raw.contains(hudr2::config::CORAL),
+                "Contexto no debe usar config::CORAL hardcodeado con tema Catppuccin Latte"
+            );
+            assert!(
+                !ctx_raw.contains(hudr2::config::TEXT_PRIMARY),
+                "Contexto no debe usar config::TEXT_PRIMARY hardcodeado con tema Catppuccin Latte"
+            );
+        }
+    }
+
+    #[test]
+    fn test_contexto_opencode_and_pi_telemetry_accuracy() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::AgentSession;
+        use hudr2::opencode::{
+            apply_api_session_telemetry, clear_message_stats_cache, read_opencode_session,
+        };
+        use hudr2::pi::{
+            apply_pane_metadata_tokens, clear_pi_tail_cache, read_pi_session_file,
+            try_read_pi_session,
+        };
+        use rusqlite::Connection;
+        use serde_json::json;
+        use std::collections::HashMap;
+        use std::io::Write;
+
+        struct EnvGuard {
+            prev_db: Option<String>,
+            prev_cfg: Option<String>,
+            prev_pi: Option<String>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(ref v) = self.prev_db {
+                        std::env::set_var("OPENCODE_DB_PATH", v);
+                    } else {
+                        std::env::remove_var("OPENCODE_DB_PATH");
+                    }
+                    if let Some(ref v) = self.prev_cfg {
+                        std::env::set_var("OPENCODE_CONFIG_PATH", v);
+                    } else {
+                        std::env::remove_var("OPENCODE_CONFIG_PATH");
+                    }
+                    if let Some(ref v) = self.prev_pi {
+                        std::env::set_var("PI_SESSION_PATH", v);
+                    } else {
+                        std::env::remove_var("PI_SESSION_PATH");
+                    }
+                }
+            }
+        }
+        let _env = EnvGuard {
+            prev_db: std::env::var("OPENCODE_DB_PATH").ok(),
+            prev_cfg: std::env::var("OPENCODE_CONFIG_PATH").ok(),
+            prev_pi: std::env::var("PI_SESSION_PATH").ok(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj_dir = tmp.path().join("proj");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let proj_str = proj_dir.to_string_lossy().to_string();
+
+        // 1. OpenCode opencode.json limit.context resolution
+        let oc_cfg_path = tmp.path().join("opencode.json");
+        std::fs::write(
+            &oc_cfg_path,
+            r#"{
+                "provider": {
+                    "cpamc": {
+                        "models": {
+                            "cuenta4/claude-sonnet-4": { "limit": { "context": 200000 } }
+                        }
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("OPENCODE_CONFIG_PATH", oc_cfg_path.to_str().unwrap());
+            std::env::remove_var("PI_SESSION_PATH");
+        }
+        assert_eq!(
+            hudr2::opencode::resolve_opencode_context_limit(
+                &proj_str,
+                "cpamc/cuenta4/claude-sonnet-4"
+            ),
+            200_000
+        );
+
+        // 2. OpenCode /api/session cost/reasoning/active_turn_tokens preservation + configured context_limit
+        let mut ses_api = AgentSession {
+            session_id: Some("ses_1".to_string()),
+            cost: 0.25,
+            tokens_output: 2000,
+            active_turn_tokens: 40_000,
+            ..Default::default()
+        };
+        apply_api_session_telemetry(
+            &mut ses_api,
+            &proj_str,
+            &[],
+            &json!({
+                "data": [{
+                    "id": "ses_1",
+                    "model": { "providerID": "cpamc", "id": "cuenta4/claude-sonnet-4" },
+                    "cost": 0.0,
+                    "tokens": { "input": 5000, "output": 1500 },
+                    "location": { "directory": proj_str }
+                }]
+            }),
+        );
+        assert_eq!(
+            ses_api.context_limit, 200_000,
+            "OpenCode debe respetar limit.context de opencode.json"
+        );
+        assert!(
+            (ses_api.cost - 0.25).abs() < 1e-6,
+            "/api/session cost=0.0 no debe borrar costo estimado previo (got {})",
+            ses_api.cost
+        );
+        assert_eq!(
+            ses_api.tokens_output, 2000,
+            "/api/session output sin reasoning no debe encoger tokens_output con reasoning"
+        );
+
+        // New session via /api/session with active_turn_tokens == 0 hydrates active_turn_tokens from API tokens
+        let mut ses_new = AgentSession {
+            session_id: Some("ses_old".to_string()),
+            ..Default::default()
+        };
+        apply_api_session_telemetry(
+            &mut ses_new,
+            &proj_str,
+            &[],
+            &json!({
+                "data": [{
+                    "id": "ses_2",
+                    "model": { "providerID": "cpamc", "id": "cuenta4/claude-sonnet-4" },
+                    "cost": 0.12,
+                    "tokens": { "input": 1000, "output": 200, "reasoning": 50, "cache": { "read": 9000, "write": 100 } },
+                    "location": { "directory": proj_str }
+                }]
+            }),
+        );
+        assert_eq!(ses_new.active_turn_tokens, 10_350);
+
+        // 3. OpenCode part (step-finish) newer than historical message
+        let db_path = tmp.path().join("opencode.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY, directory TEXT, title TEXT,
+                time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT,
+                time_created INTEGER, time_updated INTEGER, data TEXT
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT,
+                time_created INTEGER, time_updated INTEGER, data TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session VALUES ('ses_part_win', ?, 'Live Turn', 10, 300, NULL)",
+            [&proj_str],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_part_win', 100, 100, ?)",
+            [r#"{"id":"m1","role":"assistant","providerID":"cpamc","modelID":"cuenta4/claude-sonnet-4","tokens":{"input":18000,"output":2000}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO message VALUES ('m2', 'ses_part_win', 200, 200, ?)",
+            [r#"{"id":"m2","role":"assistant","providerID":"cpamc","modelID":"cuenta4/claude-sonnet-4","tokens":{"input":0,"output":0}}"#],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO part VALUES ('p1', 'm2', 'ses_part_win', 205, 205, ?)",
+            [r#"{"type":"step-finish","tokens":{"input":30000,"output":5000}}"#],
+        )
+        .unwrap();
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        clear_message_stats_cache();
+        let panes = vec![HerdrPane {
+            pane_id: "oc:p1".to_string(),
+            cwd: Some(proj_str.clone()),
+            agent: Some("opencode".to_string()),
+            agent_status: Some("working".to_string()),
+            ..Default::default()
+        }];
+        let oc_ses = read_opencode_session(&proj_str, &panes, &[], None, None);
+        assert_eq!(
+            oc_ses.active_turn_tokens, 35_000,
+            "part step-finish más reciente (205) debe ganar sobre message histórico (100)"
+        );
+        assert_eq!(oc_ses.context_limit, 200_000);
+
+        // 4. Pi: sin-modelo stability across 2 reads, totalTokens: 0 preservation, cost fallback
+        clear_pi_tail_cache();
+        let pi_dir = tmp.path().join(".pi").join("agent");
+        let pi_ses_dir = pi_dir.join("sessions").join("proj");
+        std::fs::create_dir_all(&pi_ses_dir).unwrap();
+        let empty_jsonl = pi_ses_dir.join("empty.jsonl");
+        std::fs::write(&empty_jsonl, "").unwrap();
+        let p_empty1 = read_pi_session_file(&empty_jsonl, &[], "idle").unwrap();
+        let p_empty2 = read_pi_session_file(&empty_jsonl, &[], "idle").unwrap();
+        assert_eq!(p_empty1.context_limit, 200_000);
+        assert_eq!(
+            p_empty2.context_limit, 200_000,
+            "sin-modelo no debe mutar context_limit a 1M en la 2da lectura"
+        );
+
+        let s1_jsonl = pi_ses_dir.join("s1.jsonl");
+        {
+            let mut f = std::fs::File::create(&s1_jsonl).unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","message":{{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","usage":{{"input":40000,"output":5000,"totalTokens":45000,"cost":{{"total":0.0}}}}}}}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"type":"message","message":{{"role":"assistant","model":"claude-sonnet-4","provider":"anthropic","usage":{{"input":0,"output":0,"totalTokens":0,"cost":{{"total":0.0}}}}}}}}"#
+            )
+            .unwrap();
+        }
+        let s1_ses = read_pi_session_file(&s1_jsonl, &[], "working").unwrap();
+        assert_eq!(
+            s1_ses.active_turn_tokens, 45_000,
+            "totalTokens=0 en turno abortado no debe borrar active_turn_tokens previo"
+        );
+        assert!(
+            s1_ses.cost > 0.0,
+            "Pi debe estimar costo positivo cuando usage.cost.total == 0 y hay tokens"
+        );
+
+        // 5. apply_pane_metadata_tokens: profile resolves context_limit (128k), ctx_pct updates post-compaction & ignores NaN/-1
+        let mut meta_ses = AgentSession {
+            context_limit: 200_000,
+            active_turn_tokens: 100_000,
+            ..Default::default()
+        };
+        let mut tokens = HashMap::new();
+        tokens.insert("profile".to_string(), "qwen-2.5-coder".to_string());
+        tokens.insert("ctx_pct".to_string(), "25".to_string());
+        apply_pane_metadata_tokens(&mut meta_ses, &tokens, &[]);
+        assert_eq!(meta_ses.context_limit, 128_000);
+        assert_eq!(meta_ses.active_turn_tokens, 32_000);
+
+        let mut bad_tokens = HashMap::new();
+        bad_tokens.insert("ctx_pct".to_string(), "NaN".to_string());
+        apply_pane_metadata_tokens(&mut meta_ses, &bad_tokens, &[]);
+        assert_eq!(meta_ses.active_turn_tokens, 32_000);
+        bad_tokens.insert("ctx_pct".to_string(), "-5".to_string());
+        apply_pane_metadata_tokens(&mut meta_ses, &bad_tokens, &[]);
+        assert_eq!(meta_ses.active_turn_tokens, 32_000);
+
+        // 6. Concurrent Pi panes in same dir: Pane A must not hijack s2.jsonl claimed by Pane B,
+        // while unclaimed s3.jsonl (from /new) still advances Pane A.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let s2_jsonl = pi_ses_dir.join("s2.jsonl");
+        std::fs::write(
+            &s2_jsonl,
+            r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-4-6"}"#,
+        )
+        .unwrap();
+        let pane_a = HerdrPane {
+            pane_id: "tab_a:p1".to_string(),
+            tab_id: Some("tab_a".to_string()),
+            cwd: Some(proj_str.clone()),
+            agent: Some("pi".to_string()),
+            agent_status: Some("working".to_string()),
+            agent_session_id: Some(s1_jsonl.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let pane_b = HerdrPane {
+            pane_id: "tab_b:p1".to_string(),
+            tab_id: Some("tab_b".to_string()),
+            cwd: Some(proj_str.clone()),
+            agent: Some("pi".to_string()),
+            agent_status: Some("idle".to_string()),
+            agent_session_id: Some(s2_jsonl.to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let (chosen_a, ses_a) = try_read_pi_session(
+            &proj_str,
+            &[pane_a.clone(), pane_b.clone()],
+            &[],
+            Some("tab_a:hud"),
+            Some("tab_a"),
+        )
+        .unwrap();
+        assert_eq!(
+            chosen_a, s1_jsonl,
+            "Pane A no debe secuestrar s2.jsonl reclamado por Pane B"
+        );
+        assert_eq!(ses_a.active_turn_tokens, 45_000);
+
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let s3_jsonl = pi_ses_dir.join("s3.jsonl");
+        std::fs::write(
+            &s3_jsonl,
+            "{\"type\":\"model_change\",\"provider\":\"anthropic\",\"modelId\":\"claude-haiku-4-5\"}\n",
+        )
+        .unwrap();
+        let (chosen_after_new, ses_after_new) = try_read_pi_session(
+            &proj_str,
+            &[pane_a, pane_b],
+            &[],
+            Some("tab_a:hud"),
+            Some("tab_a"),
+        )
+        .unwrap();
+        assert_eq!(
+            chosen_after_new, s3_jsonl,
+            "Archivo s3.jsonl nuevo sin reclamar por otros panes (tras /new) debe seguir siendo detectado"
+        );
+        assert_eq!(ses_after_new.model_short, "claude-haiku-4-5");
     }
 }

@@ -13,6 +13,7 @@ mod session;
 pub use model_info::{
     clean_model_name, clean_opencode_terminal_title, estimate_tokens_cost,
     extract_model_name_from_val, is_opencode_terminal_title, resolve_model_context_limit,
+    resolve_opencode_context_limit,
 };
 pub use prefix::{extract_prefix, normalize_model_str, resolve_pool_account_prefixes};
 pub use session::{
@@ -107,6 +108,7 @@ pub fn apply_api_session_telemetry(
         return;
     };
 
+    let session_changed = session.session_id.as_deref() != Some(root_id);
     session.session_id = Some(root_id.to_string());
     if let Some(agent) = root.get("agent").and_then(serde_json::Value::as_str) {
         session.agent = agent.to_string();
@@ -128,21 +130,52 @@ pub fn apply_api_session_telemetry(
             .next()
             .unwrap_or(&session.model)
             .to_string();
-        session.context_limit = resolve_model_context_limit(&session.model);
+        session.context_limit = resolve_opencode_context_limit(target_dir, &session.model);
         session.local_prefix = extract_prefix(&session.agent, &session.model, &known_prefixes);
     }
-    session.cost = root
-        .get("cost")
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(session.cost);
-    session.tokens_input = root
+    if let Some(api_cost) = root.get("cost").and_then(serde_json::Value::as_f64)
+        && (api_cost > 0.0 || session.cost <= 0.0 || session_changed)
+    {
+        session.cost = api_cost;
+    }
+    let api_in = root
         .pointer("/tokens/input")
-        .and_then(serde_json::Value::as_i64)
-        .unwrap_or(session.tokens_input);
-    session.tokens_output = root
+        .and_then(serde_json::Value::as_i64);
+    let api_out = root
         .pointer("/tokens/output")
+        .and_then(serde_json::Value::as_i64);
+    let api_reason = root
+        .pointer("/tokens/reasoning")
         .and_then(serde_json::Value::as_i64)
-        .unwrap_or(session.tokens_output);
+        .unwrap_or(0);
+    let api_cache_read = root
+        .pointer("/tokens/cache/read")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let api_cache_write = root
+        .pointer("/tokens/cache/write")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    if let Some(ti) = api_in
+        && (session_changed || ti > 0 || session.tokens_input == 0)
+    {
+        session.tokens_input = ti;
+    }
+    if let Some(to) = api_out {
+        let combined_out = to + api_reason;
+        if session_changed
+            || session.tokens_output == 0
+            || api_reason > 0
+            || combined_out > session.tokens_output
+        {
+            session.tokens_output = combined_out;
+        }
+    }
+    let api_total =
+        api_in.unwrap_or(0) + api_out.unwrap_or(0) + api_reason + api_cache_read + api_cache_write;
+    if api_total > 0 && (session_changed || session.active_turn_tokens == 0) {
+        session.active_turn_tokens = api_total;
+    }
     let busy_ts = root.pointer("/time/busy").and_then(serde_json::Value::as_i64);
     let idle_ts = root.pointer("/time/idle").and_then(serde_json::Value::as_i64);
     let archived_ts = root
@@ -494,6 +527,9 @@ pub fn read_opencode_session(
     // Prefijo de la cuenta local activa
     let agent_to_check = target_raw_agent.as_deref().unwrap_or(&session.agent);
     let model_to_check = target_raw_model.as_deref().unwrap_or(&session.model);
+    if !session.model.is_empty() && session.model != "sin-modelo" {
+        session.context_limit = resolve_opencode_context_limit(target_dir, model_to_check);
+    }
     if let Some(local_pfx) = extract_prefix(agent_to_check, model_to_check, &known_prefixes) {
         session.local_prefix = Some(local_pfx.clone());
         session.all_active_prefixes.insert(local_pfx);
@@ -614,6 +650,8 @@ fn collect_message_stats(
 
     let mut modified_files = HashSet::new();
     let mut found_active_tokens = false;
+    let mut msg_active_tokens: Option<(i64, i64)> = None;
+    let mut part_active_tokens: Option<(i64, i64)> = None;
     let mut msg_tokens_in: i64 = 0;
     let mut msg_tokens_out: i64 = 0;
     let mut msg_cost: f64 = 0.0;
@@ -638,19 +676,27 @@ fn collect_message_stats(
         } else {
             ("", false)
         };
-        let order_col = if has_column(conn, tbl, "time_created") {
-            "time_created"
+        let has_tc = has_column(conn, tbl, "time_created");
+        let time_expr = if has_tc {
+            "COALESCE(time_created, 0)"
         } else {
-            "rowid"
+            "0"
+        };
+        let order_clause = if has_tc {
+            "ORDER BY time_created DESC, rowid DESC"
+        } else {
+            "ORDER BY rowid DESC"
         };
         let sql = format!(
-            "SELECT data FROM {tbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC"
+            "SELECT {time_expr}, data FROM {tbl} WHERE session_id = ? {type_filter} {order_clause}"
         );
 
         if let Ok(mut msg_stmt) = conn.prepare(&sql)
-            && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| row.get::<_, String>(0))
+            && let Ok(msg_rows) = msg_stmt.query_map([session_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
         {
-            for data_raw in msg_rows.flatten() {
+            for (msg_time, data_raw) in msg_rows.flatten() {
                 let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_raw) else {
                     continue;
                 };
@@ -666,9 +712,10 @@ fn collect_message_stats(
                 }
 
                 // Tokens de turno activo y acumulado de sesión desde message.data
-                if !found_active_tokens && let Some(toks) = parse_tokens_from_value(&val) {
-                    session.active_turn_tokens = toks;
-                    found_active_tokens = true;
+                if msg_active_tokens.is_none()
+                    && let Some(toks) = parse_tokens_from_value(&val)
+                {
+                    msg_active_tokens = Some((msg_time, toks));
                 }
 
                 let mut turn_cost = val.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -766,21 +813,31 @@ fn collect_message_stats(
         } else {
             ""
         };
-        let order_col = if has_column(conn, ptbl, "time_created") {
-            "time_created"
+        let has_tc = has_column(conn, ptbl, "time_created");
+        let time_expr = if has_tc {
+            "COALESCE(time_created, 0)"
         } else {
-            "rowid"
+            "0"
+        };
+        let order_clause = if has_tc {
+            "ORDER BY time_created DESC, rowid DESC"
+        } else {
+            "ORDER BY rowid DESC"
         };
         let psql = format!(
-            "SELECT {type_expr}, data FROM {ptbl} WHERE session_id = ? {type_filter} ORDER BY {order_col} DESC"
+            "SELECT {type_expr}, {time_expr}, data FROM {ptbl} WHERE session_id = ? {type_filter} {order_clause}"
         );
 
         if let Ok(mut part_stmt) = conn.prepare(&psql)
             && let Ok(part_rows) = part_stmt.query_map([session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
         {
-            for (part_type, data_raw) in part_rows.flatten() {
+            for (part_type, part_time, data_raw) in part_rows.flatten() {
                 let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_raw) else {
                     continue;
                 };
@@ -797,9 +854,10 @@ fn collect_message_stats(
                     || val.get("usage").is_some();
 
                 if is_step_tokens {
-                    if !found_active_tokens && let Some(toks) = parse_tokens_from_value(&val) {
-                        session.active_turn_tokens = toks;
-                        found_active_tokens = true;
+                    if part_active_tokens.is_none()
+                        && let Some(toks) = parse_tokens_from_value(&val)
+                    {
+                        part_active_tokens = Some((part_time, toks));
                     }
                     let mut turn_cost = val.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let mut turn_in = 0;
@@ -863,6 +921,23 @@ fn collect_message_stats(
     }
 
     // 3. Hidratar acumulado de sesión y costo si la tabla `session` no tenía columnas dedicadas o cost era 0.0
+    let resolved_active = match (msg_active_tokens, part_active_tokens) {
+        (Some((mt, m_toks)), Some((pt, p_toks))) => {
+            if pt > mt {
+                Some(p_toks)
+            } else {
+                Some(m_toks)
+            }
+        }
+        (Some((_, m_toks)), None) => Some(m_toks),
+        (None, Some((_, p_toks))) => Some(p_toks),
+        (None, None) => None,
+    };
+    if let Some(toks) = resolved_active {
+        session.active_turn_tokens = toks;
+        found_active_tokens = true;
+    }
+
     let mut cached_ti = None;
     let mut cached_to = None;
     let mut cached_cost = None;

@@ -24,13 +24,14 @@
   - Optional `Tareas` preview when `snap.agent_session.todos` is non-empty (`✓`, `◉`, `○`).
 
 ## 1. `Contexto` (`id: "contexto"`, index `1`)
-- **Row 1:** `<active_turn_tokens> / <context_limit>` on the left; status badge on the right:
+- **Row 1:** `<active_turn_tokens> / <context_limit>` (`--` and `0.0%` when `context_limit <= 0`, resolved via `opencode.json` `limit.context` or Pi model caches) on the left; width-responsive status badge on the right:
   - `< 50%`: `● Optimo N%` (`MINT`)
   - `50%..80%`: `● Maduro N% [/snew]` (`AMBER`)
   - `>= 80%`: `● Saturado N% [/snew]` (`CORAL`)
 - **Row 2:** Full-width inline progress bar (`━` / `─`).
 - **Row 3:** `^ <tokens_input> · v <tokens_output>` and `Costo $<cost>`.
-- **Row 4 (when `>= 50%`):** `[aviso] Sesion madura: usa /snew para handover limpio`.
+- **Row 4 (optional turns):** `<turns> turnos · prom: $<avg>/req` and `último: $<last_turn_cost>` (abbreviated on `< 46` / `< 38` widths).
+- **Row 5 (when `>= 50%`):** Width-responsive `/snew` handover notice (`[aviso] Usa /snew (handover)` on `< 48`, `[aviso] Sesion madura: usa /snew (handover)` on `48..57`, full text on `>= 58`).
 - **Semantics:** This card is intentionally global to the root session. Its token pressure and root-session cost are contextual telemetry, not evidence that any configured API-key account was used.
 
 ## 2. `~ Proyecto` (`id: "proyecto"`, index `2`)

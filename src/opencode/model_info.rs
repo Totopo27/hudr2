@@ -91,6 +91,65 @@ pub fn resolve_model_context_limit(model_id: &str) -> i64 {
     }
 }
 
+/// Resuelve el límite de contexto consultando `opencode.json` (`provider`/`providers` -> `models` -> `limit.context`)
+/// y cae a [`resolve_model_context_limit`] cuando no hay una definición configurada.
+pub fn resolve_opencode_context_limit(target_dir: &str, model_id: &str) -> i64 {
+    if model_id.trim().is_empty() || model_id == "sin-modelo" {
+        return resolve_model_context_limit(model_id);
+    }
+    let raw_norm = super::normalize_model_str(model_id).to_lowercase();
+    let clean = clean_model_name(model_id).to_lowercase();
+    let raw_low = model_id.trim().to_lowercase();
+    let short = clean.rsplit('/').next().unwrap_or(&clean).to_string();
+
+    let mut suffix_match: Option<i64> = None;
+    for path in crate::paths::opencode_config_candidates(target_dir) {
+        let Ok(content) = crate::paths::read_config_string(&path) else {
+            continue;
+        };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        for root_key in ["provider", "providers"] {
+            let Some(providers) = val.get(root_key).and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for (prov_name, prov_val) in providers {
+                let Some(models) = prov_val.get("models").and_then(|m| m.as_object()) else {
+                    continue;
+                };
+                let prov_low = prov_name.to_lowercase();
+                for (model_key, entry) in models {
+                    let Some(ctx) = entry
+                        .pointer("/limit/context")
+                        .or_else(|| entry.get("contextWindow"))
+                        .or_else(|| entry.get("context_window"))
+                        .and_then(serde_json::Value::as_i64)
+                        .filter(|&v| v > 0)
+                    else {
+                        continue;
+                    };
+                    let k_low = model_key.to_lowercase();
+                    let prov_qualified = format!("{prov_low}/{k_low}");
+                    if k_low == raw_norm
+                        || k_low == clean
+                        || k_low == raw_low
+                        || prov_qualified == raw_low
+                        || prov_qualified == clean
+                    {
+                        return ctx;
+                    }
+                    if suffix_match.is_none() && k_low.rsplit('/').next() == Some(short.as_str()) {
+                        suffix_match = Some(ctx);
+                    }
+                }
+            }
+        }
+    }
+
+    suffix_match.unwrap_or_else(|| resolve_model_context_limit(model_id))
+}
+
 /// Extrae el nombre o identificador del modelo desde el JSON de un mensaje o evento de OpenCode.
 pub fn extract_model_name_from_val(val: &serde_json::Value) -> Option<String> {
     if let Some(m_val) = val.get("model") {

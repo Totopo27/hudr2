@@ -810,25 +810,49 @@ pub fn render_screen_tabbed(
         ));
         if !collapsed[1] {
             let cur_tokens = snap.agent_session.active_turn_tokens;
-            let limit = snap.agent_session.context_limit.max(1);
-            let pct = (cur_tokens as f64 / limit as f64) * 100.0;
-            let (gauge_color, right_st) = if pct >= 80.0 {
+            let (pct, limit_disp) = if snap.agent_session.context_limit > 0 {
+                let limit = snap.agent_session.context_limit;
                 (
-                    CORAL,
-                    format!("{CORAL}\u{25cf} Saturado {:.1}% [/snew]{RESET}", pct),
-                )
-            } else if pct >= 50.0 {
-                (
-                    AMBER,
-                    format!("{AMBER}\u{25cf} Maduro {:.1}% [/snew]{RESET}", pct),
+                    (cur_tokens as f64 / limit as f64) * 100.0,
+                    format_tokens(limit),
                 )
             } else {
-                (MINT, format!("{MINT}\u{25cf} Optimo {:.1}%{RESET}", pct))
+                (0.0, "--".to_string())
             };
+            let (gauge_color, right_st) = if pct >= 80.0 {
+                let badge = if width >= 44 {
+                    format!("{coral}\u{25cf} Saturado {:.1}% [/snew]{RESET}", pct)
+                } else if width >= 38 {
+                    format!("{coral}\u{25cf} Sat {:.0}% [/snew]{RESET}", pct)
+                } else if width >= 36 {
+                    format!("{coral}\u{25cf} {:.0}% [/snew]{RESET}", pct)
+                } else {
+                    format!("{coral}\u{25cf}{:.0}% [/snew]{RESET}", pct)
+                };
+                (coral, badge)
+            } else if pct >= 50.0 {
+                let badge = if width >= 44 {
+                    format!("{amber}\u{25cf} Maduro {:.1}% [/snew]{RESET}", pct)
+                } else if width >= 38 {
+                    format!("{amber}\u{25cf} Mad {:.0}% [/snew]{RESET}", pct)
+                } else if width >= 36 {
+                    format!("{amber}\u{25cf} {:.0}% [/snew]{RESET}", pct)
+                } else {
+                    format!("{amber}\u{25cf}{:.0}% [/snew]{RESET}", pct)
+                };
+                (amber, badge)
+            } else {
+                let badge = if width >= 38 {
+                    format!("{mint}\u{25cf} Optimo {:.1}%{RESET}", pct)
+                } else {
+                    format!("{mint}\u{25cf} Opt {:.0}%{RESET}", pct)
+                };
+                (mint, badge)
+            };
+            let tok_sep = if width < 36 { "/" } else { " / " };
             let left_tok = format!(
-                "{BOLD}{gauge_color}{}{RESET} {TEXT_DIM}/{RESET} {TEXT_MUTED}{}{RESET}",
+                "{BOLD}{gauge_color}{}{RESET}{text_dim}{tok_sep}{RESET}{text_muted}{limit_disp}{RESET}",
                 format_tokens(cur_tokens),
-                format_tokens(limit)
             );
             lines.push(draw_row(&left_tok, &right_st, width));
 
@@ -842,12 +866,12 @@ pub fn render_screen_tabbed(
             let in_t = snap.agent_session.tokens_input;
             let out_t = snap.agent_session.tokens_output;
             let left_io = format!(
-                "{TEXT_DIM}^{RESET} {TEXT_PRIMARY}{}{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_DIM}v{RESET} {TEXT_PRIMARY}{}{RESET}",
+                "{text_dim}^{RESET} {text_primary}{}{RESET} {text_dim}\u{00b7}{RESET} {text_dim}v{RESET} {text_primary}{}{RESET}",
                 format_tokens(in_t),
                 format_tokens(out_t)
             );
             let right_cost = format!(
-                "{label_color}Costo{RESET} {TEXT_PRIMARY}${:.3}{RESET}",
+                "{label_color}Costo{RESET} {text_primary}${:.3}{RESET}",
                 snap.agent_session.cost
             );
             lines.push(draw_row(&left_io, &right_cost, width));
@@ -861,27 +885,27 @@ pub fn render_screen_tabbed(
                 let left_turns = if turns > 0 {
                     let label = if turns == 1 { "turno" } else { "turnos" };
                     if width < 38 {
-                        format!("{TEXT_DIM}{turns}t \u{00b7} ${:.3}/r{RESET}", avg_cost)
+                        format!("{text_dim}{turns}t \u{00b7} ${:.3}/r{RESET}", avg_cost)
                     } else if width < 46 {
                         format!(
-                            "{TEXT_DIM}{turns} {label} \u{00b7} ${:.3}/req{RESET}",
+                            "{text_dim}{turns} {label} \u{00b7} ${:.3}/req{RESET}",
                             avg_cost
                         )
                     } else {
                         format!(
-                            "{TEXT_DIM}{turns} {label} \u{00b7} prom: ${:.3}/req{RESET}",
+                            "{text_dim}{turns} {label} \u{00b7} prom: ${:.3}/req{RESET}",
                             avg_cost
                         )
                     }
                 } else {
-                    format!("{TEXT_DIM}prom: ${:.3}/req{RESET}", avg_cost)
+                    format!("{text_dim}prom: ${:.3}/req{RESET}", avg_cost)
                 };
 
                 let right_last = if last_cost > 0.0 {
                     if width < 46 {
-                        format!("{TEXT_DIM}\u{00fa}lt: ${:.3}{RESET}", last_cost)
+                        format!("{text_dim}\u{00fa}lt: ${:.3}{RESET}", last_cost)
                     } else {
-                        format!("{TEXT_DIM}\u{00fa}ltimo: ${:.3}{RESET}", last_cost)
+                        format!("{text_dim}\u{00fa}ltimo: ${:.3}{RESET}", last_cost)
                     }
                 } else {
                     String::new()
@@ -891,10 +915,15 @@ pub fn render_screen_tabbed(
             }
 
             if pct >= 50.0 {
+                let notice_text = if width >= 58 {
+                    "[aviso] Sesion madura: usa /snew para handover limpio"
+                } else if width >= 48 {
+                    "[aviso] Sesion madura: usa /snew (handover)"
+                } else {
+                    "[aviso] Usa /snew (handover)"
+                };
                 lines.push(draw_row(
-                    &format!(
-                        "{gauge_color}[aviso] Sesion madura: usa /snew para handover limpio{RESET}"
-                    ),
+                    &format!("{gauge_color}{notice_text}{RESET}"),
                     "",
                     width,
                 ));
