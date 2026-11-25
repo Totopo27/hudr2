@@ -107,6 +107,7 @@ pub fn discover_orchestrators(
                         &subagents,
                         active_session,
                         panes,
+                        target_dir,
                     );
 
                     profiles.push(OrchestratorProfile {
@@ -226,8 +227,10 @@ pub fn discover_orchestrators(
                             for (sub_name, sub_val) in *am {
                                 let sub_low = sub_name.to_lowercase();
                                 if sub_name != name
+                                    && !sub_low.starts_with("sdd-")
                                     && sub_val.is_object()
                                     && is_known_subagent(&sub_low, sub_val)
+                                    && is_task_allowed_by_orchestrator(agent_val, sub_name)
                                     && seen_roles.insert(sub_low)
                                     && let Some(mut sub) =
                                         parse_subagent_entry(sub_name, sub_val, &known_prefixes)
@@ -250,6 +253,7 @@ pub fn discover_orchestrators(
                         &subagents,
                         active_session,
                         panes,
+                        target_dir,
                     );
 
                     profiles.push(OrchestratorProfile {
@@ -289,7 +293,31 @@ pub fn discover_orchestrators(
     profiles
 }
 
+fn is_task_allowed_by_orchestrator(orch_val: &serde_json::Value, sub_name: &str) -> bool {
+    let Some(task_map) = orch_val
+        .get("permission")
+        .and_then(|p| p.get("task"))
+        .and_then(|t| t.as_object())
+    else {
+        return true;
+    };
+    if let Some((_, decision)) = task_map
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(sub_name))
+        && let Some(mode) = decision.as_str()
+    {
+        return !mode.eq_ignore_ascii_case("deny");
+    }
+    if let Some(wildcard) = task_map.get("*").and_then(|v| v.as_str()) {
+        return !wildcard.eq_ignore_ascii_case("deny");
+    }
+    true
+}
+
 fn is_known_subagent(name_low: &str, agent_val: &serde_json::Value) -> bool {
+    if agent_val.get("mode").and_then(|m| m.as_str()) == Some("primary") {
+        return false;
+    }
     if agent_val.get("mode").and_then(|m| m.as_str()) == Some("subagent") {
         return true;
     }
@@ -473,10 +501,43 @@ fn evaluate_orchestrator_quota_health(
     };
 
     if let Some(acc) = target_acc {
-        let eff = crate::quotas::evaluate_account_for_model(acc, model_short);
+        let eff = crate::quotas::evaluate_account_for_sovereign_model(acc, model_short);
         (eff.is_critical, eff.is_warning, eff.rem_5h)
     } else {
         (false, false, 100)
+    }
+}
+
+fn subagent_matches_actor(
+    sub: &crate::models::SubAgentProfile,
+    actor_role: &str,
+    actor_prefix: Option<&str>,
+    actor_model: &str,
+    actor_model_short: &str,
+) -> bool {
+    let actor_low = actor_role.to_lowercase();
+    let full_lower = sub.role.to_lowercase();
+    let clean_role = crate::ui::clean_subagent_role(&sub.role);
+    let actor_clean = crate::ui::clean_subagent_role(&actor_low);
+
+    let role_hit = actor_low == full_lower
+        || actor_low == clean_role
+        || actor_clean == clean_role
+        || actor_low.contains(&full_lower)
+        || actor_low.contains(&clean_role);
+
+    if !role_hit {
+        return false;
+    }
+
+    if let Some(ref spfx) = sub.prefix {
+        actor_prefix
+            .map(|lp| lp.eq_ignore_ascii_case(spfx))
+            .unwrap_or(false)
+            || actor_model.to_lowercase().contains(&spfx.to_lowercase())
+    } else {
+        actor_model_short.eq_ignore_ascii_case(&sub.model_short)
+            || actor_model.eq_ignore_ascii_case(&sub.model)
     }
 }
 
@@ -513,12 +574,22 @@ fn resolve_orchestrator_status(
     subagents: &[crate::models::SubAgentProfile],
     active_session: &AgentSession,
     panes: &[HerdrPane],
+    target_dir: &str,
 ) -> OrchestratorStatus {
     let name_low = profile_name.to_lowercase();
     let disp_low = display_name.to_lowercase();
+    let norm_target = crate::paths::normalize_path(target_dir);
 
-    // 1. Coincidencia directa con panes de Herdr (fuente de verdad si hay perfil asignado al pane)
+    // 1. Coincidencia directa con panes de Herdr del MISMO workspace (fuente de verdad)
+    let mut pane_idle_hit = false;
     for p in panes {
+        if !norm_target.is_empty()
+            && let Some(ref pane_cwd) = p.cwd
+            && !pane_cwd.trim().is_empty()
+            && crate::paths::normalize_path(pane_cwd) != norm_target
+        {
+            continue;
+        }
         let pane_prof = p.tokens.get("profile").map(|s| s.as_str());
         let pane_agent = p.agent.as_deref();
         let pane_title = p.terminal_title.as_deref().unwrap_or("");
@@ -545,7 +616,7 @@ fn resolve_orchestrator_status(
             if p.agent_status.as_deref() == Some("working") {
                 return OrchestratorStatus::Working;
             }
-            return OrchestratorStatus::Idle;
+            pane_idle_hit = true;
         }
     }
 
@@ -587,39 +658,33 @@ fn resolve_orchestrator_status(
     let direct_orch_match = is_orch_name || (is_generic_orch && orch_model_match);
 
     // 3. Coincidencia estricta con subagentes configurados en este perfil
+    let active_subagent_invocation_working = active_session
+        .subagent_invocations
+        .iter()
+        .filter(|inv| inv.status.eq_ignore_ascii_case("working"))
+        .any(|inv| {
+            subagents.iter().any(|sub| {
+                subagent_matches_actor(
+                    sub,
+                    &inv.role,
+                    inv.local_prefix.as_deref(),
+                    &inv.model,
+                    &inv.model_short,
+                )
+            })
+        });
+    if active_subagent_invocation_working {
+        return OrchestratorStatus::Working;
+    }
+
     let subagent_match = subagents.iter().any(|sub| {
-        let sess_agent = active_session.agent.to_lowercase();
-        let full_lower = sub.role.to_lowercase();
-        let clean_role = crate::ui::clean_subagent_role(&sub.role);
-        let sess_clean = crate::ui::clean_subagent_role(&sess_agent);
-
-        let role_hit = sess_agent == full_lower
-            || sess_agent == clean_role
-            || sess_clean == clean_role
-            || sess_agent.contains(&full_lower)
-            || sess_agent.contains(&clean_role);
-
-        if !role_hit {
-            return false;
-        }
-
-        // Si coincide el rol, verificar que coincida el modelo/cuenta asignada a este subagente en este perfil
-        if let Some(ref spfx) = sub.prefix {
-            active_session
-                .local_prefix
-                .as_deref()
-                .map(|lp| lp.eq_ignore_ascii_case(spfx))
-                .unwrap_or(false)
-                || active_session
-                    .model
-                    .to_lowercase()
-                    .contains(&spfx.to_lowercase())
-        } else {
-            active_session
-                .model_short
-                .eq_ignore_ascii_case(&sub.model_short)
-                || active_session.model.eq_ignore_ascii_case(&sub.model)
-        }
+        subagent_matches_actor(
+            sub,
+            &active_session.agent,
+            active_session.local_prefix.as_deref(),
+            &active_session.model,
+            &active_session.model_short,
+        )
     });
 
     if direct_orch_match || subagent_match {
@@ -633,6 +698,10 @@ fn resolve_orchestrator_status(
         {
             return OrchestratorStatus::Idle;
         }
+    }
+
+    if pane_idle_hit {
+        return OrchestratorStatus::Idle;
     }
 
     OrchestratorStatus::Offline

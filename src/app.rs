@@ -1,4 +1,3 @@
-use crate::cleanup::release_inactive_sessions;
 use crate::engram::read_engram_telemetry;
 use crate::git::read_git_telemetry;
 use crate::herdr::HerdrClient;
@@ -805,22 +804,24 @@ pub async fn sync_integrations_action_with_notify(
 }
 
 pub async fn release_sessions_action(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, accounts, my_pane_id, my_tab_id) = {
+    let (project_dir, accounts, my_pane_id, my_tab_id, active_session_id) = {
         let state = app_state.read().await;
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
             state.snapshot.my_pane_id.clone(),
             state.snapshot.my_tab_id.clone(),
+            state.snapshot.agent_session.session_id.clone(),
         )
     };
 
     let result = tokio::task::spawn_blocking(move || {
-        release_inactive_sessions(
+        crate::cleanup::release_inactive_sessions_preserving(
             &project_dir,
             &accounts,
             my_pane_id.as_deref(),
             my_tab_id.as_deref(),
+            active_session_id.as_deref(),
         )
     })
     .await

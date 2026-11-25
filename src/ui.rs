@@ -1243,20 +1243,20 @@ pub fn render_screen_tabbed(
         let orch_start = lines.len();
         let total_count = snap.orchestrators.len();
         let critical_count = snap.orchestrators.iter().filter(|o| o.is_critical).count();
-        let count_str = format!("{TEXT_DIM}{total_count} perfiles{RESET}");
+        let count_str = format!("{text_dim}{total_count} perfiles{RESET}");
         let orch_title = if critical_count > 0 {
             format!(
-                "{title_color}Orquestadores{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
+                "{title_color}Orquestadores{RESET} {text_dim}\u{00b7}{RESET} {BOLD}{coral}! {critical_count} cr\u{00ed}tic{RESET}"
             )
         } else {
-            format!("{title_color}Orquestadores{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
+            format!("{title_color}Orquestadores{RESET} {text_dim}\u{00b7}{RESET} {count_str}")
         };
         lines.push(draw_top(&orch_title, collapsed[4], width));
         if !collapsed[4] {
             if snap.orchestrators.is_empty() {
                 lines.push(draw_row(
-                    &format!("{TEXT_DIM}Sin perfiles de orquestador configurados{RESET}"),
-                    &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                    &format!("{text_dim}Sin perfiles de orquestador configurados{RESET}"),
+                    &format!("{text_dim}[inactivo]{RESET}"),
                     width,
                 ));
             } else {
@@ -1265,27 +1265,27 @@ pub fn render_screen_tabbed(
                     let (status_glyph, name_disp, status_right) = match orch.status {
                         crate::models::OrchestratorStatus::Working => {
                             let glyph = format!("{accent_secondary}>{RESET}");
-                            let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch_disp);
-                            let right = format!("{MINT}\u{25cf} trabajando{RESET}");
+                            let name = format!("{BOLD}{text_primary}{}{RESET}", orch_disp);
+                            let right = format!("{mint}\u{25cf} trabajando{RESET}");
                             (glyph, name, right)
                         }
                         crate::models::OrchestratorStatus::Idle => {
                             if orch.recently_finished {
-                                let glyph = format!("{MINT}\u{25cf}{RESET}");
-                                let name = format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", orch_disp);
-                                let right = format!("{BOLD}{MINT}\u{2713} finalizado{RESET}");
+                                let glyph = format!("{mint}\u{25cf}{RESET}");
+                                let name = format!("{BOLD}{text_primary}{}{RESET}", orch_disp);
+                                let right = format!("{BOLD}{mint}\u{2713} finalizado{RESET}");
                                 (glyph, name, right)
                             } else {
-                                let glyph = format!("{AMBER}\u{25cf}{RESET}");
-                                let name = format!("{TEXT_PRIMARY}{}{RESET}", orch_disp);
-                                let right = format!("{TEXT_DIM}-- en espera{RESET}");
+                                let glyph = format!("{amber}\u{25cf}{RESET}");
+                                let name = format!("{text_primary}{}{RESET}", orch_disp);
+                                let right = format!("{text_dim}-- en espera{RESET}");
                                 (glyph, name, right)
                             }
                         }
                         crate::models::OrchestratorStatus::Offline => {
-                            let glyph = format!("{TEXT_DIM}\u{25cb}{RESET}");
-                            let name = format!("{TEXT_MUTED}{}{RESET}", orch_disp);
-                            let right = format!("{TEXT_DIM}\u{25cb} apagado{RESET}");
+                            let glyph = format!("{text_dim}\u{25cb}{RESET}");
+                            let name = format!("{text_muted}{}{RESET}", orch_disp);
+                            let right = format!("{text_dim}\u{25cb} apagado{RESET}");
                             (glyph, name, right)
                         }
                     };
@@ -1300,13 +1300,13 @@ pub fn render_screen_tabbed(
                     let left = if width < 42 {
                         format!("{status_glyph} {name_disp}")
                     } else {
-                        format!("{status_glyph} {name_disp} {TEXT_DIM}({model_label}){RESET}")
+                        format!("{status_glyph} {name_disp} {text_dim}({model_label}){RESET}")
                     };
 
                     let final_right = if orch.is_critical {
-                        format!("{BOLD}{CORAL}[CUOTA CR\u{00cd}TICA]{RESET}")
+                        format!("{BOLD}{coral}[CUOTA CR\u{00cd}TICA]{RESET}")
                     } else if orch.is_warning {
-                        format!("{BOLD}{AMBER}[AVISO CUOTA]{RESET}")
+                        format!("{BOLD}{amber}[AVISO CUOTA]{RESET}")
                     } else {
                         status_right
                     };
@@ -1320,36 +1320,99 @@ pub fn render_screen_tabbed(
                 .iter()
                 .find(|o| o.status == crate::models::OrchestratorStatus::Working && o.is_critical);
 
-            let has_idle_sessions = snap
+            let idle_orch_count = snap
                 .orchestrators
                 .iter()
-                .any(|o| o.status == crate::models::OrchestratorStatus::Idle);
+                .filter(|o| o.status == crate::models::OrchestratorStatus::Idle)
+                .count();
+            let has_working_orch = snap
+                .orchestrators
+                .iter()
+                .any(|o| o.status == crate::models::OrchestratorStatus::Working);
+            let norm_proj = crate::paths::normalize_path(&snap.project_dir);
+            let has_background_idle_pane = snap.panes.iter().any(|p| {
+                if p.focused || snap.my_pane_id.as_deref() == Some(p.pane_id.as_str()) {
+                    return false;
+                }
+                if p.agent_status.as_deref() == Some("working") {
+                    return false;
+                }
+                let is_agent_pane = p
+                    .agent
+                    .as_deref()
+                    .is_some_and(|a| !a.eq_ignore_ascii_case("hudr2"))
+                    || p.agent_session_id.is_some();
+                if !is_agent_pane {
+                    return false;
+                }
+                norm_proj.is_empty()
+                    || p.cwd.as_deref().is_some_and(|c| {
+                        !c.trim().is_empty() && crate::paths::normalize_path(c) == norm_proj
+                    })
+            });
+            let has_idle_sessions =
+                idle_orch_count > 1 || (idle_orch_count >= 1 && has_working_orch) || has_background_idle_pane;
 
             if active_critical_orch.is_some() || has_idle_sessions {
                 lines.push(draw_divider(width));
             }
 
             if let Some(co) = active_critical_orch {
-                let target_orch = snap
-                    .orchestrators
-                    .iter()
-                    .find(|o| !o.is_critical && o.name != co.name)
-                    .map(|o| o.name.as_str())
-                    .unwrap_or("alternativo");
+                let target_orch = co
+                    .prefix
+                    .as_deref()
+                    .and_then(|pfx| {
+                        snap.accounts
+                            .iter()
+                            .find(|a| a.prefix.eq_ignore_ascii_case(pfx))
+                    })
+                    .and_then(|src_acc| {
+                        crate::cleanup::get_best_healthy_target_prefix_for_source(
+                            src_acc,
+                            &snap.accounts,
+                            &snap.agent_session.all_active_prefixes,
+                            &co.model_short,
+                        )
+                        .map(|target_pfx| {
+                            snap.orchestrators
+                                .iter()
+                                .find(|o| {
+                                    o.name != co.name
+                                        && !o.is_critical
+                                        && o.prefix
+                                            .as_deref()
+                                            .is_some_and(|op| op.eq_ignore_ascii_case(&target_pfx))
+                                })
+                                .map(|o| o.name.clone())
+                                .unwrap_or(target_pfx)
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        if snap.accounts.is_empty() {
+                            snap.orchestrators
+                                .iter()
+                                .find(|o| !o.is_critical && o.name != co.name)
+                                .map(|o| o.name.clone())
+                                .unwrap_or_else(|| "alternativo".to_string())
+                        } else {
+                            "alternativo".to_string()
+                        }
+                    });
 
                 let mig_text = if width < 46 {
+                    let max_name = width.saturating_sub(27).max(4);
+                    let short_name = truncate_to_width(&co.name, max_name);
                     format!(
-                        "{BOLD}{CORAL}! CR\u{00cd}TICO: {} [x: migrar]{RESET}",
-                        co.name
+                        "{BOLD}{coral}! CR\u{00cd}TICO: {short_name} [x: migrar]{RESET}"
                     )
                 } else if width < 56 {
                     format!(
-                        "{BOLD}{CORAL}! CR\u{00cd}TICO: {} [x -> migrar]{RESET}",
+                        "{BOLD}{coral}! CR\u{00cd}TICO: {} [x -> migrar]{RESET}",
                         co.name
                     )
                 } else {
                     format!(
-                        "{BOLD}{CORAL}! CR\u{00cd}TICO: {} (activo) [presion\u{00e1} 'x' -> migrar a {target_orch}]{RESET}",
+                        "{BOLD}{coral}! CR\u{00cd}TICO: {} (activo) [presion\u{00e1} 'x' -> migrar a {target_orch}]{RESET}",
                         co.name
                     )
                 };
@@ -1359,12 +1422,12 @@ pub fn render_screen_tabbed(
 
             if has_idle_sessions {
                 let idle_text = if width < 46 {
-                    format!("{TEXT_DIM}>> En espera [d: liberar]{RESET}")
+                    format!("{text_dim}>> En espera [d: liberar]{RESET}")
                 } else if width < 56 {
-                    format!("{TEXT_DIM}>> Sesiones en espera [d: liberar]{RESET}")
+                    format!("{text_dim}>> Sesiones en espera [d: liberar]{RESET}")
                 } else {
                     format!(
-                        "{TEXT_DIM}>> Sesiones en espera detectadas [presion\u{00e1} 'd' -> liberar]{RESET}"
+                        "{text_dim}>> Sesiones en espera detectadas [presion\u{00e1} 'd' -> liberar]{RESET}"
                     )
                 };
 
@@ -2975,7 +3038,11 @@ pub fn render_screen_tabbed(
         .any(|o| o.status == crate::models::OrchestratorStatus::Working && o.is_critical)
         || snap.accounts.iter().any(|a| {
             let eff = crate::quotas::evaluate_account_for_model(a, active_model);
-            (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
+            !a.has_error
+                && a.reset_5h != crate::quotas::UNFETCHED_RESET
+                && (eff.is_critical
+                    || (!crate::quotas::is_unfetched(a)
+                        && 100u8.saturating_sub(eff.rem_5h) >= 85))
                 && snap
                     .agent_session
                     .all_active_prefixes

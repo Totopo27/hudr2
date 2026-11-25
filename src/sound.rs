@@ -58,38 +58,60 @@ pub enum AlertKind {
     QuotaCritical,
 }
 
-static LAST_ALERT_TIMESTAMP_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_FLEET_COMPLETED_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_QUOTA_CRITICAL_MS: AtomicU64 = AtomicU64::new(0);
 const COOLDOWN_MS: u64 = 1500;
 
-fn check_cooldown_and_stamp() -> bool {
+fn check_cooldown_and_stamp(kind: AlertKind) -> bool {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let last = LAST_ALERT_TIMESTAMP_MS.load(Ordering::Relaxed);
+    let slot = match kind {
+        AlertKind::FleetCompleted => &LAST_FLEET_COMPLETED_MS,
+        AlertKind::QuotaCritical => &LAST_QUOTA_CRITICAL_MS,
+    };
+    let last = slot.load(Ordering::Relaxed);
     if now.saturating_sub(last) < COOLDOWN_MS {
         return false;
     }
-    LAST_ALERT_TIMESTAMP_MS.store(now, Ordering::Relaxed);
+    slot.store(now, Ordering::Relaxed);
     true
+}
+
+#[doc(hidden)]
+pub fn reset_cooldowns_for_test() {
+    LAST_FLEET_COMPLETED_MS.store(0, Ordering::Relaxed);
+    LAST_QUOTA_CRITICAL_MS.store(0, Ordering::Relaxed);
+}
+
+/// Emite una alerta sonora según el modo activo y el tipo de evento; retorna `true` si se emitió.
+pub fn try_emit_alert(mode: SoundMode, kind: AlertKind) -> bool {
+    if mode == SoundMode::Off {
+        return false;
+    }
+
+    if !check_cooldown_and_stamp(kind) {
+        return false;
+    }
+
+    match mode {
+        SoundMode::Off => false,
+        SoundMode::Bell => {
+            ring_bell(kind);
+            true
+        }
+        SoundMode::Native => {
+            play_native_sound(kind);
+            true
+        }
+    }
 }
 
 /// Emite una alerta sonora según el modo activo y el tipo de evento.
 pub fn emit_alert(mode: SoundMode, kind: AlertKind) {
-    if mode == SoundMode::Off {
-        return;
-    }
-
-    if !check_cooldown_and_stamp() {
-        return;
-    }
-
-    match mode {
-        SoundMode::Off => {}
-        SoundMode::Bell => ring_bell(kind),
-        SoundMode::Native => play_native_sound(kind),
-    }
+    let _ = try_emit_alert(mode, kind);
 }
 
 /// Campana ANSI universal en terminal (`\x07` BEL).

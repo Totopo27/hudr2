@@ -1853,6 +1853,76 @@ pub fn resolve_model_family(model_str: &str) -> Option<&'static str> {
     }
 }
 
+fn evaluate_family_pools(
+    acc: &AccountQuota,
+    active_model: &str,
+) -> Option<EffectiveAccountHealth> {
+    let family = resolve_model_family(active_model)?;
+    let find_family_pools =
+        |fam_prefix: &str| -> Option<(Option<&QuotaPool>, Option<&QuotaPool>)> {
+            let fam_lower = fam_prefix.to_lowercase();
+            let p_5h = acc.pools.iter().find(|p| {
+                let l = p.label.to_lowercase();
+                l.starts_with(&fam_lower) && l.contains("5h")
+            });
+            let p_wk = acc.pools.iter().find(|p| {
+                let l = p.label.to_lowercase();
+                l.starts_with(&fam_lower) && l.contains("wk")
+            });
+            if p_5h.is_some() || p_wk.is_some() {
+                Some((p_5h, p_wk))
+            } else {
+                None
+            }
+        };
+
+    // Para GPT, si el proveedor agrupa Claude/GPT bajo "Claude *", hacer fallback a Claude
+    let matched = find_family_pools(family).or_else(|| {
+        if family == "GPT" {
+            find_family_pools("Claude")
+        } else {
+            None
+        }
+    });
+
+    let (pool_5h, pool_wk) = matched?;
+    let rem_5h = pool_5h.map(|p| p.percent).unwrap_or(100);
+    let reset_5h = pool_5h
+        .map(|p| p.reset.clone())
+        .unwrap_or_else(|| acc.reset_5h.clone());
+    let rem_wk = pool_wk.map(|p| p.percent).unwrap_or(100);
+    let reset_wk = pool_wk
+        .map(|p| p.reset.clone())
+        .unwrap_or_else(|| acc.reset_wk.clone());
+    let worst_used = std::cmp::max(100u8.saturating_sub(rem_5h), 100u8.saturating_sub(rem_wk));
+    let is_critical = !acc.has_error && worst_used >= 85;
+    let is_warning = !acc.has_error && (70..85).contains(&worst_used);
+    Some(EffectiveAccountHealth {
+        rem_5h,
+        reset_5h,
+        rem_wk,
+        reset_wk,
+        is_critical,
+        is_warning,
+        family,
+    })
+}
+
+/// Evalúa la salud de una cuenta estrictamente contra el modelo soberano de un perfil
+/// de orquestador (incluyendo pools Claude/GPT dentro de cuentas Antigravity).
+pub fn evaluate_account_for_sovereign_model(
+    acc: &AccountQuota,
+    sovereign_model: &str,
+) -> EffectiveAccountHealth {
+    if !is_api_key(acc)
+        && !is_codex_account(acc)
+        && let Some(eff) = evaluate_family_pools(acc, sovereign_model)
+    {
+        return eff;
+    }
+    evaluate_account_for_model(acc, sovereign_model)
+}
+
 /// Evalúa la salud y los porcentajes `5h` / `Wk` de una cuenta según el modelo activo en la sesión.
 /// Si el usuario usa Claude, GPT, DeepSeek, Qwen, Argon o Gemini, toma los pools de esa familia;
 /// si no hay modelo específico o el pool no existe, usa las métricas base de la cuenta (Gemini / default).
@@ -1918,57 +1988,8 @@ pub fn evaluate_account_for_model(
         };
     }
 
-    if let Some(family) = resolve_model_family(active_model) {
-        let find_family_pools =
-            |fam_prefix: &str| -> Option<(Option<&QuotaPool>, Option<&QuotaPool>)> {
-                let fam_lower = fam_prefix.to_lowercase();
-                let p_5h = acc.pools.iter().find(|p| {
-                    let l = p.label.to_lowercase();
-                    l.starts_with(&fam_lower) && l.contains("5h")
-                });
-                let p_wk = acc.pools.iter().find(|p| {
-                    let l = p.label.to_lowercase();
-                    l.starts_with(&fam_lower) && l.contains("wk")
-                });
-                if p_5h.is_some() || p_wk.is_some() {
-                    Some((p_5h, p_wk))
-                } else {
-                    None
-                }
-            };
-
-        // Para GPT, si el proveedor agrupa Claude/GPT bajo "Claude *", hacer fallback a Claude
-        let matched = find_family_pools(family).or_else(|| {
-            if family == "GPT" {
-                find_family_pools("Claude")
-            } else {
-                None
-            }
-        });
-
-        if let Some((pool_5h, pool_wk)) = matched {
-            let rem_5h = pool_5h.map(|p| p.percent).unwrap_or(100);
-            let reset_5h = pool_5h
-                .map(|p| p.reset.clone())
-                .unwrap_or_else(|| acc.reset_5h.clone());
-            let rem_wk = pool_wk.map(|p| p.percent).unwrap_or(100);
-            let reset_wk = pool_wk
-                .map(|p| p.reset.clone())
-                .unwrap_or_else(|| acc.reset_wk.clone());
-            let worst_used =
-                std::cmp::max(100u8.saturating_sub(rem_5h), 100u8.saturating_sub(rem_wk));
-            let is_critical = !acc.has_error && worst_used >= 85;
-            let is_warning = !acc.has_error && (70..85).contains(&worst_used);
-            return EffectiveAccountHealth {
-                rem_5h,
-                reset_5h,
-                rem_wk,
-                reset_wk,
-                is_critical,
-                is_warning,
-                family,
-            };
-        }
+    if let Some(eff) = evaluate_family_pools(acc, active_model) {
+        return eff;
     }
 
     EffectiveAccountHealth {

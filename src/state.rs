@@ -443,16 +443,30 @@ impl AppState {
     }
 
     pub fn update_orchestrator_alerts(&mut self) {
+        const RECENTLY_FINISHED_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
         let now = std::time::Instant::now();
         let sound_mode = self.sound_mode;
+        let rate_limited_prefixes: HashSet<String> = self
+            .snapshot
+            .accounts
+            .iter()
+            .filter(|a| a.has_error && a.error_msg.to_ascii_lowercase().contains("rate limited"))
+            .map(|a| a.prefix.to_lowercase())
+            .collect();
 
         for orch in &mut self.snapshot.orchestrators {
+            let is_pressured = orch.is_critical
+                || orch
+                    .prefix
+                    .as_deref()
+                    .is_some_and(|p| rate_limited_prefixes.contains(&p.to_lowercase()));
+
             let tracker = self
                 .orch_trackers
                 .entry(orch.name.clone())
                 .or_insert_with(|| OrchestratorTrackState {
                     last_status: orch.status,
-                    was_critical: orch.is_critical,
+                    was_critical: is_pressured,
                     working_since: if orch.status == crate::models::OrchestratorStatus::Working {
                         Some(now)
                     } else {
@@ -472,32 +486,86 @@ impl AppState {
                     .unwrap_or_default();
                 // Evita sonar en microtareas insignificantes (< 2 segundos)
                 if duration >= std::time::Duration::from_secs(2) {
-                    crate::sound::emit_alert(sound_mode, crate::sound::AlertKind::FleetCompleted);
+                    let _ = crate::sound::try_emit_alert(
+                        sound_mode,
+                        crate::sound::AlertKind::FleetCompleted,
+                    );
                 }
             }
 
             // 2. Transición a Working
             if orch.status == crate::models::OrchestratorStatus::Working {
+                tracker.finished_at = None;
                 if tracker.last_status != crate::models::OrchestratorStatus::Working {
                     tracker.working_since = Some(now);
                 }
-                // Alerta sonora preventiva de cuota crítica durante ejecución activa
-                if orch.is_critical && !tracker.was_critical {
-                    crate::sound::emit_alert(sound_mode, crate::sound::AlertKind::QuotaCritical);
+                // Alerta sonora preventiva de cuota crítica o 429 rate limit durante ejecución activa
+                if is_pressured && !tracker.was_critical {
+                    let _ = crate::sound::try_emit_alert(
+                        sound_mode,
+                        crate::sound::AlertKind::QuotaCritical,
+                    );
                 }
+            } else if orch.status != crate::models::OrchestratorStatus::Idle {
+                tracker.finished_at = None;
             }
 
             // 3. Refuerzo visual temporal: marcar recently_finished si terminó hace < 4 segundos
             if orch.status == crate::models::OrchestratorStatus::Idle
                 && let Some(f_time) = tracker.finished_at
-                && now.saturating_duration_since(f_time) < std::time::Duration::from_secs(4)
             {
-                orch.recently_finished = true;
+                if now.saturating_duration_since(f_time) < RECENTLY_FINISHED_WINDOW {
+                    orch.recently_finished = true;
+                } else {
+                    tracker.finished_at = None;
+                    orch.recently_finished = false;
+                }
+            } else {
+                orch.recently_finished = false;
             }
 
             tracker.last_status = orch.status;
-            tracker.was_critical = orch.is_critical;
+            tracker.was_critical = is_pressured;
         }
+    }
+
+    pub fn next_orchestrator_expiry_wait(&self) -> Option<std::time::Duration> {
+        const RECENTLY_FINISHED_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
+        let now = std::time::Instant::now();
+        self.snapshot
+            .orchestrators
+            .iter()
+            .filter(|o| o.status == crate::models::OrchestratorStatus::Idle && o.recently_finished)
+            .filter_map(|o| self.orch_trackers.get(&o.name)?.finished_at)
+            .map(|f| RECENTLY_FINISHED_WINDOW.saturating_sub(now.saturating_duration_since(f)))
+            .min()
+    }
+
+    pub fn expire_orchestrator_finished_flags(&mut self) -> bool {
+        const RECENTLY_FINISHED_WINDOW: std::time::Duration = std::time::Duration::from_secs(4);
+        let now = std::time::Instant::now();
+        let mut changed = false;
+        for orch in &mut self.snapshot.orchestrators {
+            if !orch.recently_finished {
+                continue;
+            }
+            let expired = self
+                .orch_trackers
+                .get(&orch.name)
+                .and_then(|t| t.finished_at)
+                .is_none_or(|f| now.saturating_duration_since(f) >= RECENTLY_FINISHED_WINDOW);
+            if expired {
+                orch.recently_finished = false;
+                if let Some(tracker) = self.orch_trackers.get_mut(&orch.name) {
+                    tracker.finished_at = None;
+                }
+                changed = true;
+            }
+        }
+        if changed {
+            self.needs_redraw = true;
+        }
+        changed
     }
 
     pub fn toggle_check_updates(&mut self) -> bool {

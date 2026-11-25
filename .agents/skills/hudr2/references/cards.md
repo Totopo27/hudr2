@@ -49,22 +49,22 @@
 - **Alert block:** Shows `flash_notice` (when active). Active-account migration alerts (`(activa) [presioná 'x' -> migrar]`) are decoupled from this card and reserved for session-scoped quota telemetry and the `Orquestadores` card.
 
 ## 4. `Orquestadores` (`id: "orquestadores"`, index `4`)
-- **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `CORAL` when an orchestrator's sovereign model has exhausted quota).
-- **Discovery & Subagent Exclusion:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json` `"agent"` and `"agents"`). Filters subagents via `is_known_subagent` (`subagent`, `deny`, `gentle-ai-*`, `jd-*`, `review-*`, `sdd-explore-*`, etc.) so subagents NEVER pollute this card, but never hides a configured primary orchestrator by naming convention. Supports isolated overrides via `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
+- **Header:** `Orquestadores · <N> perfiles` (or `Orquestadores · ! <N> crític` in `theme.coral` when an orchestrator's sovereign model has exhausted quota), themed across active `Theme` tokens (`mint`, `amber`, `coral`, `text_primary`, `text_muted`, `text_dim`).
+- **Discovery & Subagent Exclusion:** Scans Gentle AI (`profiles.json`) and OpenCode (`opencode.json` `"agent"` and `"agents"`). Treats `mode: "primary"` as an orchestrator unconditionally, excludes `sdd-*` from non-SDD orchestrators, honors `permission.task` allow/deny maps, and filters subagents via `is_known_subagent` (`subagent`, `deny`, `gentle-ai-*`, `jd-*`, `review-*`, etc.). Supports `GENTLE_AI_PROFILES_PATH` / `PI_PROFILES_PATH` and `OPENCODE_CONFIG_PATH`.
 - **Friendly Display Names:** Maps technical fleet identifiers to user-sovereign names: `fleet-codex` / `gentle-orchestrator-codex` → `tavocodex`, `fleet-tavo` / `gentle-orchestrator` → `tavoclaude`, `fleet-gianni` → `gianniclaude`, `fleet-clas` → `clasclaude`, and `sdd-orchestrator-agy*` → `sdd-agy*`.
 - **Compact Model Format:** Formats model strings compactly (e.g. `(5.6-sol [high])`, `(opus-5-5 [high])`, `(3.8-flash)`).
 - **Status Lifecycle:**
-  - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session or Herdr pane (including any of its active subagents).
+  - `Working` (`● trabajando`, `accent_secondary` `>`): Orchestrator currently active and executing work in the local session, its `cwd`-matched Herdr panes (scanning all matching panes without `Idle` short-circuit), or active `subagent_invocations`.
   - `Idle` (`-- en espera`, `AMBER` `●`): Orchestrator paused, session active but idle with completed turns or active pane.
-  - `Recently Finished` (`✓ finalizado`, `MINT` `●`): Temporary visual confirmation shown for ~4 seconds when transitioning from `Working` to `Idle`, accompanied by an audible completion alert (`FleetCompleted`) when configured.
+  - `Recently Finished` (`✓ finalizado`, `theme.mint` `●`): Temporary visual confirmation shown for ~4 seconds (`RECENTLY_FINISHED_WINDOW` woken proactively via `next_orchestrator_expiry_wait` / `expire_orchestrator_finished_flags`) when transitioning from `Working` to `Idle`, accompanied by an audible completion alert (`FleetCompleted`) when configured.
   - `Offline` (`○ apagado`, `TEXT_DIM` `○`): Orchestrator configured but dormant / unused.
 - **Sound Alerts Integration:**
   - `FleetCompleted`: Emits completion chime/bell when the orchestrator and all its subagents finish their task (`Working` -> `Idle`) for tasks >= 2 seconds.
-  - `QuotaCritical`: Emits a distinctive warning tone when the active working orchestrator enters critical quota (>85% or HTTP 429), alerting the user to press `x` for hot migration before execution halts.
-- **Sovereign Quota Governance:** Migration urgency is governed **strictly** by the sovereign orchestrator model (`orchestrator.model` in `profiles.json`), ignoring secondary subagent models.
+  - `QuotaCritical`: Emits a distinctive warning tone (`try_emit_alert` with split per-kind 1.5s cooldown independent of `FleetCompleted`) when the active working orchestrator enters critical quota (>85% or HTTP 429 `"rate limited"`), alerting the user to press `x` for hot migration.
+- **Sovereign Quota Governance:** Migration urgency is governed **strictly** by the orchestrator's sovereign model via `evaluate_account_for_sovereign_model` (reading family pools even inside AGY accounts without altering Card 3's Gemini sovereignty), ignoring secondary subagent models and unfetched Codex accounts.
 - **Interactive Actions & Migration:**
-  - Migration banner: When the active working orchestrator has depleted its sovereign quota (`is_critical`), renders responsive migration alert `! CRÍTICO: <name> (activo) [presioná 'x' -> migrar a <target>]` (adapting dynamically to `[x -> migrar]` or `[x: migrar]` on narrower widths).
-  - Idle session release banner: When paused/idle sessions are detected, renders `>> Sesiones en espera detectadas [presioná 'd' -> liberar]`.
+  - Migration banner: Enforces same-class provider compatibility (`accounts_compatible_for_migration` / `get_best_healthy_target_prefix_for_source`, excluding unfetched Codex), renders responsive migration alert (`[presioná 'x' -> migrar a <target>]`, `[x -> migrar]`, or pre-truncated `<co.name> [x: migrar]` below `46` cols).
+  - Idle session release banner & actions: Shows `>> Sesiones en espera` / `[d: liberar]` only when multiple idle orchestrators, an active working + idle orchestrator, or background idle workspace panes exist; `d` uses `release_inactive_sessions_preserving` to protect the live foreground `session_id` even outside Herdr pane metadata. Keybindings: `5` toggle collapse, `x` hot migrate, `d` confined release.
   - Keybindings: `5` toggles collapse, `x` triggers orchestrator migration, `d` triggers confined idle session liberation.
 
 ## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)

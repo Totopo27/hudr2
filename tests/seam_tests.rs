@@ -10351,4 +10351,592 @@ api-keys:
             "Tarjeta Integraciones debe usar paleta del tema activo"
         );
     }
+
+    #[test]
+    fn test_orquestadores_sovereign_non_gemini_agy_active_subagents_cwd_panes_and_primary() {
+        use hudr2::models::{
+            AccountQuota, AgentSession, HerdrPane, OrchestratorStatus, QuotaPool, SubagentInvocation,
+        };
+        use hudr2::orchestrators::discover_orchestrators;
+        use hudr2::quotas::evaluate_account_for_model;
+        use std::collections::HashMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let target_dir = tmp.path().join("ws-t7");
+        let other_dir = tmp.path().join("ws-foreign");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::create_dir_all(&other_dir).unwrap();
+
+        let profiles_path = tmp.path().join("missing-profiles.json");
+        let opencode_path = tmp.path().join("opencode.json");
+        let oc_json = serde_json::json!({
+            "agent": {
+                "main-orch": {
+                    "mode": "primary",
+                    "model": "agy-t7/claude-opus-4-6",
+                    "permission": {
+                        "task": {
+                            "*": "deny",
+                            "worker-a": "allow"
+                        }
+                    }
+                },
+                "review-orchestrator": {
+                    "mode": "primary",
+                    "model": "agy-t7/gemini-3-pro"
+                },
+                "worker-a": {
+                    "mode": "subagent",
+                    "model": "agy-t7/gemini-3-flash"
+                },
+                "worker-b": {
+                    "mode": "subagent",
+                    "model": "agy-t7/gemini-3-flash"
+                },
+                "sdd-explore-x": {
+                    "mode": "subagent",
+                    "model": "agy-t7/gemini-3-flash"
+                }
+            }
+        });
+        std::fs::write(
+            &opencode_path,
+            serde_json::to_string_pretty(&oc_json).unwrap(),
+        )
+        .unwrap();
+
+        let acc = AccountQuota {
+            prefix: "agy-t7".to_string(),
+            auth_file: "antigravity-t7.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 50m".to_string(),
+            rem_wk: 100,
+            reset_wk: "4d 10h".to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![
+                QuotaPool {
+                    label: "Gemini 5h".to_string(),
+                    percent: 100,
+                    reset: "4h 50m".to_string(),
+                    pace: "ok".to_string(),
+                },
+                QuotaPool {
+                    label: "Gemini Wk".to_string(),
+                    percent: 100,
+                    reset: "4d 10h".to_string(),
+                    pace: "ok".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude 5h".to_string(),
+                    percent: 5,
+                    reset: "2h 10m".to_string(),
+                    pace: "agotado".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude Wk".to_string(),
+                    percent: 10,
+                    reset: "3d 0h".to_string(),
+                    pace: "ok".to_string(),
+                },
+            ],
+        };
+        let accounts = vec![acc.clone()];
+
+        // Card 3 mantiene soberanía Gemini para AGY incluso cuando Claude está agotado
+        assert!(
+            !evaluate_account_for_model(&acc, "claude-opus-4-6").is_critical,
+            "Integraciones AGY debe seguir evaluando salud Gemini soberana"
+        );
+
+        let target_str = target_dir.to_str().unwrap();
+        let other_str = other_dir.to_str().unwrap();
+
+        let (disc_foreign, disc_multi_pane, disc_subagent_active) = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                std::env::set_var("GENTLE_AI_PROFILES_PATH", profiles_path.to_str().unwrap());
+                std::env::set_var("OPENCODE_CONFIG_PATH", opencode_path.to_str().unwrap());
+            }
+
+            let empty_session = AgentSession::default();
+            let mut foreign_tokens = HashMap::new();
+            foreign_tokens.insert("profile".to_string(), "main-orch".to_string());
+            let foreign_panes = vec![HerdrPane {
+                pane_id: "w2:p1".to_string(),
+                cwd: Some(other_str.to_string()),
+                agent_status: Some("working".to_string()),
+                tokens: foreign_tokens,
+                ..Default::default()
+            }];
+            let d1 = discover_orchestrators(target_str, &accounts, &empty_session, &foreign_panes);
+
+            let mut same_tokens = HashMap::new();
+            same_tokens.insert("profile".to_string(), "main-orch".to_string());
+            let multi_panes = vec![
+                HerdrPane {
+                    pane_id: "w1:p1".to_string(),
+                    cwd: Some(target_str.to_string()),
+                    agent_status: Some("idle".to_string()),
+                    tokens: same_tokens.clone(),
+                    ..Default::default()
+                },
+                HerdrPane {
+                    pane_id: "w1:p2".to_string(),
+                    cwd: Some(target_str.to_string()),
+                    agent_status: Some("working".to_string()),
+                    tokens: same_tokens,
+                    ..Default::default()
+                },
+            ];
+            let d2 = discover_orchestrators(target_str, &accounts, &empty_session, &multi_panes);
+
+            let sub_session = AgentSession {
+                agent: "other-agent".to_string(),
+                agent_status: "idle".to_string(),
+                subagent_invocations: vec![SubagentInvocation {
+                    session_id: "ses_sub_1".to_string(),
+                    role: "worker-a".to_string(),
+                    model: "agy-t7/gemini-3-flash".to_string(),
+                    model_short: "gemini-3-flash".to_string(),
+                    local_prefix: Some("agy-t7".to_string()),
+                    status: "working".to_string(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let d3 = discover_orchestrators(target_str, &accounts, &sub_session, &[]);
+
+            unsafe {
+                std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+                std::env::remove_var("OPENCODE_CONFIG_PATH");
+            }
+            (d1, d2, d3)
+        };
+
+        // 1. Soberanía por modelo en Orquestadores + mode:"primary" + permiso.task sin sdd-*
+        let review = disc_foreign
+            .iter()
+            .find(|o| o.name == "review-orchestrator")
+            .expect("agent con mode='primary' llamado review-orchestrator NO debe ocultarse");
+        assert!(!review.is_critical);
+
+        let main_foreign = disc_foreign
+            .iter()
+            .find(|o| o.name == "main-orch")
+            .expect("main-orch debe existir");
+        assert!(
+            main_foreign.is_critical && main_foreign.rem_pct == 5,
+            "Orquestadores debe evaluar modelo soberano claude-opus-4-6 sobre pools Claude (is_critical={}, rem_pct={})",
+            main_foreign.is_critical,
+            main_foreign.rem_pct
+        );
+        let sub_roles: Vec<&str> = main_foreign
+            .subagents
+            .iter()
+            .map(|s| s.role.as_str())
+            .collect();
+        assert_eq!(
+            sub_roles,
+            vec!["worker-a"],
+            "main-orch no-SDD debe respetar permission.task y excluir sdd-* y denegados"
+        );
+        assert_eq!(
+            main_foreign.status,
+            OrchestratorStatus::Offline,
+            "Pane working de otro workspace no debe marcar Working al orquestador local"
+        );
+
+        // 2. Pane Idle antes de Pane Working en mismo workspace no debe sombrear Working
+        let main_multi = disc_multi_pane
+            .iter()
+            .find(|o| o.name == "main-orch")
+            .unwrap();
+        assert_eq!(main_multi.status, OrchestratorStatus::Working);
+
+        // 3. SubagentInvocation activa en curso marca Working al orquestador dueño
+        let main_sub = disc_subagent_active
+            .iter()
+            .find(|o| o.name == "main-orch")
+            .unwrap();
+        assert_eq!(main_sub.status, OrchestratorStatus::Working);
+    }
+
+    #[test]
+    fn test_migration_provider_compatibility_unfetched_codex_exclusion_and_d_preserves_active() {
+        use hudr2::cleanup::{
+            accounts_compatible_for_migration, get_best_healthy_target_prefix_for_source,
+            migrate_critical_sessions_for_model, release_inactive_sessions_preserving,
+        };
+        use hudr2::models::{AccountQuota, AgentSession, QuotaPool, TelemetrySnapshot};
+        use hudr2::quotas::UNFETCHED_RESET;
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use rusqlite::Connection;
+        use std::collections::HashSet;
+
+        let agy_crit = AccountQuota {
+            prefix: "agy-crit".to_string(),
+            auth_file: "antigravity-crit.json".to_string(),
+            rem_5h: 5,
+            reset_5h: "1h 10m".to_string(),
+            rem_wk: 40,
+            reset_wk: "3d 0h".to_string(),
+            is_critical: true,
+            ..Default::default()
+        };
+        let claude_api = AccountQuota {
+            prefix: "claude-api".to_string(),
+            auth_file: "config.yaml#claude-api".to_string(),
+            rem_5h: 100,
+            reset_5h: "api-key".to_string(),
+            rem_wk: 100,
+            reset_wk: "api-key".to_string(),
+            ..Default::default()
+        };
+        let codex_ok = AccountQuota {
+            prefix: "codex-ok".to_string(),
+            auth_file: "codex-ok.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "plus".to_string(),
+            rem_wk: 100,
+            reset_wk: "plus".to_string(),
+            pools: vec![QuotaPool {
+                label: "Codex Plus".to_string(),
+                percent: 100,
+                reset: "plus".to_string(),
+                pace: "ok".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        assert!(!accounts_compatible_for_migration(&agy_crit, &claude_api));
+        assert!(!accounts_compatible_for_migration(&agy_crit, &codex_ok));
+        assert_eq!(
+            get_best_healthy_target_prefix_for_source(
+                &agy_crit,
+                &[agy_crit.clone(), claude_api.clone(), codex_ok.clone()],
+                &HashSet::new(),
+                "gemini-3-pro",
+            ),
+            None,
+            "No debe migrar AGY a API key ni Codex cuando no hay otro AGY sano"
+        );
+
+        let agy_ok = AccountQuota {
+            prefix: "agy-ok".to_string(),
+            auth_file: "antigravity-ok.json".to_string(),
+            rem_5h: 90,
+            reset_5h: "4h 00m".to_string(),
+            rem_wk: 90,
+            reset_wk: "4d 0h".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            get_best_healthy_target_prefix_for_source(
+                &agy_crit,
+                &[agy_crit.clone(), claude_api, codex_ok, agy_ok],
+                &HashSet::new(),
+                "gemini-3-pro",
+            ),
+            Some("agy-ok".to_string())
+        );
+
+        // Unfetched Codex no dispara migración ni banner x: migrar en footer
+        let codex_unfetched = AccountQuota {
+            prefix: "t7-codex-unfetched".to_string(),
+            auth_file: "t7-codex-unfetched.json".to_string(),
+            rem_5h: 0,
+            reset_5h: UNFETCHED_RESET.to_string(),
+            rem_wk: 0,
+            reset_wk: UNFETCHED_RESET.to_string(),
+            pools: vec![QuotaPool {
+                label: "Codex Plus".to_string(),
+                percent: 0,
+                reset: UNFETCHED_RESET.to_string(),
+                pace: "sin consultar".to_string(),
+            }],
+            ..Default::default()
+        };
+        let active_codex = HashSet::from(["t7-codex-unfetched".to_string()]);
+        let (mig_count, mig_msg) = migrate_critical_sessions_for_model(
+            ".",
+            std::slice::from_ref(&codex_unfetched),
+            &active_codex,
+            "gpt-5.6-sol",
+        );
+        assert_eq!(mig_count, 0);
+        assert!(mig_msg.contains("No hay sesiones activas"));
+
+        let snap = TelemetrySnapshot {
+            agent_session: AgentSession {
+                model: "gpt-5.6-sol".to_string(),
+                model_short: "gpt-5.6-sol".to_string(),
+                all_active_prefixes: active_codex,
+                ..Default::default()
+            },
+            accounts: vec![codex_unfetched],
+            ..Default::default()
+        };
+        let footer_out = ui::render_screen_tabbed(
+            &snap,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            80,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let footer_clean = ui::strip_ansi(&footer_out.lines.join("\n"));
+        assert!(
+            !footer_clean.contains("x: migrar"),
+            "Codex sin consultar no debe activar 'x: migrar' en el footer:\n{footer_clean}"
+        );
+
+        // release_inactive_sessions_preserving protege active_session_id aunque no haya panes Herdr
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("ws-rel");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let ws_str = ws_dir.to_str().unwrap();
+        let oc_db = tmp.path().join("opencode.db");
+        {
+            let conn = Connection::open(&oc_db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    directory TEXT,
+                    title TEXT,
+                    time_updated INTEGER,
+                    time_archived INTEGER
+                );
+                CREATE TABLE message (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT,
+                    time_created INTEGER,
+                    data TEXT
+                );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session (id, directory, title, time_updated, time_archived) VALUES (?1, ?2, 'Live', 9000, NULL)",
+                rusqlite::params!["ses_live", ws_str],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session (id, directory, title, time_updated, time_archived) VALUES (?1, ?2, 'Stale', 5000, NULL)",
+                rusqlite::params!["ses_stale", ws_str],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES ('m1', 'ses_live', 9000, '{\"agent\":\"fleet-tavo\"}')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, data) VALUES ('m2', 'ses_stale', 5000, '{\"agent\":\"fleet-tavo\"}')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let res = {
+            let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            unsafe {
+                std::env::set_var("OPENCODE_DB_PATH", oc_db.to_str().unwrap());
+                std::env::remove_var("OPENCODE_SESSION_ID");
+            }
+            let r = release_inactive_sessions_preserving(
+                ws_str,
+                &[],
+                None,
+                None,
+                Some("ses_live"),
+            );
+            unsafe {
+                std::env::remove_var("OPENCODE_DB_PATH");
+            }
+            r
+        };
+        assert_eq!(res.closed_count, 1);
+
+        let conn = Connection::open(&oc_db).unwrap();
+        let live_arch: Option<i64> = conn
+            .query_row(
+                "SELECT time_archived FROM session WHERE id = 'ses_live'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stale_arch: Option<i64> = conn
+            .query_row(
+                "SELECT time_archived FROM session WHERE id = 'ses_stale'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(live_arch.is_none(), "ses_live activa no debe archivarse");
+        assert!(stale_arch.is_some(), "ses_stale inactiva sí debe archivarse");
+    }
+
+    #[test]
+    fn test_orquestadores_recently_finished_expiry_timer_429_alert_and_theme() {
+        use hudr2::models::{
+            AccountQuota, OrchestratorProfile, OrchestratorStatus, TelemetrySnapshot,
+        };
+        use hudr2::sound::{AlertKind, SoundMode, reset_cooldowns_for_test, try_emit_alert};
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+        use std::time::{Duration, Instant};
+
+        // 1. Cooldown independiente por tipo de alerta en sound.rs
+        reset_cooldowns_for_test();
+        assert!(!try_emit_alert(SoundMode::Off, AlertKind::FleetCompleted));
+        assert!(try_emit_alert(SoundMode::Bell, AlertKind::FleetCompleted));
+        assert!(
+            !try_emit_alert(SoundMode::Bell, AlertKind::FleetCompleted),
+            "Mismo tipo debe respetar cooldown de 1500ms"
+        );
+        assert!(
+            try_emit_alert(SoundMode::Bell, AlertKind::QuotaCritical),
+            "QuotaCritical no debe quedar bloqueado por un FleetCompleted reciente"
+        );
+
+        // 2. Cuenta con 429 rate limited marca presión alertable + expiración de recently_finished
+        let mut st = AppState::new();
+        st.sound_mode = SoundMode::Off;
+        st.snapshot.accounts = vec![AccountQuota {
+            prefix: "agy-t7-429".to_string(),
+            auth_file: "antigravity-t7-429.json".to_string(),
+            has_error: true,
+            error_msg: "rate limited".to_string(),
+            ..Default::default()
+        }];
+        st.snapshot.orchestrators = vec![OrchestratorProfile {
+            name: "sdd-orchestrator-very-long-name".to_string(),
+            display_name: "sdd-agy".to_string(),
+            model: "agy-t7-429/gemini-3-pro".to_string(),
+            model_short: "gemini-3-pro".to_string(),
+            prefix: Some("agy-t7-429".to_string()),
+            status: OrchestratorStatus::Working,
+            is_critical: false,
+            rem_pct: 0,
+            ..Default::default()
+        }];
+        st.update_orchestrator_alerts();
+        assert!(
+            st.orch_trackers["sdd-orchestrator-very-long-name"].was_critical,
+            "Error 429 rate limited en cuenta del orquestador debe registrarse como presión crítica"
+        );
+
+        st.snapshot.orchestrators[0].status = OrchestratorStatus::Idle;
+        st.update_orchestrator_alerts();
+        assert!(st.snapshot.orchestrators[0].recently_finished);
+        assert!(st.next_orchestrator_expiry_wait().is_some());
+
+        st.orch_trackers
+            .get_mut("sdd-orchestrator-very-long-name")
+            .unwrap()
+            .finished_at = Some(Instant::now() - Duration::from_secs(5));
+        assert!(st.expire_orchestrator_finished_flags());
+        assert!(!st.snapshot.orchestrators[0].recently_finished);
+        assert!(st.next_orchestrator_expiry_wait().is_none());
+
+        // 3. Un único orquestador Idle en primer plano no debe mostrar '>> Sesiones en espera'
+        let lone_idle_snap = TelemetrySnapshot {
+            orchestrators: vec![OrchestratorProfile {
+                name: "solo".to_string(),
+                display_name: "solo".to_string(),
+                model_short: "gemini-3-pro".to_string(),
+                status: OrchestratorStatus::Idle,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let lone_out = ui::render_screen_tabbed(
+            &lone_idle_snap,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            56,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let lone_clean = ui::strip_ansi(&lone_out.lines.join("\n"));
+        assert!(
+            !lone_clean.contains("Sesiones en espera") && !lone_clean.contains("d: liberar"),
+            "No debe sugerir liberar si solo hay 1 orquestador Idle sin sesiones secundarias:\n{lone_clean}"
+        );
+
+        // 4. Ancho estrecho (36 cols) preserva [x: migrar] sin recorte y Card 4 usa paleta del tema activo
+        let mig_snap = TelemetrySnapshot {
+            orchestrators: vec![
+                OrchestratorProfile {
+                    name: "sdd-orchestrator-very-long-name".to_string(),
+                    display_name: "sdd-agy".to_string(),
+                    model_short: "gemini-3-pro".to_string(),
+                    status: OrchestratorStatus::Working,
+                    is_critical: true,
+                    rem_pct: 5,
+                    ..Default::default()
+                },
+                OrchestratorProfile {
+                    name: "fleet-codex".to_string(),
+                    display_name: "tavocodex".to_string(),
+                    model_short: "gpt-5.6-sol".to_string(),
+                    status: OrchestratorStatus::Idle,
+                    is_warning: true,
+                    rem_pct: 20,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        for w in [36usize, 56usize] {
+            let out = ui::render_screen_tabbed(
+                &mig_snap,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Modelos),
+            );
+            let ob = out
+                .bounds
+                .iter()
+                .find(|b| b.id == "orquestadores")
+                .expect("debe registrar bounds de orquestadores");
+            for line in &out.lines[ob.start_line..=ob.end_line] {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea en Orquestadores excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let card_raw = out.lines[ob.start_line..=ob.end_line].join("\n");
+            let card_clean = ui::strip_ansi(&card_raw);
+            if w == 36 {
+                assert!(
+                    card_clean.contains("[x: migrar]"),
+                    "En ancho 36 [x: migrar] no debe truncarse:\n{card_clean}"
+                );
+            }
+            assert!(
+                card_raw.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                    && card_raw.contains(HERDR_TOKYO_NIGHT_DAY.amber)
+                    && card_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim)
+                    && card_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary),
+                "Tarjeta Orquestadores debe usar paleta del tema activo en ancho {w}"
+            );
+        }
+    }
 }

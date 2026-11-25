@@ -367,31 +367,67 @@ pub fn rank_migration_candidates_for_model(
     healthy.into_iter().map(|a| a.prefix.clone()).collect()
 }
 
-pub fn get_best_healthy_target_prefix_for_model(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccountProviderClass {
+    Antigravity,
+    Codex,
+    ApiKey,
+    OtherOAuth,
+}
+
+pub fn classify_account_provider(acc: &AccountQuota) -> AccountProviderClass {
+    if crate::quotas::is_api_key(acc) {
+        AccountProviderClass::ApiKey
+    } else if crate::quotas::is_codex_account(acc) {
+        AccountProviderClass::Codex
+    } else if crate::quotas::is_antigravity_account(acc) {
+        AccountProviderClass::Antigravity
+    } else {
+        AccountProviderClass::OtherOAuth
+    }
+}
+
+pub fn accounts_compatible_for_migration(source: &AccountQuota, candidate: &AccountQuota) -> bool {
+    classify_account_provider(source) == classify_account_provider(candidate)
+}
+
+fn select_best_healthy_target_prefix(
     accounts_list: &[AccountQuota],
     active_prefixes: &HashSet<String>,
     active_model: &str,
-) -> String {
-    // 1. Si hay alguna cuenta activa ya verificada que esté sana (> 30% libre y sin error), preferir esa
+    source_filter: Option<&AccountQuota>,
+) -> Option<String> {
+    let is_eligible_source = |cand: &AccountQuota| -> bool {
+        match source_filter {
+            Some(src) => {
+                accounts_compatible_for_migration(src, cand)
+                    && !cand.prefix.eq_ignore_ascii_case(&src.prefix)
+            }
+            None => true,
+        }
+    };
+
+    // 1. Si hay alguna cuenta activa compatible ya verificada que esté sana (> 30% libre y sin error), preferir esa
     for p in active_prefixes {
         if let Some(acc) = accounts_list.iter().find(|a| {
             let eff = crate::quotas::evaluate_account_for_model(a, active_model);
-            a.prefix.to_lowercase() == *p
+            is_eligible_source(a)
+                && a.prefix.to_lowercase() == *p
                 && !crate::quotas::is_unfetched(a)
                 && !eff.is_critical
                 && !a.has_error
                 && eff.rem_5h > 30
         }) {
-            return acc.prefix.clone();
+            return Some(acc.prefix.clone());
         }
     }
 
-    // 2. Si no, elegir la cuenta con mayor score de salud, priorizando verificadas (`!is_unfetched`) sobre pendientes
+    // 2. Elegir la cuenta compatible con mayor score de salud, priorizando verificadas (`!is_unfetched`)
     let mut healthy: Vec<&AccountQuota> = accounts_list
         .iter()
         .filter(|a| {
             let eff = crate::quotas::evaluate_account_for_model(a, active_model);
-            !eff.is_critical && !a.has_error
+            is_eligible_source(a) && !eff.is_critical && !a.has_error
         })
         .collect();
 
@@ -402,9 +438,24 @@ pub fn get_best_healthy_target_prefix_for_model(
         ))
     });
 
-    healthy
-        .first()
-        .map(|a| a.prefix.clone())
+    healthy.first().map(|a| a.prefix.clone())
+}
+
+pub fn get_best_healthy_target_prefix_for_source(
+    source: &AccountQuota,
+    accounts_list: &[AccountQuota],
+    active_prefixes: &HashSet<String>,
+    active_model: &str,
+) -> Option<String> {
+    select_best_healthy_target_prefix(accounts_list, active_prefixes, active_model, Some(source))
+}
+
+pub fn get_best_healthy_target_prefix_for_model(
+    accounts_list: &[AccountQuota],
+    active_prefixes: &HashSet<String>,
+    active_model: &str,
+) -> String {
+    select_best_healthy_target_prefix(accounts_list, active_prefixes, active_model, None)
         .or_else(|| accounts_list.first().map(|a| a.prefix.clone()))
         .unwrap_or_else(|| "default".to_string())
 }
@@ -499,7 +550,11 @@ pub fn migrate_critical_sessions_for_model(
         .iter()
         .filter(|a| {
             let eff = crate::quotas::evaluate_account_for_model(a, active_model);
-            (eff.is_critical || (100u8.saturating_sub(eff.rem_5h) >= 85 && !a.has_error))
+            !a.has_error
+                && a.reset_5h != crate::quotas::UNFETCHED_RESET
+                && (eff.is_critical
+                    || (!crate::quotas::is_unfetched(a)
+                        && 100u8.saturating_sub(eff.rem_5h) >= 85))
                 && active_prefixes.contains(&a.prefix.to_lowercase())
         })
         .collect();
@@ -511,18 +566,29 @@ pub fn migrate_critical_sessions_for_model(
         );
     }
 
-    let target_prefix =
-        get_best_healthy_target_prefix_for_model(accounts_list, active_prefixes, active_model);
+    let mut targets_by_source: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for src in &critical_list {
+        if let Some(target) = get_best_healthy_target_prefix_for_source(
+            src,
+            accounts_list,
+            active_prefixes,
+            active_model,
+        ) {
+            targets_by_source.insert(src.prefix.to_lowercase(), target);
+        }
+    }
+
     let migratable_critical: Vec<&AccountQuota> = critical_list
         .iter()
         .copied()
-        .filter(|a| !a.prefix.eq_ignore_ascii_case(&target_prefix))
+        .filter(|a| targets_by_source.contains_key(&a.prefix.to_lowercase()))
         .collect();
 
     if migratable_critical.is_empty() {
         return (
             0,
-            "No hay cuentas alternativas sanas disponibles para migrar.".to_string(),
+            "No hay cuentas alternativas sanas compatibles disponibles para migrar.".to_string(),
         );
     }
 
@@ -543,6 +609,7 @@ pub fn migrate_critical_sessions_for_model(
     let known_prefixes = crate::quotas::sorted_known_prefixes(accounts_list, Some(cwd));
     let mut total_migrated = 0;
     let mut migrated_from = Vec::new();
+    let mut migrated_targets = Vec::new();
     let mut pending_notifications: Vec<(String, String, String, String)> = Vec::new();
 
     // Obtener sesiones no archivadas según el esquema activo (session vs session_v2)
@@ -582,12 +649,16 @@ pub fn migrate_critical_sessions_for_model(
             continue;
         };
 
-        let to_agent = rewrite_migrated_agent(agent_opt.as_deref(), from_prefix, &target_prefix);
+        let Some(target_prefix) = targets_by_source.get(&from_prefix.to_lowercase()) else {
+            continue;
+        };
+
+        let to_agent = rewrite_migrated_agent(agent_opt.as_deref(), from_prefix, target_prefix);
         let (to_model_id, to_model_json, provider_id) = rewrite_migrated_model(
             cwd,
             model_opt.as_deref(),
             from_prefix,
-            &target_prefix,
+            target_prefix,
             active_model,
         );
 
@@ -618,6 +689,9 @@ pub fn migrate_critical_sessions_for_model(
             if !migrated_from.contains(&from_owned) {
                 migrated_from.push(from_owned);
             }
+            if !migrated_targets.contains(target_prefix) {
+                migrated_targets.push(target_prefix.clone());
+            }
 
             pending_notifications.push((ses_id, to_agent, to_model_id, provider_id));
         }
@@ -631,8 +705,9 @@ pub fn migrate_critical_sessions_for_model(
 
     if total_migrated > 0 {
         let from_str = migrated_from.join(", ");
+        let target_summary = migrated_targets.join(", ");
         let notice = format!(
-            "[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_prefix}!"
+            "[ok] {total_migrated} sesion(es) migradas en vivo de [{from_str}] a {target_summary}!"
         );
 
         // Guardar checkpoint en Engram (acotado con timeout y sin ventana en Windows; omitido en BDs efímeras de test)
@@ -644,9 +719,9 @@ pub fn migrate_critical_sessions_for_model(
                 .and_then(|n| n.to_str())
                 .unwrap_or("proyecto")
                 .to_string();
-            let title = format!("Checkpoint migración: [{from_str}] -> {target_prefix}");
+            let title = format!("Checkpoint migración: [{from_str}] -> {target_summary}");
             let content = format!(
-                "**What**: Checkpoint y rotación en frío de {total_migrated} sesión(es) desde [{from_str}] hacia {target_prefix}.\n**Why**: Cuota crítica agotada (>=85% usado) en cuenta(s) saliente(s).\n**Where**: {cwd}"
+                "**What**: Checkpoint y rotación en frío de {total_migrated} sesión(es) desde [{from_str}] hacia {target_summary}.\n**Why**: Cuota crítica agotada (>=85% usado) en cuenta(s) saliente(s).\n**Where**: {cwd}"
             );
             let mut cmd = Command::new(&cand);
             cmd.args([
@@ -682,6 +757,16 @@ pub fn release_inactive_sessions(
     accounts_list: &[AccountQuota],
     my_pane_id: Option<&str>,
     my_tab_id: Option<&str>,
+) -> ReleaseResult {
+    release_inactive_sessions_preserving(cwd, accounts_list, my_pane_id, my_tab_id, None)
+}
+
+pub fn release_inactive_sessions_preserving(
+    cwd: &str,
+    accounts_list: &[AccountQuota],
+    my_pane_id: Option<&str>,
+    my_tab_id: Option<&str>,
+    active_session_id: Option<&str>,
 ) -> ReleaseResult {
     let current_session_id = std::env::var("OPENCODE_SESSION_ID").ok();
     let mut closed_count = 0;
@@ -743,8 +828,12 @@ pub fn release_inactive_sessions(
             tab_agent_pane.and_then(|tap| resolve_session_for_pane(&conn, tap).map(|s| s.id));
     }
 
-    if keep_session_id.is_none() && current_session_id.is_some() {
-        keep_session_id = current_session_id;
+    if keep_session_id.is_none() {
+        keep_session_id = active_session_id
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or(current_session_id);
     }
 
     let now = chrono::Utc::now().timestamp_millis();

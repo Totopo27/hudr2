@@ -559,19 +559,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let _ = out.flush();
         }
 
-        // 2. Esperar el próximo evento sin sondeo activo; el timer de respaldo despierta periódicamente.
-        let flash_wait = {
+        // 2. Esperar el próximo evento sin sondeo activo; el timer de respaldo o expiraciones visuales despiertan.
+        let wakeup_wait = {
             let st = app_state.read().await;
-            st.flash_notice_until
-                .map(|u| u.saturating_duration_since(Instant::now()))
+            let flash_wait = st
+                .flash_notice_until
+                .map(|u| u.saturating_duration_since(Instant::now()));
+            let orch_wait = st.next_orchestrator_expiry_wait();
+            match (flash_wait, orch_wait) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
         };
-        let next_msg = if let Some(wait_dur) = flash_wait {
+        let next_msg = if let Some(wait_dur) = wakeup_wait {
             match tokio::time::timeout(wait_dur, rx.recv()).await {
                 Ok(Some(m)) => Some(m),
                 Ok(None) => break,
                 Err(_) => {
                     let mut st = app_state.write().await;
                     st.check_flash_notice_expiry();
+                    st.expire_orchestrator_finished_flags();
                     continue;
                 }
             }
