@@ -2,13 +2,17 @@
 //! de las herramientas clave de desarrollo (pi, hudr2, gentle-shell, gentle-ai, engram, herdr).
 
 use crate::models::{EcosystemTelemetry, ToolVersionInfo};
-use std::io::Read;
 use std::process::Stdio;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 static ECOSYSTEM_CACHE: LazyLock<Mutex<Option<EcosystemTelemetry>>> =
     LazyLock::new(|| Mutex::new(None));
+
+#[cfg(not(test))]
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const UPDATE_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub fn clear_ecosystem_cache() {
     if let Ok(mut guard) = ECOSYSTEM_CACHE.lock() {
@@ -35,6 +39,14 @@ pub fn read_ecosystem_telemetry() -> EcosystemTelemetry {
 }
 
 fn run_version_cmd(bin: &str, args: &[&str]) -> Option<String> {
+    run_version_cmd_until(bin, args, Instant::now() + Duration::from_secs(3))
+}
+
+fn run_version_cmd_until(bin: &str, args: &[&str], deadline: Instant) -> Option<String> {
+    let deadline = deadline.min(Instant::now() + Duration::from_secs(3));
+    if Instant::now() >= deadline {
+        return None;
+    }
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", bin]);
@@ -60,33 +72,10 @@ fn run_version_cmd(bin: &str, args: &[&str]) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let mut child = cmd.spawn().ok()?;
-    let stdout_pipe = child.stdout.take()?;
-    let out_handle = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout_pipe.take(16 * 1024).read_to_string(&mut s);
-        s
-    });
-
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(15));
-            }
-            Err(_) => return None,
-        }
-    };
+    let (status, output, _) = wait_for_output(cmd.spawn().ok()?, deadline, |_, _| {}).ok()?;
 
     if status.success() {
-        let s = out_handle.join().unwrap_or_default();
-        let trimmed = s.trim();
+        let trimmed = output.trim();
         if !trimmed.is_empty() {
             return Some(trimmed.to_string());
         }
@@ -323,10 +312,9 @@ pub fn assisted_update_notice(name: &str) -> Option<&'static str> {
 /// separadas tanto por `\n` como por `\r` (usado comúnmente en terminales para spinners y progreso).
 fn stream_pipe_chunks<R: std::io::Read>(
     pipe: Option<R>,
-    tx: std::sync::mpsc::Sender<(String, bool)>,
+    tx: std::sync::mpsc::SyncSender<(Option<String>, bool)>,
     is_err: bool,
-) -> String {
-    let mut full = String::new();
+) {
     if let Some(mut r) = pipe {
         let mut buf = [0u8; 512];
         let mut cur = Vec::new();
@@ -338,14 +326,12 @@ fn stream_pipe_chunks<R: std::io::Read>(
                 if b == b'\n' || b == b'\r' {
                     if !cur.is_empty() {
                         let line = String::from_utf8_lossy(&cur).trim().to_string();
-                        if !line.is_empty() {
-                            full.push_str(&line);
-                            full.push('\n');
-                            let _ = tx.send((line, is_err));
+                        if !line.is_empty() && tx.send((Some(line), is_err)).is_err() {
+                            return;
                         }
                         cur.clear();
                     }
-                } else {
+                } else if cur.len() < 16 * 1024 {
                     cur.push(b);
                 }
             }
@@ -353,12 +339,173 @@ fn stream_pipe_chunks<R: std::io::Read>(
         if !cur.is_empty() {
             let line = String::from_utf8_lossy(&cur).trim().to_string();
             if !line.is_empty() {
-                full.push_str(&line);
-                let _ = tx.send((line, is_err));
+                let _ = tx.send((Some(line), is_err));
             }
         }
     }
-    full
+    let _ = tx.send((None, is_err));
+}
+
+/// The deadline covers child exit AND EOF; inherited output handles cannot extend it.
+fn wait_for_output(
+    mut child: std::process::Child,
+    deadline: Instant,
+    mut on_line: impl FnMut(Option<&str>, u64),
+) -> Result<(std::process::ExitStatus, String, String), String> {
+    #[cfg(windows)]
+    let _job = windows_job::Job::attach(&mut child)?;
+    let (tx, rx) = std::sync::mpsc::sync_channel(32);
+    for (pipe, is_err) in [
+        (child.stdout.take().map(Pipe::Out), false),
+        (child.stderr.take().map(Pipe::Err), true),
+    ] {
+        let tx = tx.clone();
+        std::thread::spawn(move || match pipe {
+            Some(Pipe::Out(pipe)) => stream_pipe_chunks(Some(pipe), tx, is_err),
+            Some(Pipe::Err(pipe)) => stream_pipe_chunks(Some(pipe), tx, is_err),
+            None => {
+                let _ = tx.send((None, is_err));
+            }
+        });
+    }
+    drop(tx);
+    let started = Instant::now();
+    let mut status = None;
+    let mut closed = 0;
+    let (mut stdout, mut stderr) = (String::new(), String::new());
+    loop {
+        if Instant::now() >= deadline {
+            if status.is_none() && child.kill().is_ok() {
+                let _ = child.wait();
+            }
+            return Err("operation timed out while installing or collecting output".to_string());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok((Some(line), is_err)) => {
+                on_line(Some(&line), started.elapsed().as_secs());
+                let output = if is_err { &mut stderr } else { &mut stdout };
+                // Keep a bounded diagnostic tail rather than the entire installer transcript.
+                output.push_str(&line);
+                output.push('\n');
+                if output.len() > 16 * 1024 {
+                    let mut start = output.len() - 16 * 1024;
+                    while !output.is_char_boundary(start) {
+                        start += 1;
+                    }
+                    output.drain(..start);
+                }
+            }
+            Ok((None, _)) => closed += 1,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                std::thread::sleep(remaining.min(Duration::from_millis(20)));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        on_line(None, started.elapsed().as_secs());
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|e| format!("could not wait for installer: {e}"))?;
+        }
+        if let Some(status) = status
+            && closed == 2
+        {
+            return Ok((status, stdout, stderr));
+        }
+    }
+}
+
+enum Pipe {
+    Out(std::process::ChildStdout),
+    Err(std::process::ChildStderr),
+}
+
+#[cfg(windows)]
+mod windows_job {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct BasicLimits {
+        process_time: i64,
+        job_time: i64,
+        flags: u32,
+        min_working_set: usize,
+        max_working_set: usize,
+        active_processes: u32,
+        affinity: usize,
+        priority: u32,
+        scheduling: u32,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    struct ExtendedLimits {
+        basic: BasicLimits,
+        io_counters: [u64; 6],
+        process_memory: usize,
+        job_memory: usize,
+        peak_process_memory: usize,
+        peak_job_memory: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> *mut c_void;
+        fn SetInformationJobObject(
+            job: *mut c_void,
+            class: i32,
+            info: *const c_void,
+            size: u32,
+        ) -> i32;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub(super) struct Job(*mut c_void);
+
+    impl Job {
+        pub(super) fn attach(child: &mut std::process::Child) -> Result<Self, String> {
+            // A private, unnamed job owns only this invocation and its descendants.
+            // Closing its non-inherited handle terminates survivors, never user sessions.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            let job = Self(handle);
+            let limits = ExtendedLimits {
+                basic: BasicLimits {
+                    flags: 0x2000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let configured = !handle.is_null()
+                && unsafe {
+                    SetInformationJobObject(
+                        handle,
+                        9,
+                        (&limits as *const ExtendedLimits).cast(),
+                        std::mem::size_of::<ExtendedLimits>() as u32,
+                    ) != 0
+                        && AssignProcessToJobObject(handle, child.as_raw_handle()) != 0
+                };
+            if !configured {
+                if child.kill().is_ok() {
+                    let _ = child.wait();
+                }
+                return Err("could not supervise installer process tree".to_string());
+            }
+            Ok(job)
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe { CloseHandle(self.0) };
+            }
+        }
+    }
 }
 
 /// Analiza líneas emitidas por instaladores (gentle-ai, npm, herdr, cargo) y aproxima el progreso y etapa.
@@ -415,18 +562,21 @@ pub fn parse_line_progress(line: &str, current_pct: u8) -> (u8, String) {
 /// En Windows, sincroniza el binario recién instalado en GOPATH/bin con la ruta activa que resuelve PATH
 /// si ésta se encuentra en otra carpeta (ej. GOROOT/bin u otra instalación previa).
 #[cfg(target_os = "windows")]
-fn sync_active_windows_binary(bin_name: &str) {
-    let active_path = run_version_cmd("where.exe", &[bin_name])
+fn sync_active_windows_binary(bin_name: &str, deadline: Instant) {
+    let active_path = run_version_cmd_until("where.exe", &[bin_name], deadline)
         .and_then(|out| out.lines().next().map(|l| l.trim().to_string()))
         .map(std::path::PathBuf::from);
 
-    let gopath = run_version_cmd("go", &["env", "GOPATH"])
+    let gopath = run_version_cmd_until("go", &["env", "GOPATH"], deadline)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join("go")));
 
     if let (Some(gopath_dir), Some(dest)) = (gopath, active_path) {
+        if Instant::now() >= deadline {
+            return;
+        }
         let src = gopath_dir.join("bin").join(format!("{bin_name}.exe"));
         if src.exists() && src != dest && std::fs::copy(&src, &dest).is_err() {
             let old = dest.with_extension("old.exe");
@@ -445,9 +595,11 @@ pub fn execute_tool_update_with_progress<F>(
 where
     F: FnMut(u8, &str, usize, u64) + Send,
 {
+    let start_time = Instant::now();
+    let deadline = start_time + UPDATE_TIMEOUT;
     if cfg!(target_os = "windows")
         && name == "gentle-ai"
-        && run_version_cmd("go", &["version"]).is_none()
+        && run_version_cmd_until("go", &["version"], deadline).is_none()
     {
         return Err(
             "gentle-ai en Windows requiere Go instalado (https://go.dev) para compilar".to_string(),
@@ -482,83 +634,54 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd
+    let child = cmd
         .spawn()
         .map_err(|e| format!("no se pudo iniciar el proceso '{bin}': {e}"))?;
 
-    let (tx_lines, rx_lines) = std::sync::mpsc::channel::<(String, bool)>();
-    let tx_out = tx_lines.clone();
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-
-    let out_handle = std::thread::spawn(move || stream_pipe_chunks(stdout_pipe, tx_out, false));
-
-    let tx_err = tx_lines.clone();
-    let err_handle = std::thread::spawn(move || stream_pipe_chunks(stderr_pipe, tx_err, true));
-    drop(tx_lines);
-
-    let deadline = Instant::now() + Duration::from_secs(120);
-    let start_time = Instant::now();
-    let mut pct: u8 = 10;
-    let mut stage = "iniciando".to_string();
+    let pct: u8 = 0;
+    let mut stage = "instalando".to_string();
     let mut spinner_idx: usize = 0;
     let mut last_progress_emit = Instant::now();
+    let mut files_locked = false;
 
     on_progress(pct, &stage, spinner_idx, 0);
 
-    let status = loop {
-        match rx_lines.recv_timeout(Duration::from_millis(200)) {
-            Ok((line, _is_err)) => {
-                let (new_pct, new_stage) = parse_line_progress(&line, pct);
-                pct = new_pct;
-                stage = new_stage;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                spinner_idx = (spinner_idx + 1) % 10;
-                let elapsed = start_time.elapsed().as_secs();
-                if pct < 90 && elapsed >= 2 && pct < 15 + (elapsed as u8 * 4) {
-                    pct = (pct + 1).min(90);
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+    let (status, stdout_str, stderr_str) = wait_for_output(child, deadline, |line, _| {
+        if let Some(line) = line {
+            files_locked |= line.to_ascii_lowercase().contains("ebusy");
+            let (_, new_stage) = parse_line_progress(line, pct);
+            stage = if new_stage == "completado" {
+                "verificando".to_string()
+            } else {
+                new_stage
+            };
         }
-
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!(
-                        "tiempo límite de actualización agotado (120s) para '{name}'"
-                    ));
-                }
-                if last_progress_emit.elapsed() >= Duration::from_millis(180) {
-                    spinner_idx = (spinner_idx + 1) % 10;
-                    on_progress(pct, &stage, spinner_idx, start_time.elapsed().as_secs());
-                    last_progress_emit = Instant::now();
-                }
-            }
-            Err(e) => return Err(format!("error esperando proceso: {e}")),
+        if last_progress_emit.elapsed() >= Duration::from_millis(180) {
+            spinner_idx = (spinner_idx + 1) % 4;
+            on_progress(pct, &stage, spinner_idx, start_time.elapsed().as_secs());
+            last_progress_emit = Instant::now();
         }
-    };
-
-    let stdout_str = out_handle.join().unwrap_or_default();
-    let stderr_str = err_handle.join().unwrap_or_default();
+    })
+    .map_err(|error| format!("{name}: {error} ({}s limit)", UPDATE_TIMEOUT.as_secs()))?;
 
     let combined = format!("{stdout_str}\n{stderr_str}");
     let combined_lower = combined.to_ascii_lowercase();
 
+    if !status.success() && files_locked {
+        return Err(format!(
+            "{name}: EBUSY (files in use). Close sessions using this tool, then update from another terminal; no automatic retry."
+        ));
+    }
+
     if status.success() {
         if combined_lower.contains("manual update required")
-            || combined_lower.contains("skipped")
             || combined_lower.contains("no files were changed")
         {
             let reason = combined
                 .lines()
                 .find(|l| {
                     let low = l.to_ascii_lowercase();
-                    low.contains("manual update required") || low.contains("skipped")
+                    low.contains("manual update required") || low.contains("no files were changed")
                 })
                 .map(|l| l.trim())
                 .unwrap_or("requiere actualización manual");
@@ -566,10 +689,19 @@ where
         }
         #[cfg(target_os = "windows")]
         if name == "gentle-ai" {
-            sync_active_windows_binary("gentle-ai");
+            sync_active_windows_binary("gentle-ai", deadline);
         }
+        on_progress(0, "verificando", 0, start_time.elapsed().as_secs());
+        let version = run_version_cmd_until(name, &["--version"], deadline)
+            .map(|raw| clean_version_output(name, &raw))
+            .filter(|version| version.as_bytes().get(1).is_some_and(u8::is_ascii_digit))
+            .ok_or_else(|| {
+                format!("{name}: installation finished, but its version could not be verified")
+            })?;
         on_progress(100, "completado", 0, start_time.elapsed().as_secs());
-        Ok(format!("{name} actualizado correctamente"))
+        Ok(format!(
+            "{name}: installation finished; active version {version}"
+        ))
     } else {
         let err_detail = stderr_str
             .lines()
@@ -752,6 +884,258 @@ pub async fn fetch_upstream_versions_with_cache(
 mod tests {
     use super::*;
     use crate::models::ToolUpdateProgress;
+
+    #[cfg(windows)]
+    static UPDATE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[cfg(windows)]
+    struct FakeUpdate {
+        dir: tempfile::TempDir,
+        old_path: std::ffi::OsString,
+        old_search: Option<std::ffi::OsString>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    #[cfg(windows)]
+    impl FakeUpdate {
+        fn new(installer: &str, version: &str) -> Self {
+            let guard = UPDATE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("npm.cmd"),
+                format!("@echo off\r\n{installer}\r\n"),
+            )
+            .unwrap();
+            for tool in [
+                "gentle-shell",
+                "pi",
+                "hudr2",
+                "gentle-ai",
+                "engram",
+                "herdr",
+                "go",
+            ] {
+                std::fs::write(
+                    dir.path().join(format!("{tool}.cmd")),
+                    format!("@echo off\r\n{version}\r\n"),
+                )
+                .unwrap();
+            }
+            let old_path = std::env::var_os("PATH").unwrap_or_default();
+            let old_search = std::env::var_os("NoDefaultCurrentDirectoryInExePath");
+            let path = std::env::join_paths(
+                std::iter::once(dir.path().to_path_buf()).chain(std::env::split_paths(&old_path)),
+            )
+            .unwrap();
+            // These process fixtures run serially and never invoke a real installer.
+            unsafe {
+                std::env::set_var("PATH", path);
+                std::env::set_var("NoDefaultCurrentDirectoryInExePath", "1");
+            }
+            Self {
+                dir,
+                old_path,
+                old_search,
+                _guard: guard,
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for FakeUpdate {
+        fn drop(&mut self) {
+            unsafe { std::env::set_var("PATH", &self.old_path) };
+            unsafe {
+                match &self.old_search {
+                    Some(value) => std::env::set_var("NoDefaultCurrentDirectoryInExePath", value),
+                    None => std::env::remove_var("NoDefaultCurrentDirectoryInExePath"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_accepts_successful_skipped_warning_and_reads_installed_version() {
+        let fixture = FakeUpdate::new(
+            "echo gentle-pi skipped enabling fullscreen: not a pi-managed install\r\nexit /b 0",
+            "echo version-probed>> \"%~dp0calls.txt\"\r\necho gentle-shell 4.8.0\r\nexit /b 0",
+        );
+        let mut progress = Vec::new();
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            progress.push(pct);
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert!(result.unwrap().contains("v4.8.0"));
+        assert!(fixture.dir.path().join("calls.txt").exists());
+        assert_eq!(progress.last(), Some(&100));
+        assert!(progress[..progress.len() - 1].iter().all(|pct| *pct == 0));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_reports_locked_files_without_retrying_or_exposing_paths() {
+        let fixture = FakeUpdate::new(
+            "echo attempted>> \"%~dp0attempts.txt\"\r\necho npm error code EBUSY 1>&2\r\necho npm error log C:\\Users\\private-user\\npm.log 1>&2\r\nexit /b 1",
+            "echo version-probed>> \"%~dp0calls.txt\"\r\necho gentle-shell 4.7.0",
+        );
+        let mut progress = Vec::new();
+        let error = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            progress.push(pct);
+        })
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "gentle-shell: EBUSY (files in use). Close sessions using this tool, then update from another terminal; no automatic retry."
+        );
+        assert!(!error.contains("private-user"), "{error}");
+        assert!(!progress.contains(&100));
+        assert!(!fixture.dir.path().join("calls.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(fixture.dir.path().join("attempts.txt"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_does_not_announce_success_before_version_verification() {
+        let _fixture = FakeUpdate::new("echo added 107 packages in 1s\r\nexit /b 0", "exit /b 1");
+        let mut progress = Vec::new();
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            progress.push(pct);
+        });
+        assert!(result.unwrap_err().contains("version"));
+        assert!(!progress.contains(&100));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_deadline_covers_inherited_output_handles() {
+        let _fixture = FakeUpdate::new(
+            "start \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\nexit /b 0",
+            "echo gentle-shell 4.8.0",
+        );
+        let start = Instant::now();
+        let mut completed = false;
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            completed |= pct == 100;
+        });
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!completed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_deadline_also_covers_version_probe_output() {
+        let _fixture = FakeUpdate::new(
+            "exit /b 0",
+            "echo gentle-shell 4.8.0\r\nstart \"\" /b \"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\nexit /b 0",
+        );
+        let start = Instant::now();
+        let mut completed = false;
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            completed |= pct == 100;
+        });
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!completed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_deadline_covers_silent_running_installer() {
+        let _fixture = FakeUpdate::new(
+            "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\nexit /b 0",
+            "echo gentle-shell 4.8.0",
+        );
+        let start = Instant::now();
+        let mut progress = Vec::new();
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, elapsed| {
+            progress.push((pct, elapsed));
+        });
+        assert!(result.unwrap_err().contains("timed out"));
+        assert!(start.elapsed() < Duration::from_secs(4));
+        assert!(progress.iter().any(|(_, elapsed)| *elapsed >= 1));
+        assert!(progress.iter().all(|(pct, _)| *pct == 0));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_deadline_is_shared_between_install_and_version_verification() {
+        let _fixture = FakeUpdate::new(
+            "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Milliseconds 900\"",
+            "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -Command \"Start-Sleep -Seconds 5\"\r\necho gentle-shell 4.8.0",
+        );
+        let start = Instant::now();
+        let mut completed = false;
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            completed |= pct == 100;
+        });
+        assert!(result.is_err(), "{result:?}");
+        assert!(
+            start.elapsed() < UPDATE_TIMEOUT + Duration::from_millis(800),
+            "{:?}",
+            start.elapsed()
+        );
+        assert!(!completed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_rejects_an_unparseable_installed_version() {
+        let _fixture = FakeUpdate::new("exit /b 0", "echo not-a-version");
+        let mut completed = false;
+        let result = execute_tool_update_with_progress("gentle-shell", |pct, _, _, _| {
+            completed |= pct == 100;
+        });
+        assert!(
+            result
+                .unwrap_err()
+                .contains("version could not be verified")
+        );
+        assert!(!completed);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn update_shared_version_probes_preserve_each_tools_reported_version() {
+        let _fixture = FakeUpdate::new("exit /b 0", "echo 4.8.0\r\nexit /b 0");
+        let ecosystem = collect_ecosystem_telemetry();
+        for name in [
+            "pi",
+            "hudr2",
+            "gentle-shell",
+            "gentle-ai",
+            "engram",
+            "herdr",
+        ] {
+            let tool = ecosystem
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap();
+            assert!(tool.is_installed, "{name}");
+            assert_eq!(tool.version.as_deref(), Some("v4.8.0"), "{name}");
+        }
+        for name in ["pi", "gentle-shell", "gentle-ai", "engram", "herdr"] {
+            let result = execute_tool_update_with_progress(name, |_, _, _, _| {});
+            assert!(result.is_ok(), "{name}: {result:?}");
+            assert!(result.unwrap().contains("v4.8.0"), "{name}");
+        }
+    }
 
     #[test]
     fn test_clean_version_output() {

@@ -36,7 +36,10 @@ Opciones:
   --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 14 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
   --name, --title    Nombre personalizado del sidebar (por defecto: HUDR2)
   -v, --version      Muestra la versión de hudr2
-  -h, --help         Muestra esta ayuda";
+  -h, --help         Muestra esta ayuda
+
+Stack updates show stage and elapsed time, with a 120s limit.
+EBUSY means files are in use: close the affected tool and update from another terminal.";
 
 struct CliArgs {
     once: bool,
@@ -139,6 +142,10 @@ enum MainMsg {
         stage: String,
         spinner_idx: usize,
         elapsed: u64,
+    },
+    ToolUpdateFinished {
+        name: String,
+        result: Result<String, String>,
     },
     Quit,
 }
@@ -575,7 +582,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .ecosystem
                         .tools
                         .iter_mut()
-                        .find(|t| t.name == name)
+                        .find(|t| t.name == name && t.is_updating)
                     {
                         tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
                             percent,
@@ -585,6 +592,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         });
                         st.needs_redraw = true;
                     }
+                }
+                MainMsg::ToolUpdateFinished { name, result } => {
+                    let mut st = app_state.write().await;
+                    if let Some(tool) = st
+                        .snapshot
+                        .ecosystem
+                        .tools
+                        .iter_mut()
+                        .find(|t| t.name == name)
+                    {
+                        tool.is_updating = false;
+                        tool.update_progress = None;
+                    }
+                    let notice = match result {
+                        Ok(message) => format!("+ {message}"),
+                        Err(error) => format!("Error: {error}"),
+                    };
+                    st.set_flash_notice(Some(notice), 8000);
+                    st.needs_redraw = true;
                 }
                 MainMsg::QuotaTick => {
                     quota_tick = true;
@@ -1169,8 +1195,8 @@ fn spawn_tool_update(
                 }
                 tool.is_updating = true;
                 tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
-                    percent: 5,
-                    stage: "iniciando".to_string(),
+                    percent: 0,
+                    stage: "instalando".to_string(),
                     spinner_idx: 0,
                     elapsed_secs: 0,
                 });
@@ -1205,6 +1231,12 @@ fn spawn_tool_update(
         .await
         .unwrap_or_else(|e| Err(format!("error en worker thread: {e}")));
 
+        // FIFO with progress: release the row before any separate telemetry refresh.
+        let _ = wake_tx.send(MainMsg::ToolUpdateFinished {
+            name: tool_name,
+            result: res,
+        });
+
         // 3. Invalidar caché del ecosistema y recolectar versiones frescas
         hudr2::ecosystem::clear_ecosystem_cache();
         let mut fresh_eco =
@@ -1218,24 +1250,14 @@ fn spawn_tool_update(
         };
         hudr2::ecosystem::hydrate_ecosystem_upstream(&mut fresh_eco, cfg_path.as_deref());
 
-        // Si terminó exitosamente, pausar brevemente (~1200ms) para que el usuario
-        // pueda ver el indicador al 100% completado en la tarjeta antes de retirar el monitor.
-        if res.is_ok() {
-            tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
-        }
-
-        // 4. Actualizar estado y notificar resultado
+        // Preserve other concurrent updates when fresh inventory arrives.
         {
             let mut st = app_state.write().await;
+            hudr2::ecosystem::preserve_in_flight_update_state(
+                &mut fresh_eco,
+                &st.snapshot.ecosystem,
+            );
             st.snapshot.ecosystem = fresh_eco;
-            match res {
-                Ok(msg) => {
-                    st.set_flash_notice(Some(format!("✓ {msg}")), 4000);
-                }
-                Err(err) => {
-                    st.set_flash_notice(Some(format!("✗ Error: {err}")), 5000);
-                }
-            }
             st.needs_redraw = true;
         }
         let _ = wake_tx.send(MainMsg::Redraw);

@@ -1747,7 +1747,7 @@ mod tests {
             let render = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
             let text = render.lines.join("\n");
             assert!(
-                text.contains("42%]") && text.contains("[actualizando]"),
+                text.contains("[\\ descargando 7s]"),
                 "the progress monitor must stay visible after a refresh"
             );
             for tool in state
@@ -5152,7 +5152,7 @@ mod tests {
             "herdr no debe tener bound de actualización porque está al día"
         );
 
-        // 2. Estado is_updating con monitor de porcentaje en tiempo real
+        // In-flight rows show stage and elapsed time, not estimated percentages.
         state.snapshot.ecosystem.tools[0].is_updating = true;
         state.snapshot.ecosystem.tools[0].update_progress =
             Some(hudr2::models::ToolUpdateProgress {
@@ -5166,12 +5166,12 @@ mod tests {
 
         let updating_text = render_updating.lines.join("\n");
         assert!(
-            updating_text.contains("[| 45%]"),
-            "Debe mostrar un spinner ASCII portátil junto al porcentaje"
+            updating_text.contains("[| descargando 2s]"),
+            "Show a portable spinner, stage and elapsed time"
         );
         assert!(
-            updating_text.contains("[\u{2191}]"),
-            "En ancho 48 muestra botón compacto [↑] junto al monitor"
+            !updating_text.contains("[\u{2191}]"),
+            "An active update must not look retryable"
         );
         assert!(
             !state
@@ -5181,19 +5181,19 @@ mod tests {
             "pi no debe tener bound de actualización mientras se está actualizando"
         );
 
-        // 3. Ancho ancho (56 columnas): monitor [| 45%] + [actualizando]
+        // Wide rows retain the full stage.
         let render_updating_56 =
             ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 56);
         let text_56 = render_updating_56.lines.join("\n");
-        assert!(text_56.contains("[| 45%]"));
-        assert!(text_56.contains("[actualizando]"));
+        assert!(text_56.contains("[| descargando 2s]"));
+        assert!(!text_56.contains("[actualizando]"));
 
-        // 4. Ancho adaptativo estrecho (42 columnas): monitor [| 45%] + botón compacto [↑]
+        // Narrow rows abbreviate the stage while retaining elapsed time.
         let render_updating_42 =
             ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 42);
         let text_42 = render_updating_42.lines.join("\n");
-        assert!(text_42.contains("[| 45%]"));
-        assert!(text_42.contains("[\u{2191}]"));
+        assert!(text_42.contains("[| desc 2s]"));
+        assert!(!text_42.contains("[\u{2191}]"));
 
         // Every animation frame must remain portable across terminal fonts.
         for (spinner_idx, expected) in [(0, '|'), (1, '/'), (2, '-'), (3, '\\')] {
@@ -5205,7 +5205,7 @@ mod tests {
             let frame = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 48)
                 .lines
                 .join("\n");
-            assert!(frame.contains(&format!("[{expected} 45%]")));
+            assert!(frame.contains(&format!("[{expected} descargando 2s]")));
         }
 
         // 4b. Estado completado (100%): monitor verde [+ 100%] + [completado]
@@ -5248,6 +5248,48 @@ mod tests {
                 visible_w,
                 line
             );
+        }
+    }
+
+    #[test]
+    fn test_stack_update_shows_stage_and_elapsed_without_invented_percentage() {
+        use hudr2::models::{EcosystemTelemetry, ToolUpdateProgress, ToolVersionInfo};
+        let mut state = AppState::new();
+        state.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![ToolVersionInfo {
+                name: "gentle-shell".to_string(),
+                version: Some("v4.7.0".to_string()),
+                is_installed: true,
+                update_available: true,
+                is_updating: true,
+                update_progress: Some(ToolUpdateProgress {
+                    percent: 0,
+                    stage: "instalando".to_string(),
+                    elapsed_secs: 32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        };
+        for width in [36, 42, 48, 56] {
+            let rendered = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, width);
+            let row = rendered
+                .lines
+                .iter()
+                .find(|line| line.contains("gentle-shell"))
+                .unwrap();
+            assert!(row.contains("32s"), "{row}");
+            assert!(row.contains("inst"), "{row}");
+            assert!(!row.contains('%'), "{row}");
+            assert!(
+                !rendered
+                    .bounds
+                    .iter()
+                    .any(|bound| bound.id == "update_tool")
+            );
+            for line in rendered.lines {
+                assert!(ui::string_width(&line) <= width, "{line}");
+            }
         }
     }
 

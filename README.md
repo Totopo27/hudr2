@@ -70,6 +70,21 @@ Cuando trabajas con agentes como OpenCode o Gentle Shell dentro de una sesión l
 
 ---
 
+## Stack updates
+
+Click `[actualizar]` to update one tool in the background. While running, Stack shows
+the installer stage and elapsed time, such as `[| instalando 32s]`, not an estimated
+percentage. Narrow panes abbreviate the stage.
+
+Installation, output collection, and installed-version verification share a 120-second
+deadline. A successful exit alone is not enough: the active version must be readable.
+Warnings containing `skipped` do not automatically mean failure.
+
+On Windows, `EBUSY` means files are in use. Close sessions using the affected tool
+and update from another terminal. HUDR2 does not close user sessions or automatically
+retry. Timed-out Windows installer descendants are contained in a private job and
+terminated; the row is released before the separate inventory refresh.
+
 ## Ajustes del HUD (`Personalizar`)
 
 Para adaptarse tanto a monitores verticales como a terminales compactas, HUDR2 incluye gestión interactiva en tiempo real:

@@ -2431,7 +2431,9 @@ pub fn render_screen_tabbed(
                     let row_line_idx = lines.len();
                     let left = if tool.is_installed {
                         let ver_str = tool.version.as_deref().unwrap_or("");
-                        if tool.is_updating {
+                        if tool.is_updating && width < 48 {
+                            format!("{mint}\u{25cf}{RESET} {text_primary}{}{RESET}", tool.name)
+                        } else if tool.is_updating {
                             format!(
                                 "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
                                 tool.name, ver_str
@@ -2473,11 +2475,15 @@ pub fn render_screen_tabbed(
                                 ('+', "100%".to_string())
                             } else {
                                 let sp = SPINNER_FRAMES[prog.spinner_idx % SPINNER_FRAMES.len()];
-                                let p = format!("{}%", prog.percent);
+                                let stage = strip_ansi(&truncate_to_width(
+                                    &prog.stage,
+                                    if width >= 48 { 12 } else { 4 },
+                                ));
+                                let p = format!("{stage} {}s", prog.elapsed_secs);
                                 (sp, p)
                             }
                         } else {
-                            ('|', "--%".to_string())
+                            ('|', "0s".to_string())
                         };
 
                         let monitor = if is_done {
@@ -2493,10 +2499,6 @@ pub fn render_screen_tabbed(
                             } else {
                                 String::new()
                             }
-                        } else if width >= 56 {
-                            format!("{amber}[actualizando]{RESET}")
-                        } else if width >= 40 {
-                            format!("{amber}[\u{2191}]{RESET}")
                         } else {
                             String::new()
                         };
