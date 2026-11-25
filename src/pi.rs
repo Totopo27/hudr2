@@ -234,9 +234,15 @@ impl PiTail {
                                     if let Some(p) = item["arguments"]["path"]
                                         .as_str()
                                         .or_else(|| item["arguments"]["file_path"].as_str())
+                                        .or_else(|| item["arguments"]["filePath"].as_str())
+                                        .map(str::trim)
                                         .filter(|p| !p.is_empty())
                                     {
-                                        self.modified_files.insert(p.to_string());
+                                        let norm = p.replace('\\', "/");
+                                        let clean = norm.strip_prefix("./").unwrap_or(&norm);
+                                        if !clean.is_empty() {
+                                            self.modified_files.insert(clean.to_string());
+                                        }
                                     }
                                 } else if name == "bash" || name == "shell" {
                                     self.session.tool_bash += 1;

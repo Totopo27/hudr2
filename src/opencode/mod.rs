@@ -591,7 +591,11 @@ fn record_tool_item(
     } else if lower.contains("write") || lower.contains("edit") || lower.contains("apply") {
         session.tool_writes += 1;
         if let Some(path_str) = extract_tool_path(item) {
-            modified_files.insert(path_str);
+            let norm = path_str.trim().replace('\\', "/");
+            let clean = norm.strip_prefix("./").unwrap_or(&norm).trim();
+            if !clean.is_empty() {
+                modified_files.insert(clean.to_string());
+            }
         }
     } else if lower.contains("bash")
         || lower.contains("shell")

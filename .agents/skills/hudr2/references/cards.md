@@ -104,14 +104,14 @@
   - Clicking `[visitar ->]` opens the provider's official billing management page in the default system browser (Anthropic Spending Console, OpenAI Organization Overview, ChatGPT Subscription, DeepSeek Platform, etc.).
 
 ## 7. `Cambios` (`id: "git"`, index `7`, key `7`)
-- **Header:** `Cambios · <N> por agente` (or `Cambios ! <N> colisión` in `CORAL` when `cross_session_conflicts` is non-empty).
+- **Header:** `Cambios · <N> por agente` (or `Cambios ! 1 colisión` / `! <N> colisiones` in `coral` when `cross_session_conflicts` is non-empty).
 - **Rows:**
-  - Optional conflict radar alert (`! CONFLICTO: <files>` + `[colisión]` in `CORAL`) when two or more active sessions/worktrees modify the same tracked file concurrently.
-  - `<branch>` (+ optional `▲ahead▼behind`) and `ok limpio` / `modificado`.
+  - Optional conflict radar alert (`! CONFLICTO: <files>` + `[colisión]` in `coral`, wrapping file list to a second row when narrow) scoped to distinct worktrees of the same `commondir` repository that touch `primary_dir` tracked files concurrently.
+  - When git context is absent: `sin repositorio git` / `--` and `git: --` + `ag: <N> archivos (+)`; otherwise `<branch>` (+ optional `▲ahead▼behind`) and `ok limpio` / `modificado`.
   - Latest commit `* <hash> <subject>` (with zero-subprocess fallback to `* <head_short> HEAD` read from `.git/HEAD` / `refs/` / `packed-refs`).
-  - `git: +<added> -<deleted>` (or `limpio` / `<N> pend`) and `ag: <N> archivos (+)`.
+  - `git: +<added> -<deleted>` (or `limpio` / `<unique_files> pend`) and `ag: <N> archivos (+)` (with normalized relative paths from both OpenCode and Pi).
   - Up to 6 clickable file rows (`action_type: Some("git_file_diff")`): `> [M|A|D|?] <path>` with `+<added> -<deleted>`.
-  - Clicking a file toggles an inline diff preview underneath (guarded by `is_sensitive_file`) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) that opens the centered floating **Quick Peek** modal (`Space` / `p` to toggle, `↑`/`↓` or wheel to scroll, `Esc` or click header to close).
+  - Clicking a file toggles an inline 12-line + trailer diff preview underneath (guarded by hardened `is_sensitive_file`; never dumps tracked files as untracked, and refreshes with `GIT_CACHE` 2s working-tree TTL) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) opening the themed **Quick Peek** modal (clears `tab_bounds`, captures non-modal shortcuts, and keeps viewport rows filled at bottom scroll).
 
 ## 8. `Engram` (`id: "engram"`, index `8`, key `8`)
 - **Header:** `Engram: <project> ^` (`^` green if daemon `:7437` is online, `v` dim if offline).

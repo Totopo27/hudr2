@@ -510,8 +510,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     state.scroll_offset = max_scroll;
                 }
                 let offset = state.scroll_offset;
+                let peek_content_rows = max_visible.saturating_sub(8).clamp(4, 18);
+                if let Some(ref mut peek) = state.quick_peek {
+                    let max_peek_scroll = peek.lines.len().saturating_sub(peek_content_rows);
+                    if peek.scroll > max_peek_scroll {
+                        peek.scroll = max_peek_scroll;
+                    }
+                }
                 if let Some(ref peek) = state.quick_peek {
-                    ui::apply_quick_peek_overlay(&mut render_out, peek, offset, width, max_visible);
+                    ui::apply_quick_peek_overlay_theme(
+                        &mut render_out,
+                        peek,
+                        offset,
+                        width,
+                        max_visible,
+                        theme::active_theme(),
+                    );
                 }
                 state.card_bounds = render_out.bounds;
                 state.tab_bounds = render_out.tab_bounds;
@@ -806,7 +820,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         || key.modifiers.contains(KeyModifiers::ALT);
 
                                 if !has_control_or_alt {
-                                    let was_tree_visible = state.is_project_tree_visible();
+                                    if state.quick_peek.is_some() {
+                                        match norm_code {
+                                            KeyCode::Esc | KeyCode::Char(' ') | KeyCode::Char('p') => {
+                                                state.close_quick_peek();
+                                            }
+                                            KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
+                                            KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
+                                            KeyCode::Char('q') => should_quit = true,
+                                            _ => {}
+                                        }
+                                    } else {
+                                        let was_tree_visible = state.is_project_tree_visible();
                                     match norm_code {
                                         KeyCode::Char('q') => should_quit = true,
                                         KeyCode::Char('c') => {
@@ -1073,6 +1098,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                     if !was_tree_visible && state.is_project_tree_visible() {
                                         refresh_needed = true;
+                                    }
                                     }
                                 }
                             }

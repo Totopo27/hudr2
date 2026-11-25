@@ -1,6 +1,6 @@
 use crate::config::{
-    ACCENT_PINK, ACCENT_PRIMARY, AMBER, BOLD, CORAL, CYAN, GOLD, MAGENTA, MINT, RESET, TEXT_DIM,
-    TEXT_MUTED, TEXT_PRIMARY,
+    ACCENT_PRIMARY, AMBER, BOLD, CORAL, CYAN, MAGENTA, MINT, RESET, TEXT_DIM, TEXT_MUTED,
+    TEXT_PRIMARY,
 };
 use crate::models::TelemetrySnapshot;
 use crate::state::{ActiveTab, TabBounds};
@@ -2117,14 +2117,23 @@ pub fn render_screen_tabbed(
     // 7. Cambios / Git Card (5)
     if !hidden_cards.contains("git") && should_render_card("git", tab) {
         let git_start = lines.len();
-        let ag_changes = if !snap.git.cross_session_conflicts.is_empty() {
-            format!(
-                "{BOLD}{CORAL}! {} colisi\u{00f3}n{RESET}",
-                snap.git.cross_session_conflicts.len()
-            )
+        let has_git_context = snap.git.has_git
+            || !snap.git.branch.is_empty()
+            || !snap.git.files.is_empty()
+            || !snap.git.cross_session_conflicts.is_empty()
+            || !snap.git.recent_commits.is_empty()
+            || snap.git.head_short.is_some();
+        let conflict_count = snap.git.cross_session_conflicts.len();
+        let ag_changes = if conflict_count > 0 {
+            let noun = if conflict_count == 1 {
+                "colisi\u{00f3}n"
+            } else {
+                "colisiones"
+            };
+            format!("{BOLD}{coral}! {conflict_count} {noun}{RESET}")
         } else {
             format!(
-                "{TEXT_DIM}\u{00b7} {} por agente{RESET}",
+                "{text_dim}\u{00b7} {} por agente{RESET}",
                 snap.agent_session.attributed_changes.files_count
             )
         };
@@ -2135,96 +2144,145 @@ pub fn render_screen_tabbed(
         ));
         if !collapsed[7] {
             if !snap.git.cross_session_conflicts.is_empty() {
+                let badge = format!("{coral}[colisi\u{00f3}n]{RESET}");
                 let files_joined = snap.git.cross_session_conflicts.join(", ");
-                lines.push(draw_row(
-                    &format!("{BOLD}{CORAL}! CONFLICTO: {files_joined}{RESET}"),
-                    &format!("{CORAL}[colisi\u{00f3}n]{RESET}"),
-                    width,
-                ));
-            }
-            let ab_badge = match snap.git.ahead_behind {
-                Some((a, b)) if a > 0 || b > 0 => {
-                    let mut parts = Vec::new();
-                    if a > 0 {
-                        parts.push(format!("\u{25b2}{a}"));
-                    }
-                    if b > 0 {
-                        parts.push(format!("\u{25bc}{b}"));
-                    }
-                    format!(" {GOLD}{}{RESET}", parts.join(""))
+                let prefix_text = "! CONFLICTO: ";
+                let target_inner = width.saturating_sub(4);
+                let single_line_avail = target_inner
+                    .saturating_sub(string_width(&badge) + prefix_text.len() + 1);
+                if string_width(&files_joined) <= single_line_avail {
+                    lines.push(draw_row(
+                        &format!("{BOLD}{coral}{prefix_text}{files_joined}{RESET}"),
+                        &badge,
+                        width,
+                    ));
+                } else {
+                    lines.push(draw_row(
+                        &format!("{BOLD}{coral}! CONFLICTO:{RESET}"),
+                        &badge,
+                        width,
+                    ));
+                    let short_files =
+                        truncate_plain(&files_joined, target_inner.saturating_sub(2));
+                    lines.push(draw_row(
+                        &format!("{coral}  {short_files}{RESET}"),
+                        "",
+                        width,
+                    ));
                 }
-                _ => String::new(),
-            };
-            let clean_st = if snap.git.is_clean {
-                format!("{MINT}ok limpio{RESET}")
-            } else {
-                format!("{AMBER}modificado{RESET}")
-            };
-            lines.push(draw_row(
-                &format!("{CYAN}{}{RESET}{ab_badge}", snap.git.branch),
-                &clean_st,
-                width,
-            ));
-            if let Some(latest_commit) = snap.git.recent_commits.first() {
-                lines.push(draw_row(
-                    &format!("{TEXT_DIM}* {latest_commit}{RESET}"),
-                    "",
-                    width,
-                ));
-            } else if let Some(ref head_sha) = snap.git.head_short {
-                lines.push(draw_row(
-                    &format!("{TEXT_DIM}* {head_sha} HEAD{RESET}"),
-                    "",
-                    width,
-                ));
-            } else {
-                lines.push(draw_row(
-                    &format!("{TEXT_DIM}* (sin commits recientes){RESET}"),
-                    "",
-                    width,
-                ));
             }
-            let git_part = if snap.git.is_clean {
-                format!("{TEXT_DIM}git:{RESET} {MINT}limpio{RESET}")
-            } else if snap.git.lines_added > 0 || snap.git.lines_deleted > 0 {
-                format!(
-                    "{TEXT_DIM}git:{RESET} {MINT}+{}{RESET} {CORAL}-{}{RESET}",
-                    snap.git.lines_added, snap.git.lines_deleted
-                )
+            if !has_git_context {
+                lines.push(draw_row(
+                    &format!("{text_dim}sin repositorio git{RESET}"),
+                    &format!("{text_dim}--{RESET}"),
+                    width,
+                ));
+                let ag_part = format!(
+                    "{accent_primary}ag:{RESET} {mint}{} archivos (+){RESET}",
+                    snap.agent_session.attributed_changes.files_count
+                );
+                lines.push(draw_row(&format!("{text_dim}git: --{RESET}"), &ag_part, width));
             } else {
-                format!(
-                    "{TEXT_DIM}git:{RESET} {AMBER}{} pend{RESET}",
+                let ab_badge = match snap.git.ahead_behind {
+                    Some((a, b)) if a > 0 || b > 0 => {
+                        let mut parts = Vec::new();
+                        if a > 0 {
+                            parts.push(format!("\u{25b2}{a}"));
+                        }
+                        if b > 0 {
+                            parts.push(format!("\u{25bc}{b}"));
+                        }
+                        format!(" {amber}{}{RESET}", parts.join(""))
+                    }
+                    _ => String::new(),
+                };
+                let branch_name = if snap.git.branch.is_empty() {
+                    "HEAD"
+                } else {
+                    snap.git.branch.as_str()
+                };
+                let clean_st = if snap.git.is_clean {
+                    format!("{mint}ok limpio{RESET}")
+                } else {
+                    format!("{amber}modificado{RESET}")
+                };
+                lines.push(draw_row(
+                    &format!("{cyan}{branch_name}{RESET}{ab_badge}"),
+                    &clean_st,
+                    width,
+                ));
+                if let Some(latest_commit) = snap.git.recent_commits.first() {
+                    lines.push(draw_row(
+                        &format!("{text_dim}* {latest_commit}{RESET}"),
+                        "",
+                        width,
+                    ));
+                } else if let Some(ref head_sha) = snap.git.head_short {
+                    lines.push(draw_row(
+                        &format!("{text_dim}* {head_sha} HEAD{RESET}"),
+                        "",
+                        width,
+                    ));
+                } else {
+                    lines.push(draw_row(
+                        &format!("{text_dim}* (sin commits recientes){RESET}"),
+                        "",
+                        width,
+                    ));
+                }
+                let unique_pending = if !snap.git.files.is_empty() {
+                    snap.git.files.len()
+                } else {
                     snap.git.modified + snap.git.staged + snap.git.untracked
-                )
-            };
-            let ag_part = format!(
-                "{ACCENT_PRIMARY}ag:{RESET} {MINT}{} archivos (+){RESET}",
-                snap.agent_session.attributed_changes.files_count
-            );
-            lines.push(draw_row(&git_part, &ag_part, width));
+                };
+                let git_part = if snap.git.is_clean {
+                    format!("{text_dim}git:{RESET} {mint}limpio{RESET}")
+                } else if snap.git.lines_added > 0 || snap.git.lines_deleted > 0 {
+                    format!(
+                        "{text_dim}git:{RESET} {mint}+{}{RESET} {coral}-{}{RESET}",
+                        snap.git.lines_added, snap.git.lines_deleted
+                    )
+                } else {
+                    format!("{text_dim}git:{RESET} {amber}{unique_pending} pend{RESET}")
+                };
+                let ag_part = format!(
+                    "{accent_primary}ag:{RESET} {mint}{} archivos (+){RESET}",
+                    snap.agent_session.attributed_changes.files_count
+                );
+                lines.push(draw_row(&git_part, &ag_part, width));
+            }
 
             if !snap.git.files.is_empty() {
                 lines.push(draw_divider(width));
                 let max_files = 6;
+                let target_inner = width.saturating_sub(4);
                 for f in snap.git.files.iter().take(max_files) {
                     let file_line_idx = lines.len();
                     let is_selected = selected_diff_file == Some(f.path.as_str());
                     let badge_color = match f.status_code.as_str() {
-                        "A" => MINT,
-                        "D" | "U" => CORAL,
-                        "?" => CYAN,
-                        _ => AMBER,
+                        "A" => mint,
+                        "D" | "U" => coral,
+                        "?" => cyan,
+                        _ => amber,
                     };
                     let arrow = if is_selected { "v" } else { ">" };
-                    let left_file = format!(
-                        "{TEXT_DIM}{arrow}{RESET} {badge_color}[{}]{RESET} {TEXT_PRIMARY}{}{RESET}",
-                        f.status_code, f.path
-                    );
                     let right_stat = if f.added > 0 || f.deleted > 0 {
-                        format!("{MINT}+{}{RESET} {CORAL}-{}{RESET}", f.added, f.deleted)
+                        format!("{mint}+{}{RESET} {coral}-{}{RESET}", f.added, f.deleted)
                     } else {
                         String::new()
                     };
+                    let right_w = string_width(&right_stat);
+                    let prefix_w = 2 + f.status_code.chars().count() + 3;
+                    let path_avail = if right_w > 0 {
+                        target_inner.saturating_sub(prefix_w + right_w + 1)
+                    } else {
+                        target_inner.saturating_sub(prefix_w)
+                    };
+                    let disp_path = truncate_plain(&f.path, path_avail);
+                    let left_file = format!(
+                        "{text_dim}{arrow}{RESET} {badge_color}[{}]{RESET} {text_primary}{disp_path}{RESET}",
+                        f.status_code
+                    );
                     lines.push(draw_row(&left_file, &right_stat, width));
                     bounds.push(CardBounds {
                         id: "git_file_diff",
@@ -2235,23 +2293,25 @@ pub fn render_screen_tabbed(
                     });
 
                     if is_selected {
-                        for dl in selected_diff_lines.iter().take(12) {
-                            let colored_dl = if dl.starts_with('[') {
-                                format!("  {AMBER}{dl}{RESET}")
+                        for dl in selected_diff_lines.iter().take(13) {
+                            let colored_dl = if dl.starts_with("... (+") {
+                                format!("  {text_dim}{dl}{RESET}")
+                            } else if dl.starts_with('[') {
+                                format!("  {amber}{dl}{RESET}")
                             } else if dl.starts_with("@@") {
-                                format!("  {CYAN}{dl}{RESET}")
+                                format!("  {cyan}{dl}{RESET}")
                             } else if dl.starts_with('+') {
-                                format!("  {MINT}{dl}{RESET}")
+                                format!("  {mint}{dl}{RESET}")
                             } else if dl.starts_with('-') {
-                                format!("  {CORAL}{dl}{RESET}")
+                                format!("  {coral}{dl}{RESET}")
                             } else {
-                                format!("  {TEXT_MUTED}{dl}{RESET}")
+                                format!("  {text_muted}{dl}{RESET}")
                             };
                             lines.push(draw_row(&colored_dl, "", width));
                         }
                         let peek_line_idx = lines.len();
                         lines.push(draw_row(
-                            &format!("  {ACCENT_PRIMARY}>> [vista r\u{00e1}pida (Espacio)]{RESET}"),
+                            &format!("  {accent_primary}>> [vista r\u{00e1}pida (Espacio)]{RESET}"),
                             "",
                             width,
                         ));
@@ -2267,7 +2327,7 @@ pub fn render_screen_tabbed(
                 if snap.git.files.len() > max_files {
                     lines.push(draw_row(
                         &format!(
-                            "{TEXT_DIM}\u{2026} y {} archivos m\u{00e1}s{RESET}",
+                            "{text_dim}\u{2026} y {} archivos m\u{00e1}s{RESET}",
                             snap.git.files.len() - max_files
                         ),
                         "",
@@ -2909,15 +2969,24 @@ pub fn render_quick_peek_modal(
     width: usize,
     max_content_rows: usize,
 ) -> RenderOutput {
+    render_quick_peek_modal_theme(peek, width, max_content_rows, crate::theme::active_theme())
+}
+
+pub fn render_quick_peek_modal_theme(
+    peek: &crate::state::QuickPeekState,
+    width: usize,
+    max_content_rows: usize,
+    theme: &crate::theme::Theme,
+) -> RenderOutput {
     let mut lines = Vec::new();
     let mut bounds = Vec::new();
 
     let title = format!(
-        "{BOLD}{ACCENT_PRIMARY}Quick Peek{RESET} {TEXT_DIM}\u{00b7}{RESET} {GOLD}{}{RESET}",
-        peek.title
+        "{BOLD}{}Quick Peek{RESET} {}\u{00b7}{RESET} {}{}{RESET}",
+        theme.accent_primary, theme.text_dim, theme.amber, peek.title
     );
     let top_idx = lines.len();
-    lines.push(draw_top(&title, false, width));
+    lines.push(draw_top_theme(&title, false, width, theme));
     bounds.push(CardBounds {
         id: "close_quick_peek",
         start_line: top_idx,
@@ -2927,10 +2996,14 @@ pub fn render_quick_peek_modal(
     });
 
     let close_row_idx = lines.len();
-    lines.push(draw_row(
-        &format!("{ACCENT_PINK}>> [cerrar vista r\u{00e1}pida (Esc)]{RESET}"),
-        &format!("{TEXT_DIM}\u{2191}/\u{2193} scroll{RESET}"),
+    lines.push(draw_row_theme(
+        &format!(
+            "{}>> [cerrar vista r\u{00e1}pida (Esc)]{RESET}",
+            theme.accent_secondary
+        ),
+        &format!("{}\u{2191}/\u{2193} scroll{RESET}", theme.text_dim),
         width,
+        theme,
     ));
     bounds.push(CardBounds {
         id: "close_quick_peek",
@@ -2939,46 +3012,50 @@ pub fn render_quick_peek_modal(
         action_type: Some("close_quick_peek"),
         action_path: None,
     });
-    lines.push(draw_divider(width));
+    lines.push(draw_divider_theme(width, theme));
 
     let rows = max_content_rows.clamp(4, 24);
     let total = peek.lines.len();
-    let start = peek.scroll.min(total.saturating_sub(1));
+    let start = peek.scroll.min(total.saturating_sub(rows));
     for (idx, dl) in peek.lines.iter().skip(start).take(rows).enumerate() {
         let line_no = start + idx + 1;
-        let colored_dl = if dl.starts_with('[') {
-            format!("{AMBER}{dl}{RESET}")
+        let colored_dl = if dl.starts_with("... (+") {
+            format!("{}{dl}{RESET}", theme.text_dim)
+        } else if dl.starts_with('[') {
+            format!("{}{dl}{RESET}", theme.amber)
         } else if dl.starts_with("@@") {
-            format!("{CYAN}{dl}{RESET}")
+            format!("{}{dl}{RESET}", theme.cyan)
         } else if dl.starts_with('+') {
-            format!("{MINT}{dl}{RESET}")
+            format!("{}{dl}{RESET}", theme.mint)
         } else if dl.starts_with('-') {
-            format!("{CORAL}{dl}{RESET}")
+            format!("{}{dl}{RESET}", theme.coral)
         } else {
-            format!("{TEXT_PRIMARY}{dl}{RESET}")
+            format!("{}{dl}{RESET}", theme.text_primary)
         };
-        let numbered = format!("{TEXT_DIM}{line_no:>3} \u{2502}{RESET} {colored_dl}");
-        lines.push(draw_row(&numbered, "", width));
+        let numbered = format!("{}{line_no:>3} \u{2502}{RESET} {colored_dl}", theme.text_dim);
+        lines.push(draw_row_theme(&numbered, "", width, theme));
     }
 
-    lines.push(draw_divider(width));
+    lines.push(draw_divider_theme(width, theme));
     let end_line_no = (start + rows).min(total);
     let status_left = if total == 0 {
-        format!("{TEXT_DIM}Sin contenido{RESET}")
+        format!("{}Sin contenido{RESET}", theme.text_dim)
     } else {
         format!(
-            "{TEXT_DIM}L\u{00ed}neas {}-{} de {}{RESET}",
+            "{}L\u{00ed}neas {}-{} de {}{RESET}",
+            theme.text_dim,
             start + 1,
             end_line_no,
             total
         )
     };
-    lines.push(draw_row(
+    lines.push(draw_row_theme(
         &status_left,
-        &format!("{CYAN}[Espacio/Esc]{RESET}"),
+        &format!("{}[Espacio/Esc]{RESET}", theme.cyan),
         width,
+        theme,
     ));
-    lines.push(draw_bottom(width));
+    lines.push(draw_bottom_theme(width, theme));
 
     RenderOutput {
         lines,
@@ -2995,8 +3072,26 @@ pub fn apply_quick_peek_overlay(
     width: usize,
     viewport_rows: usize,
 ) {
+    apply_quick_peek_overlay_theme(
+        base,
+        peek,
+        scroll_offset,
+        width,
+        viewport_rows,
+        crate::theme::active_theme(),
+    );
+}
+
+pub fn apply_quick_peek_overlay_theme(
+    base: &mut RenderOutput,
+    peek: &crate::state::QuickPeekState,
+    scroll_offset: usize,
+    width: usize,
+    viewport_rows: usize,
+    theme: &crate::theme::Theme,
+) {
     let content_rows = viewport_rows.saturating_sub(8).clamp(4, 18);
-    let modal = render_quick_peek_modal(peek, width, content_rows);
+    let modal = render_quick_peek_modal_theme(peek, width, content_rows, theme);
     let modal_h = modal.lines.len();
 
     let needed_total = scroll_offset + viewport_rows.max(modal_h + 2);
@@ -3015,6 +3110,7 @@ pub fn apply_quick_peek_overlay(
         }
     }
 
+    base.tab_bounds.clear();
     base.bounds = modal
         .bounds
         .into_iter()

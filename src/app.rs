@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, mut accounts_copy, should_read_tree, cache_path) = {
+    let (project_dir, mut accounts_copy, should_read_tree, cache_path, open_diff_file, open_peek_file) = {
         let state = app_state.read().await;
         let cp = state
             .config_path
@@ -22,6 +22,8 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.accounts.clone(),
             state.is_project_tree_visible(),
             cp,
+            state.selected_diff_file.clone(),
+            state.quick_peek.as_ref().map(|p| p.title.clone()),
         )
     };
     quotas::discover_accounts_for(&project_dir, &mut accounts_copy);
@@ -65,7 +67,16 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         let mut g = read_git_telemetry(&dir_clone);
         g.cross_session_conflicts =
             crate::git::collect_cross_session_conflicts(&dir_clone, &g.files, &panes_for_git);
-        g
+        let refreshed_diff = open_diff_file.as_deref().and_then(|sel| {
+            g.files
+                .iter()
+                .any(|f| f.path == sel)
+                .then(|| crate::git::read_file_diff_preview(&dir_clone, sel))
+        });
+        let refreshed_peek = open_peek_file
+            .as_deref()
+            .map(|title| crate::git::read_file_quick_peek(&dir_clone, title));
+        (g, refreshed_diff, refreshed_peek)
     });
 
     let tree_fut = if !should_read_tree {
@@ -100,12 +111,25 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         if let Ok(en) = engram_res {
             state.snapshot.engram = en;
         }
-        if let Ok(g) = git_res {
-            if let Some(ref sel_file) = state.selected_diff_file
-                && !g.files.iter().any(|f| &f.path == sel_file)
+        if let Ok((g, refreshed_diff, refreshed_peek)) = git_res {
+            if let Some(ref sel_file) = state.selected_diff_file {
+                if !g.files.iter().any(|f| &f.path == sel_file) {
+                    state.selected_diff_file = None;
+                    state.selected_diff_lines.clear();
+                    state.needs_redraw = true;
+                } else if let Some(new_lines) = refreshed_diff
+                    && new_lines != state.selected_diff_lines
+                {
+                    state.selected_diff_lines = new_lines;
+                    state.needs_redraw = true;
+                }
+            }
+            if let Some(new_peek_lines) = refreshed_peek
+                && let Some(ref mut peek) = state.quick_peek
+                && new_peek_lines != peek.lines
             {
-                state.selected_diff_file = None;
-                state.selected_diff_lines.clear();
+                peek.lines = new_peek_lines;
+                peek.scroll = peek.scroll.min(peek.lines.len().saturating_sub(1));
                 state.needs_redraw = true;
             }
             state.snapshot.git = g;

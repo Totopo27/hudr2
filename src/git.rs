@@ -233,90 +233,170 @@ pub fn detect_cross_session_conflicts(session_file_sets: &[Vec<String>]) -> Vec<
     conflicts.into_iter().collect()
 }
 
-/// Recolecta colisiones de archivos en caliente comparando el directorio actual con otros panes/worktrees activos en Herdr.
+fn normalize_canonical(p: &Path) -> String {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    crate::paths::normalize_path(&canon.to_string_lossy())
+}
+
+/// Recolecta colisiones de archivos en caliente comparando el directorio actual con otros panes/worktrees del mismo repositorio en Herdr.
 pub fn collect_cross_session_conflicts(
     primary_dir: &str,
     primary_files: &[GitFileChange],
     panes: &[crate::models::HerdrPane],
 ) -> Vec<String> {
-    let primary_modified: Vec<String> = primary_files
+    let primary_set: std::collections::HashSet<String> = primary_files
         .iter()
         .filter(|f| f.status_code != "?")
-        .map(|f| f.path.clone())
+        .map(|f| {
+            let norm = f.path.trim().replace('\\', "/");
+            norm.strip_prefix("./").unwrap_or(&norm).trim().to_string()
+        })
+        .filter(|s| !s.is_empty())
         .collect();
-    if primary_modified.is_empty() || panes.is_empty() {
+    if primary_set.is_empty() || panes.is_empty() {
         return Vec::new();
     }
 
-    let norm_primary = crate::paths::normalize_path(primary_dir);
-    let mut seen_dirs = std::collections::HashSet::new();
-    seen_dirs.insert(norm_primary);
+    let Some((primary_root, primary_git_dir)) = find_git_root_and_dir(primary_dir) else {
+        return Vec::new();
+    };
+    let primary_common = normalize_canonical(&resolve_common_git_dir(&primary_git_dir));
 
-    let mut all_sets = vec![primary_modified];
+    let mut seen_roots = std::collections::HashSet::new();
+    seen_roots.insert(normalize_canonical(&primary_root));
+
+    let mut conflicts = std::collections::BTreeSet::new();
 
     for pane in panes {
         let Some(ref cwd) = pane.cwd else {
             continue;
         };
-        let norm_cwd = crate::paths::normalize_path(cwd);
-        if norm_cwd.is_empty() || !seen_dirs.insert(norm_cwd) {
-            continue;
-        }
         if !Path::new(cwd).exists() {
             continue;
         }
-        let other_git = read_git_telemetry(cwd);
-        let other_modified: Vec<String> = other_git
-            .files
-            .into_iter()
-            .filter(|f| f.status_code != "?")
-            .map(|f| f.path)
-            .collect();
-        if !other_modified.is_empty() {
-            all_sets.push(other_modified);
+        let Some((other_root, other_git_dir)) = find_git_root_and_dir(cwd) else {
+            continue;
+        };
+        let other_common = normalize_canonical(&resolve_common_git_dir(&other_git_dir));
+        if other_common != primary_common {
+            continue;
+        }
+        if !seen_roots.insert(normalize_canonical(&other_root)) {
+            continue;
+        }
+        let other_git = read_git_telemetry(other_root.to_str().unwrap_or(cwd));
+        for f in other_git.files.into_iter().filter(|f| f.status_code != "?") {
+            let norm = f.path.trim().replace('\\', "/");
+            let clean = norm.strip_prefix("./").unwrap_or(&norm).trim();
+            if primary_set.contains(clean) {
+                conflicts.insert(clean.to_string());
+            }
         }
     }
 
-    detect_cross_session_conflicts(&all_sets)
+    conflicts.into_iter().collect()
 }
 
 /// Detecta si una ruta corresponde a un archivo sensible (credenciales, claves, .env)
 /// cuyo contenido o diff jamás debe leerse ni mostrarse en la barra lateral.
 pub fn is_sensitive_file(path: &str) -> bool {
     let norm = path.replace('\\', "/");
-    let name = norm.rsplit('/').next().unwrap_or(&norm).to_lowercase();
     let lower_path = norm.to_lowercase();
+    let mut parts = lower_path.rsplit('/');
+    let name = parts.next().unwrap_or(&lower_path);
 
-    lower_path.contains("/.ssh/")
-        || lower_path.starts_with(".ssh/")
-        || lower_path.contains("/.aws/")
-        || lower_path.starts_with(".aws/")
-        || lower_path.contains("/.kube/")
-        || lower_path.starts_with(".kube/")
-        || lower_path.contains("/.gnupg/")
-        || lower_path.starts_with(".gnupg/")
-        || name.starts_with(".env")
+    if parts.any(|seg| {
+        matches!(
+            seg,
+            ".ssh" | ".aws" | ".kube" | ".gnupg" | "secrets" | "credentials" | "auths" | ".env"
+        )
+    }) {
+        return true;
+    }
+
+    if name.starts_with(".env")
+        || name.ends_with(".env")
+        || matches!(name, ".netrc" | ".npmrc" | ".pgpass" | ".pypirc")
+        || name.contains(".tfstate.")
         || [
-            "secret",
-            "credential",
-            "token",
-            "passw",
-            "auth",
             ".pem",
             ".key",
             ".p12",
             ".pfx",
-            "id_rsa",
-            "id_ed25519",
-            "id_ecdsa",
-            "id_dsa",
             ".keystore",
             ".jks",
-            ".netrc",
-            ".npmrc",
+            ".tfvars",
+            ".tfstate",
+            ".kdbx",
         ]
         .iter()
-        .any(|k| name.contains(k))
+        .any(|ext| name.ends_with(ext))
+        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
+            .iter()
+            .any(|k| name == *k || name.starts_with(&format!("{k}.")))
+    {
+        return true;
+    }
+
+    let tokens: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if tokens.iter().any(|t| {
+        matches!(
+            *t,
+            "secret"
+                | "secrets"
+                | "credential"
+                | "credentials"
+                | "token"
+                | "tokens"
+                | "password"
+                | "passwords"
+                | "passwd"
+                | "passw"
+                | "apikey"
+                | "privatekey"
+                | "keychain"
+        )
+    }) {
+        return true;
+    }
+
+    if (tokens.contains(&"private") && tokens.contains(&"key"))
+        || (tokens.contains(&"api") && tokens.contains(&"key"))
+    {
+        return true;
+    }
+
+    if tokens.contains(&"auth") {
+        let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
+        let is_code_or_doc = matches!(
+            ext,
+            "rs" | "ts"
+                | "tsx"
+                | "js"
+                | "jsx"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "cs"
+                | "rb"
+                | "php"
+                | "swift"
+                | "md"
+        );
+        return !is_code_or_doc;
+    }
+
+    false
 }
 
 /// Parsea la salida de `git status --porcelain=v1 -z --no-renames --untracked-files=all`.
@@ -394,8 +474,30 @@ pub fn apply_numstat_z(files: &mut [GitFileChange], out: &str) -> (usize, usize)
 }
 
 const UNTRACKED_PREVIEW_MAX_BYTES: u64 = 64 * 1024;
-const DIFF_PREVIEW_MAX_LINES: usize = 24;
+const DIFF_PREVIEW_MAX_LINES: usize = 12;
 const QUICK_PEEK_MAX_LINES: usize = 120;
+
+fn format_diff_preview_lines(diff_out: &str, max_lines: usize) -> Vec<String> {
+    let all_lines: Vec<&str> = diff_out
+        .lines()
+        .filter(|l| {
+            !l.starts_with("diff --git")
+                && !l.starts_with("index ")
+                && !l.starts_with("--- ")
+                && !l.starts_with("+++ ")
+        })
+        .collect();
+    let total = all_lines.len();
+    let mut lines: Vec<String> = all_lines
+        .into_iter()
+        .take(max_lines)
+        .map(str::to_string)
+        .collect();
+    if total > max_lines {
+        lines.push(format!("... (+{} líneas más)", total - max_lines));
+    }
+    lines
+}
 
 /// Obtiene una previsualización segura y acotada del diff de un archivo en el árbol de trabajo.
 /// Nunca lee archivos sensibles ni sigue enlaces simbólicos.
@@ -434,7 +536,7 @@ fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usi
         return vec!["[ruta inválida fuera del repositorio]".to_string()];
     }
 
-    if let Some(diff_out) = run_git_cmd(
+    let head_diff = run_git_cmd(
         &repo_root,
         &[
             "diff",
@@ -445,29 +547,50 @@ fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usi
             rel_path,
         ],
         3,
-    ) && !diff_out.trim().is_empty()
+    );
+    if let Some(ref diff_out) = head_diff
+        && !diff_out.trim().is_empty()
     {
-        let mut lines = Vec::new();
-        let all_lines: Vec<&str> = diff_out
-            .lines()
-            .filter(|l| {
-                !l.starts_with("diff --git")
-                    && !l.starts_with("index ")
-                    && !l.starts_with("--- ")
-                    && !l.starts_with("+++ ")
-            })
-            .collect();
-        let total = all_lines.len();
-        for l in all_lines.into_iter().take(max_lines) {
-            lines.push(l.to_string());
-        }
-        if total > max_lines {
-            lines.push(format!("... (+{} líneas más)", total - max_lines));
-        }
-        return lines;
+        return format_diff_preview_lines(diff_out, max_lines);
+    }
+    if head_diff.is_none()
+        && let Some(cached_out) = run_git_cmd(
+            &repo_root,
+            &[
+                "diff",
+                "--cached",
+                "--no-renames",
+                "--end-of-options",
+                "--",
+                rel_path,
+            ],
+            3,
+        )
+        && !cached_out.trim().is_empty()
+    {
+        return format_diff_preview_lines(&cached_out, max_lines);
     }
 
-    // Si `git diff HEAD` salió vacío, puede ser un archivo nuevo sin seguimiento (untracked)
+    let is_untracked = run_git_cmd(
+        &repo_root,
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-renames",
+            "--untracked-files=all",
+            "--",
+            rel_path,
+        ],
+        2,
+    )
+    .is_some_and(|out| out.starts_with("?? "));
+
+    if !is_untracked {
+        return vec!["[sin diferencias respecto a HEAD]".to_string()];
+    }
+
+    // Archivo nuevo sin seguimiento (untracked)
     let full_path = repo_root.join(rel_path);
     match std::fs::symlink_metadata(&full_path) {
         Ok(meta) if meta.file_type().is_symlink() => {
@@ -502,10 +625,10 @@ fn read_file_preview_with_limit(target_dir: &str, rel_path: &str, max_lines: usi
     }
 }
 
-/// Recolección de Git limpia, sin bloqueos (`GIT_OPTIONAL_LOCKS=0`), con timeout y caché mtime / 5s idle
+/// Recolección de Git limpia, sin bloqueos (`GIT_OPTIONAL_LOCKS=0`), con timeout y caché mtime / 2s idle
 pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let mut git = GitTelemetry {
-        branch: "main".to_string(),
+        branch: String::new(),
         head_short: None,
         modified: 0,
         untracked: 0,
@@ -525,6 +648,8 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
         None => return git,
     };
 
+    git.branch = "main".to_string();
+
     let head_path = git_dir.join("HEAD");
     let index_path = git_dir.join("index");
     let head_mtime = std::fs::metadata(&head_path)
@@ -538,7 +663,7 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     let now = Instant::now();
     let norm_dir = crate::paths::normalize_path(target_dir);
 
-    // Comprobar caché por mtime (.git/index, .git/HEAD y short SHA de HEAD) o ventana de 5s ociosa
+    // Exige coincidencia de mtime (.git/HEAD, .git/index y SHA) Y ventana corta de 2s para refrescar cambios sin stage
     if let Ok(guard) = GIT_CACHE.lock()
         && let Some(entry) = guard.get(&norm_dir)
     {
@@ -546,10 +671,10 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
             && entry.head_mtime == head_mtime
             && entry.index_mtime == index_mtime
             && entry.head_short == current_head_short;
-        let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(5)
+        let within_idle_ttl = now.duration_since(entry.last_check) < Duration::from_secs(2)
             && entry.head_short == current_head_short;
 
-        if mtime_matches || within_idle_ttl {
+        if mtime_matches && within_idle_ttl {
             return entry.telemetry.clone();
         }
     }
@@ -647,4 +772,72 @@ pub fn read_git_telemetry(target_dir: &str) -> GitTelemetry {
     }
 
     git
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_git_test(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git debe ejecutarse en prueba");
+        assert!(
+            out.status.success(),
+            "git {:?} falló: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn git_cache_refreshes_unstaged_edits_after_ttl_without_head_or_index_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        run_git_test(repo, &["init"]);
+        std::fs::write(repo.join("a.txt"), "line1\n").unwrap();
+        run_git_test(repo, &["add", "a.txt"]);
+        run_git_test(
+            repo,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init",
+            ],
+        );
+
+        let repo_str = repo.to_string_lossy().to_string();
+        let norm_dir = crate::paths::normalize_path(&repo_str);
+        let t1 = read_git_telemetry(&repo_str);
+        assert!(t1.has_git);
+        assert!(t1.is_clean);
+
+        // Unstaged edit does not change .git/HEAD or .git/index mtimes.
+        std::fs::write(repo.join("a.txt"), "line1\nline2\n").unwrap();
+
+        if let Ok(mut guard) = GIT_CACHE.lock()
+            && let Some(entry) = guard.get_mut(&norm_dir)
+        {
+            entry.last_check = entry
+                .last_check
+                .checked_sub(Duration::from_secs(10))
+                .expect("Instant de sistema debe permitir retroceder 10s");
+        }
+
+        let t2 = read_git_telemetry(&repo_str);
+        assert!(
+            !t2.is_clean,
+            "Edición sin staging tras expirar el TTL de caché debe detectarse sin depender de mtime en .git/index"
+        );
+        assert!(
+            t2.files.iter().any(|f| f.path == "a.txt"),
+            "a.txt modificado sin stage debe aparecer tras vencer el TTL"
+        );
+    }
 }

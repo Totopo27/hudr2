@@ -9408,4 +9408,341 @@ api-keys:
             );
         }
     }
+
+    fn run_git_fixture(cwd: &std::path::Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git debe ejecutarse en test");
+        assert!(
+            out.status.success(),
+            "git {:?} falló: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn test_cambios_cross_session_conflicts_repo_identity_and_tracked_preview() {
+        use hudr2::git::{
+            collect_cross_session_conflicts, is_sensitive_file, read_file_diff_preview,
+            read_git_telemetry,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let repo_a = root.path().join("repo_a");
+        let repo_a_sub = repo_a.join("sub");
+        let repo_a_wt = root.path().join("repo_a_wt");
+        let repo_b = root.path().join("repo_b");
+        std::fs::create_dir_all(&repo_a_sub).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+
+        // Repo A: committed shared.txt + committed.txt + sub/note.txt
+        run_git_fixture(&repo_a, &["init"]);
+        std::fs::write(repo_a.join("shared.txt"), "base\n").unwrap();
+        std::fs::write(repo_a.join("committed.txt"), "unchanged\n").unwrap();
+        std::fs::write(repo_a.join("only_wt.txt"), "base_wt\n").unwrap();
+        std::fs::write(repo_a_sub.join("note.txt"), "sub\n").unwrap();
+        run_git_fixture(&repo_a, &["add", "."]);
+        run_git_fixture(
+            &repo_a,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init a",
+            ],
+        );
+        // Real git worktree for Repo A on a separate branch
+        run_git_fixture(
+            &repo_a,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "wt-branch",
+                repo_a_wt.to_str().unwrap(),
+            ],
+        );
+
+        // Unrelated Repo B also modifying shared.txt
+        run_git_fixture(&repo_b, &["init"]);
+        std::fs::write(repo_b.join("shared.txt"), "base_b\n").unwrap();
+        run_git_fixture(&repo_b, &["add", "shared.txt"]);
+        run_git_fixture(
+            &repo_b,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "init b",
+            ],
+        );
+
+        // Dirty edits: repo_a edits shared.txt; repo_b edits shared.txt; repo_a_sub sees repo_a
+        std::fs::write(repo_a.join("shared.txt"), "edited in a\n").unwrap();
+        std::fs::write(repo_b.join("shared.txt"), "edited in b\n").unwrap();
+
+        let repo_a_str = repo_a.to_string_lossy().to_string();
+        let primary_git = read_git_telemetry(&repo_a_str);
+
+        // 1. Unrelated Repo B + same-checkout subdirectory repo_a/sub MUST NOT trigger conflicts
+        let non_conflicting_panes = vec![
+            HerdrPane {
+                pane_id: "w1:p2".to_string(),
+                cwd: Some(repo_b.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+            HerdrPane {
+                pane_id: "w1:p3".to_string(),
+                cwd: Some(repo_a_sub.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        ];
+        let no_conflicts = collect_cross_session_conflicts(
+            &repo_a_str,
+            &primary_git.files,
+            &non_conflicting_panes,
+        );
+        assert!(
+            no_conflicts.is_empty(),
+            "Repositorios distintos o subcarpetas del mismo checkout no deben generar conflictos: {no_conflicts:?}"
+        );
+
+        // 2. Separate worktree of Repo A modifying shared.txt and only_wt.txt reports ONLY shared.txt
+        std::fs::write(repo_a_wt.join("shared.txt"), "edited in wt\n").unwrap();
+        std::fs::write(repo_a_wt.join("only_wt.txt"), "edited only in wt\n").unwrap();
+        let wt_panes = vec![HerdrPane {
+            pane_id: "w1:p4".to_string(),
+            cwd: Some(repo_a_wt.to_string_lossy().to_string()),
+            ..Default::default()
+        }];
+        let wt_conflicts =
+            collect_cross_session_conflicts(&repo_a_str, &primary_git.files, &wt_panes);
+        assert_eq!(
+            wt_conflicts,
+            vec!["shared.txt".to_string()],
+            "Worktree del mismo repo debe reportar únicamente shared.txt"
+        );
+
+        // 3. Tracked unmodified file must NOT dump '@@ archivo nuevo @@'
+        let committed_preview = read_file_diff_preview(&repo_a_str, "committed.txt");
+        assert_eq!(
+            committed_preview,
+            vec!["[sin diferencias respecto a HEAD]".to_string()],
+            "Un archivo tracked sin diff no debe mostrarse como archivo nuevo: {committed_preview:?}"
+        );
+
+        // 4. Tightened is_sensitive_file checks
+        for blocked in [
+            "secrets/app.yaml",
+            "credentials/gcp.json",
+            "auths/acc.json",
+            "prod.tfvars",
+            "terraform.tfstate",
+            ".pgpass",
+            ".pypirc",
+            "app.env",
+            "oauth_token.txt",
+            "auth-store.json",
+            "private_key.txt",
+            "api_key.json",
+        ] {
+            assert!(
+                is_sensitive_file(blocked),
+                "{blocked} debe bloquearse como archivo sensible"
+            );
+        }
+        for allowed in [
+            "src/author.rs",
+            "AUTHORS.md",
+            "src/tokenizer.rs",
+            "src/oauth.rs",
+            "src/auth.rs",
+        ] {
+            assert!(
+                !is_sensitive_file(allowed),
+                "{allowed} es código/doc normal y no debe bloquearse como sensible"
+            );
+        }
+    }
+
+    #[test]
+    fn test_cambios_card_non_git_unique_pend_theme_and_quick_peek_modal_isolation() {
+        use hudr2::models::{AgentSession, GitFileChange, GitTelemetry};
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+
+        // 1. Non-git workspace renders explicit non-git message and never 'ok limpio' / fake 'main'
+        let mut state = AppState::new();
+        state.tabbed = true;
+        state.active_tab = hudr2::state::ActiveTab::Codigo;
+        state.collapsed_cards[7] = false;
+        state.snapshot.git = GitTelemetry {
+            has_git: false,
+            branch: String::new(),
+            is_clean: true,
+            ..Default::default()
+        };
+        let non_git_out = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            44,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(hudr2::state::ActiveTab::Codigo),
+        );
+        let non_git_raw = non_git_out.lines.join("\n");
+        let non_git_clean = ui::strip_ansi(&non_git_raw);
+        assert!(
+            non_git_clean.contains("sin repositorio git"),
+            "Sin git debe renderizar 'sin repositorio git':\n{non_git_clean}"
+        );
+        assert!(
+            !non_git_clean.contains("ok limpio"),
+            "Sin git no debe mostrar 'ok limpio':\n{non_git_clean}"
+        );
+        assert!(
+            !non_git_clean.contains("main"),
+            "Sin git no debe inventar rama 'main':\n{non_git_clean}"
+        );
+
+        // 2. MM unique pend, conflict pluralization, narrow-width right protection, inline trailer, and active theme
+        state.snapshot.agent_session = AgentSession {
+            ..Default::default()
+        };
+        state.snapshot.agent_session.attributed_changes.files_count = 1;
+        state.snapshot.git = GitTelemetry {
+            has_git: true,
+            branch: "feature/very-long-branch-name".to_string(),
+            is_clean: false,
+            modified: 1,
+            staged: 1,
+            untracked: 0,
+            lines_added: 0,
+            lines_deleted: 0,
+            ahead_behind: Some((2, 1)),
+            cross_session_conflicts: vec![
+                "src/very/deep/nested/module/file_one.rs".to_string(),
+                "src/other.rs".to_string(),
+            ],
+            files: vec![GitFileChange {
+                path: "src/very/deep/nested/module/file_one.rs".to_string(),
+                status_code: "M".to_string(),
+                added: 12,
+                deleted: 3,
+            }],
+            ..Default::default()
+        };
+        let preview_lines: Vec<String> = (1..=12)
+            .map(|i| format!("+added line {i}"))
+            .chain(std::iter::once("... (+8 líneas más)".to_string()))
+            .collect();
+
+        let render_git = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            Some("src/very/deep/nested/module/file_one.rs"),
+            &preview_lines,
+            &state.hidden_cards,
+            36,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(hudr2::state::ActiveTab::Codigo),
+        );
+        let raw_git = render_git.lines.join("\n");
+        let clean_git = ui::strip_ansi(&raw_git);
+
+        assert!(
+            clean_git.contains("! 2 colisiones"),
+            "Debe pluralizar '2 colisiones' en cabecera:\n{clean_git}"
+        );
+        assert!(
+            clean_git.contains("[colisión]"),
+            "[colisión] no debe truncarse por rutas largas en ancho 36:\n{clean_git}"
+        );
+        assert!(
+            clean_git.contains("1 pend") && !clean_git.contains("2 pend"),
+            "MM (staged+modified en 1 archivo) debe mostrar '1 pend', no '2 pend':\n{clean_git}"
+        );
+        assert!(
+            clean_git.contains("+12 -3"),
+            "Contadores +12 -3 no deben quedar cortados en ancho 36:\n{clean_git}"
+        );
+        assert!(
+            clean_git.contains("... (+8 líneas más)"),
+            "El trailer '... (+8 líneas más)' del diff inline no debe recortarse silenciosamente:\n{clean_git}"
+        );
+        assert!(
+            raw_git.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                && raw_git.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                && raw_git.contains(HERDR_TOKYO_NIGHT_DAY.amber),
+            "Tarjeta Cambios debe aplicar el tema activo en lugar de constantes fijas"
+        );
+
+        // Check singular '1 colisión' too
+        state.snapshot.git.cross_session_conflicts.pop();
+        let render_single = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            40,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(hudr2::state::ActiveTab::Codigo),
+        );
+        assert!(
+            ui::strip_ansi(&render_single.lines.join("\n")).contains("! 1 colisión"),
+            "Con 1 conflicto debe mostrar singular '! 1 colisión'"
+        );
+
+        // 3. Quick Peek overlay isolation (clears tab_bounds, uses active theme, doesn't shrink on max scroll)
+        let peek = hudr2::state::QuickPeekState {
+            title: "src/git.rs".to_string(),
+            lines: (1..=30).map(|i| format!("+line {i}")).collect(),
+            scroll: 28, // past total - rows (20)
+        };
+        let mut base = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            44,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(hudr2::state::ActiveTab::Codigo),
+        );
+        assert!(
+            !base.tab_bounds.is_empty(),
+            "Base con tabbed=true debe exponer tab_bounds"
+        );
+        ui::apply_quick_peek_overlay_theme(&mut base, &peek, 0, 44, 18, &HERDR_TOKYO_NIGHT_DAY);
+        assert!(
+            base.tab_bounds.is_empty(),
+            "Quick Peek abierto debe limpiar tab_bounds para no filtrar clics a pestañas de fondo"
+        );
+        let modal_raw = base.lines.join("\n");
+        let modal_clean = ui::strip_ansi(&modal_raw);
+        assert!(
+            modal_clean.contains("Líneas 21-30 de 30") || modal_clean.contains("21 \u{2502}"),
+            "El modal debe fijar start al fondo para mantener todas las filas visibles sin encogerse:\n{modal_clean}"
+        );
+        assert!(
+            modal_raw.contains(HERDR_TOKYO_NIGHT_DAY.accent_primary)
+                && modal_raw.contains(HERDR_TOKYO_NIGHT_DAY.mint),
+            "Quick Peek debe renderizar usando el tema activo"
+        );
+    }
 }
