@@ -8817,4 +8817,298 @@ api-keys:
         );
         assert_eq!(ses_after_new.model_short, "claude-haiku-4-5");
     }
+
+    #[test]
+    fn test_mcp_card_tab1_flash_notice_scrolled_click_and_narrow_widths() {
+        use hudr2::models::{McpConfigShape, McpScope, McpServer};
+        use hudr2::state::ActiveTab;
+
+        let mut state = AppState::new();
+        state.active_tab = ActiveTab::Sesion;
+        state.snapshot.mcps = vec![
+            McpServer {
+                name: "chrome-devtools-mcp".to_string(),
+                mcp_type: "local".to_string(),
+                enabled: true,
+                scope: McpScope::Global,
+                shape: McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+            McpServer {
+                name: "open-design".to_string(),
+                mcp_type: "local".to_string(),
+                enabled: false,
+                scope: McpScope::Global,
+                shape: McpConfigShape::Servers,
+                source: "opencode.json".to_string(),
+            },
+            McpServer {
+                name: "pi-tool".to_string(),
+                mcp_type: "remote".to_string(),
+                enabled: true,
+                scope: McpScope::Agent,
+                shape: McpConfigShape::AgentHost,
+                source: "mcp.json".to_string(),
+            },
+        ];
+
+        // 1. Scrolled handle_tab_click must NOT hijack clicks at row (1 + scroll_offset)
+        let out_tab = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            Some("Error: El archivo no es JSON estricto"),
+            None,
+            &[],
+            &state.hidden_cards,
+            48,
+            &hudr2::theme::HERDR_CATPPUCCIN_LATTE,
+            Some(ActiveTab::Sesion),
+        );
+        state.tab_bounds = out_tab.tab_bounds.clone();
+        state.card_bounds = out_tab.bounds.clone();
+
+        let cod_tab = state
+            .tab_bounds
+            .iter()
+            .find(|tb| tb.tab == ActiveTab::Codigo)
+            .expect("tab_bounds debe incluir Codigo");
+        let click_col = (cod_tab.col_start + cod_tab.col_end) / 2;
+
+        assert_eq!(
+            state.handle_tab_click(click_col, 1 + 4, 4),
+            None,
+            "Con scroll_offset=4, clic en fila de pantalla 5 no debe secuestrar cambio de pestaña"
+        );
+        assert_eq!(state.active_tab, ActiveTab::Sesion);
+
+        assert_eq!(
+            state.handle_tab_click(click_col, 0, 1),
+            Some(ActiveTab::Codigo),
+            "Con scroll_offset=1, clic en fila de pantalla 0 (tb.line=1) debe cambiar a Codigo"
+        );
+        state.active_tab = ActiveTab::Sesion;
+
+        // 2. Tab 1 flash_notice visibility & error coral theme styling (never in line 0 header)
+        let tab_raw = out_tab.lines.join("\n");
+        let tab_clean = ui::strip_ansi(&tab_raw);
+        assert!(
+            !ui::strip_ansi(&out_tab.lines[0]).contains("Error:"),
+            "Line 0 header nunca debe contener flash_notice"
+        );
+        assert!(
+            tab_clean.contains("Error: El archivo no es JSON estricto"),
+            "flash_notice debe ser visible en Tab 1 (Sesion):\n{tab_clean}"
+        );
+        assert!(
+            tab_raw.contains(hudr2::theme::HERDR_CATPPUCCIN_LATTE.coral),
+            "Error flash_notice debe renderizarse con theme.coral"
+        );
+
+        // 3. Narrow widths 32..=48 preserve action buttons, clean headers, and Catppuccin Latte theme
+        for w in [32usize, 36, 42, 48] {
+            let out_w = ui::render_screen_tabbed(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                w,
+                &hudr2::theme::HERDR_CATPPUCCIN_LATTE,
+                Some(ActiveTab::Sesion),
+            );
+            for line in &out_w.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let mcp_bounds: Vec<_> = out_w.bounds.iter().filter(|b| b.id == "mcp").collect();
+            let card_b = mcp_bounds.last().unwrap();
+            let mcp_raw = out_w.lines[card_b.start_line..=card_b.end_line].join("\n");
+            let mcp_clean = ui::strip_ansi(&mcp_raw);
+            assert!(
+                !mcp_clean.contains("deshabilita "),
+                "Cabecera MCP no debe truncarse a mitad de palabra en ancho {w}:\n{mcp_clean}"
+            );
+            if w >= 36 {
+                assert!(
+                    mcp_clean.contains("[apagar]") && mcp_clean.contains("[encender]"),
+                    "Botones MCP [apagar]/[encender] deben quedar intactos en ancho {w}:\n{mcp_clean}"
+                );
+            } else {
+                assert!(
+                    mcp_clean.contains("[off]") && mcp_clean.contains("[on]"),
+                    "Botones compactos [off]/[on] deben quedar intactos en ancho {w}:\n{mcp_clean}"
+                );
+            }
+            assert!(
+                mcp_raw.contains(hudr2::theme::HERDR_CATPPUCCIN_LATTE.mint)
+                    && !mcp_raw.contains(hudr2::config::MINT)
+                    && !mcp_raw.contains(hudr2::config::TEXT_PRIMARY),
+                "Card MCP debe respetar el tema activo Catppuccin Latte en ancho {w}"
+            );
+        }
+
+        // 4. Empty MCP list shows informative empty-state row
+        let mut empty_state = AppState::new();
+        let out_empty = ui::render_screen_tabbed(
+            &empty_state.snapshot,
+            &empty_state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &empty_state.hidden_cards,
+            48,
+            &hudr2::theme::LINEAR_STUDIO,
+            Some(ActiveTab::Sesion),
+        );
+        let empty_clean = ui::strip_ansi(&out_empty.lines.join("\n"));
+        assert!(
+            empty_clean.contains("Sin servidores MCP configurados"),
+            "MCP vacío debe mostrar mensaje informativo:\n{empty_clean}"
+        );
+        empty_state.active_tab = ActiveTab::Sesion;
+    }
+
+    #[test]
+    fn test_mcp_v2_precedence_project_over_config_dir_relative_scope_dup_keys_and_crlf() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::models::{McpConfigShape, McpScope};
+        use hudr2::tree::{read_mcp_servers, set_mcp_enabled};
+
+        struct EnvGuard {
+            prev_cfg_path: Option<String>,
+            prev_cfg_dir: Option<String>,
+            prev_pi_dir: Option<String>,
+        }
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    if let Some(ref v) = self.prev_cfg_path {
+                        std::env::set_var("OPENCODE_CONFIG_PATH", v);
+                    } else {
+                        std::env::remove_var("OPENCODE_CONFIG_PATH");
+                    }
+                    if let Some(ref v) = self.prev_cfg_dir {
+                        std::env::set_var("OPENCODE_CONFIG_DIR", v);
+                    } else {
+                        std::env::remove_var("OPENCODE_CONFIG_DIR");
+                    }
+                    if let Some(ref v) = self.prev_pi_dir {
+                        std::env::set_var("PI_AGENT_DIR", v);
+                    } else {
+                        std::env::remove_var("PI_AGENT_DIR");
+                    }
+                }
+            }
+        }
+        let _env = EnvGuard {
+            prev_cfg_path: std::env::var("OPENCODE_CONFIG_PATH").ok(),
+            prev_cfg_dir: std::env::var("OPENCODE_CONFIG_DIR").ok(),
+            prev_pi_dir: std::env::var("PI_AGENT_DIR").ok(),
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let cfg_dir = tmp.path().join("cfg_dir");
+        let pi_dir = tmp.path().join("pi_empty");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::create_dir_all(&pi_dir).unwrap();
+        unsafe {
+            std::env::remove_var("OPENCODE_CONFIG_PATH");
+            std::env::set_var("OPENCODE_CONFIG_DIR", cfg_dir.to_str().unwrap());
+            std::env::set_var("PI_AGENT_DIR", pi_dir.to_str().unwrap());
+        }
+
+        // 1. V2 (mcp.servers) beats V1 (mcp.<name>) regardless of alphabetical order ('alpha' < 'servers' < 'zeta')
+        let proj_cfg = proj.join("opencode.json");
+        std::fs::write(
+            &proj_cfg,
+            r#"{
+  "mcp": {
+    "alpha": { "type": "local", "enabled": true },
+    "zeta": { "type": "local", "enabled": true },
+    "servers": {
+      "alpha": { "type": "local", "disabled": true },
+      "zeta": { "type": "local", "disabled": true }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+        // 2. Global OPENCODE_CONFIG_DIR defines alpha as enabled=true; project must win
+        std::fs::write(
+            cfg_dir.join("opencode.json"),
+            r#"{
+  "mcp": {
+    "servers": {
+      "alpha": { "type": "local", "disabled": false },
+      "global_only": { "type": "remote", "disabled": false }
+    }
+  }
+}"#,
+        )
+        .unwrap();
+
+        let mcps = read_mcp_servers(proj.to_str().unwrap());
+        let alpha = mcps.iter().find(|m| m.name == "alpha").unwrap();
+        let zeta = mcps.iter().find(|m| m.name == "zeta").unwrap();
+        assert_eq!(alpha.shape, McpConfigShape::Servers);
+        assert_eq!(zeta.shape, McpConfigShape::Servers);
+        assert!(
+            !alpha.enabled && !zeta.enabled,
+            "V2 mcp.servers debe ganar sobre V1 Legacy sin depender del orden alfabético"
+        );
+        assert_eq!(
+            alpha.scope,
+            McpScope::Project,
+            "opencode.json del proyecto debe tener prioridad sobre OPENCODE_CONFIG_DIR"
+        );
+
+        // 3. Duplicate JSON control keys: serde_json evaluates the LAST occurrence -> set_mcp_enabled updates last
+        let dup_cfg = tmp.path().join("dup.json");
+        std::fs::write(
+            &dup_cfg,
+            r#"{"mcp":{"servers":{"dup":{"type":"local","disabled":false,"disabled":true}}}}"#,
+        )
+        .unwrap();
+        unsafe {
+            std::env::set_var("OPENCODE_CONFIG_PATH", dup_cfg.to_str().unwrap());
+        }
+        let dup_before = read_mcp_servers(proj.to_str().unwrap());
+        let dup_entry = dup_before.iter().find(|m| m.name == "dup").unwrap();
+        assert!(!dup_entry.enabled);
+        let changed = set_mcp_enabled(
+            dup_cfg.to_str().unwrap(),
+            "dup",
+            McpConfigShape::Servers,
+            true,
+        )
+        .expect("set_mcp_enabled debe editar clave duplicada sin no-op");
+        assert!(changed);
+        let dup_after = read_mcp_servers(proj.to_str().unwrap());
+        assert!(dup_after.iter().find(|m| m.name == "dup").unwrap().enabled);
+
+        // 4. CRLF multiline preservation when inserting disabled field
+        let crlf_cfg = tmp.path().join("crlf.json");
+        let crlf_content = "{\r\n  \"mcp\": {\r\n    \"servers\": {\r\n      \"srv\": {\r\n        \"type\": \"local\"\r\n      }\r\n    }\r\n  }\r\n}\r\n";
+        std::fs::write(&crlf_cfg, crlf_content).unwrap();
+        let inserted = set_mcp_enabled(
+            crlf_cfg.to_str().unwrap(),
+            "srv",
+            McpConfigShape::Servers,
+            false,
+        )
+        .unwrap();
+        assert!(inserted);
+        let edited_crlf = std::fs::read_to_string(&crlf_cfg).unwrap();
+        assert!(edited_crlf.contains("\r\n"));
+        assert!(
+            !edited_crlf.replace("\r\n", "").contains('\n'),
+            "Archivo CRLF no debe mezclar saltos LF sueltos al insertar campo de control:\n{edited_crlf:?}"
+        );
+    }
 }

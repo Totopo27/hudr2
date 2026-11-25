@@ -616,6 +616,14 @@ pub fn render_screen_tabbed(
     let draw_bottom = |w: usize| draw_bottom_theme(w, theme);
     let draw_divider = |w: usize| draw_divider_theme(w, theme);
     let draw_row = |l: &str, r: &str, w: usize| draw_row_theme(l, r, w, theme);
+    let mut flash_rendered = false;
+    let flash_color = |msg: &str| -> &'static str {
+        if msg.starts_with("Error") || msg.starts_with('!') || msg.starts_with('\u{2717}') {
+            coral
+        } else {
+            mint
+        }
+    };
 
     let folder = std::path::Path::new(&snap.project_dir)
         .file_name()
@@ -1202,7 +1210,13 @@ pub fn render_screen_tabbed(
             if !collapsed[3] {
                 lines.push(draw_divider(width));
             }
-            lines.push(draw_row(&format!("{BOLD}{MINT}{notice}{RESET}"), "", width));
+            let notice_color = flash_color(notice);
+            lines.push(draw_row(
+                &format!("{BOLD}{notice_color}{notice}{RESET}"),
+                "",
+                width,
+            ));
+            flash_rendered = true;
         }
 
         lines.push(draw_bottom(width));
@@ -2383,20 +2397,26 @@ pub fn render_screen_tabbed(
         });
     }
 
-    // 9. MCP Card (idx 9)
+    // 9. MCP Card (idx 10)
     if !hidden_cards.contains("mcp") && should_render_card("mcp", tab) {
         let mcp_start = lines.len();
         let configured = snap.mcps.len();
         let off = snap.mcps.iter().filter(|m| !m.enabled).count();
         let header_right = if off > 0 {
-            let noun = if off == 1 {
-                "deshabilitado"
+            if width >= 52 {
+                let noun = if off == 1 {
+                    "deshabilitado"
+                } else {
+                    "deshabilitados"
+                };
+                format!("{text_dim}\u{00b7} {configured} configurados \u{00b7} {off} {noun}{RESET}")
             } else {
-                "deshabilitados"
-            };
-            format!("{TEXT_DIM}\u{00b7} {configured} configurados \u{00b7} {off} {noun}{RESET}")
+                format!("{text_dim}\u{00b7} {configured} conf \u{00b7} {off} off{RESET}")
+            }
+        } else if width >= 38 {
+            format!("{text_dim}\u{00b7} {configured} configurados{RESET}")
         } else {
-            format!("{TEXT_DIM}\u{00b7} {configured} configurados{RESET}")
+            format!("{text_dim}\u{00b7} {configured} conf{RESET}")
         };
         lines.push(draw_top(
             &format!("{BOLD}{title_color}MCP{RESET} {header_right}"),
@@ -2404,27 +2424,55 @@ pub fn render_screen_tabbed(
             width,
         ));
         if !collapsed[10] {
+            if snap.mcps.is_empty() {
+                lines.push(draw_row(
+                    &format!("{text_dim}Sin servidores MCP configurados{RESET}"),
+                    "",
+                    width,
+                ));
+            }
             for m in &snap.mcps {
                 let row_start = lines.len();
                 let dot = if m.enabled {
-                    format!("{MINT}\u{25cf}{RESET}")
+                    format!("{mint}\u{25cf}{RESET}")
                 } else {
-                    format!("{AMBER}\u{25cb}{RESET}")
+                    format!("{amber}\u{25cb}{RESET}")
                 };
                 let badge = format!(
-                    "{TEXT_DIM}[{}\u{00b7}{}]{RESET}",
+                    "{text_dim}[{}\u{00b7}{}]{RESET}",
                     m.mcp_type,
                     m.scope.badge()
                 );
-                let left = format!("{dot} {BOLD}{TEXT_PRIMARY}{}{RESET} {badge}", m.name);
                 let right = if m.toggleable() {
                     if m.enabled {
-                        format!("{TEXT_DIM}[apagar]{RESET}")
+                        if width >= 36 {
+                            format!("{text_dim}[apagar]{RESET}")
+                        } else {
+                            format!("{text_dim}[off]{RESET}")
+                        }
+                    } else if width >= 36 {
+                        format!("{text_dim}[encender]{RESET}")
                     } else {
-                        format!("{TEXT_DIM}[encender]{RESET}")
+                        format!("{text_dim}[on]{RESET}")
                     }
+                } else if width >= 44 {
+                    format!("{text_muted}sin interruptor{RESET}")
                 } else {
-                    format!("{TEXT_MUTED}sin interruptor{RESET}")
+                    format!("{text_muted}fijo{RESET}")
+                };
+                let avail_left = width.saturating_sub(4 + string_width(&right) + 1);
+                let full_left = format!("{dot} {BOLD}{text_primary}{}{RESET} {badge}", m.name);
+                let left = if string_width(&full_left) <= avail_left {
+                    full_left
+                } else {
+                    let overhead = 2 + 1 + string_width(&badge);
+                    if avail_left > overhead + 1 {
+                        let max_name = avail_left - overhead;
+                        let short_name = truncate_plain(&m.name, max_name);
+                        format!("{dot} {BOLD}{text_primary}{short_name}{RESET} {badge}")
+                    } else {
+                        truncate_to_width(&full_left, avail_left)
+                    }
                 };
                 lines.push(draw_row(&left, &right, width));
 
@@ -2770,6 +2818,16 @@ pub fn render_screen_tabbed(
             action_type: None,
             action_path: None,
         });
+    }
+
+    if !flash_rendered
+        && let Some(notice) = flash_notice
+    {
+        let notice_color = flash_color(notice);
+        lines.push(truncate_to_width(
+            &format!("{BOLD}{notice_color} {notice}{RESET}"),
+            width,
+        ));
     }
 
     // Footer de atajos

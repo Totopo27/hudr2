@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const TREE_SKIP_NAMES: [&str; 9] = [
     ".git",
@@ -186,13 +186,36 @@ pub fn mcp_state_from_value(shape: McpConfigShape, val: &serde_json::Value) -> b
     }
 }
 
+fn resolve_against_cwd(raw: &Path) -> PathBuf {
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd.join(raw)
+    } else {
+        raw.to_path_buf()
+    };
+    let mut clean = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                let _ = clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    clean
+}
+
 /// Determina el alcance real de un candidato de configuración.
-fn mcp_scope_for(path: &Path, target_dir: &str, is_agent_host: bool) -> McpScope {
+pub fn mcp_scope_for(path: &Path, target_dir: &str, is_agent_host: bool) -> McpScope {
     if is_agent_host {
         return McpScope::Agent;
     }
-    let normalized_target = crate::paths::normalize_path(target_dir);
-    let normalized_path = crate::paths::normalize_path(&path.display().to_string());
+    let resolved_target = resolve_against_cwd(Path::new(target_dir));
+    let resolved_path = resolve_against_cwd(path);
+    let normalized_target = crate::paths::normalize_path(&resolved_target.display().to_string());
+    let normalized_path = crate::paths::normalize_path(&resolved_path.display().to_string());
     if normalized_target != "/"
         && !normalized_target.is_empty()
         && normalized_path.starts_with(&format!("{normalized_target}/"))
@@ -257,14 +280,15 @@ pub fn read_mcp_servers(target_dir: &str) -> Vec<McpServer> {
         };
 
         if let Some(mcp) = val.get("mcp").and_then(|m| m.as_object()) {
+            // Priorizar siempre V2 (`mcp.servers`) antes que las entradas legacy (`mcp.<name>`)
+            // sin depender del orden alfabético en BTreeMap.
+            if let Some(srv) = mcp.get("servers").and_then(|v| v.as_object()) {
+                for (sk, sv) in srv {
+                    register_mcp(sk, sv, McpConfigShape::Servers);
+                }
+            }
             for (k, v) in mcp {
-                if k == "servers" {
-                    if let Some(srv) = v.as_object() {
-                        for (sk, sv) in srv {
-                            register_mcp(sk, sv, McpConfigShape::Servers);
-                        }
-                    }
-                } else {
+                if k != "servers" {
                     register_mcp(k, v, McpConfigShape::Legacy);
                 }
             }
@@ -455,7 +479,7 @@ pub fn set_mcp_enabled(
     };
     let literal = if desired { "true" } else { "false" };
 
-    let edited = if let Some(member) = members.iter().find(|m| m.key == control_key) {
+    let edited = if let Some(member) = members.iter().rfind(|m| m.key == control_key) {
         let current = text[member.value_span.clone()].trim();
         if current != "true" && current != "false" {
             return Err(format!(
@@ -473,12 +497,13 @@ pub fn set_mcp_enabled(
         )
     } else {
         let pair = format!("\"{control_key}\": {literal}");
+        let newline = if text.contains("\r\n") { "\r\n" } else { "\n" };
         match members.last() {
             Some(last) => {
                 let pos = last.value_span.end;
                 let multiline = text[object_span.start..pos].contains('\n');
                 let separator = if multiline {
-                    format!(",\n{}", line_indent(&text, last.key_span.start))
+                    format!(",{newline}{}", line_indent(&text, last.key_span.start))
                 } else {
                     ",".to_string()
                 };
@@ -512,4 +537,17 @@ pub fn set_mcp_enabled(
     crate::paths::atomic_write_bytes(path, edited.as_bytes())
         .map_err(|e| format!("No se pudo escribir {}: {e}", path.display()))?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod mcp_scope_tests {
+    use super::*;
+
+    #[test]
+    fn mcp_scope_for_resolves_relative_dot_target_dir_as_project() {
+        let cwd = std::env::current_dir().unwrap();
+        let cfg = cwd.join("opencode.json");
+        assert_eq!(mcp_scope_for(&cfg, ".", false), McpScope::Project);
+        assert_eq!(mcp_scope_for(&cfg, ".", true), McpScope::Agent);
+    }
 }

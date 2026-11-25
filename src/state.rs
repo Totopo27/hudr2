@@ -718,12 +718,12 @@ impl AppState {
         clicked_row: usize,
         scroll_offset: usize,
     ) -> Option<ActiveTab> {
-        let visual_row = clicked_row.saturating_sub(scroll_offset);
+        let doc_row = clicked_row.saturating_add(scroll_offset);
         let target_tab = self
             .tab_bounds
             .iter()
             .find(|tb| {
-                tb.line == visual_row && clicked_col >= tb.col_start && clicked_col <= tb.col_end
+                tb.line == doc_row && clicked_col >= tb.col_start && clicked_col <= tb.col_end
             })
             .map(|tb| tb.tab);
 

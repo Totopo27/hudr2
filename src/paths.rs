@@ -492,17 +492,17 @@ pub fn opencode_config_candidates(target_dir: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
 
-    if let Ok(config_dir) = std::env::var("OPENCODE_CONFIG_DIR") {
-        candidates.push(Path::new(&config_dir).join("opencode.json"));
-    }
-
-    // Proyecto actual
+    // Proyecto actual (prioridad sobre configuraciones globales o OPENCODE_CONFIG_DIR)
     candidates.push(Path::new(target_dir).join("opencode.json"));
     candidates.push(
         Path::new(target_dir)
             .join(".opencode")
             .join("opencode.json"),
     );
+
+    if let Ok(config_dir) = std::env::var("OPENCODE_CONFIG_DIR") {
+        candidates.push(Path::new(&config_dir).join("opencode.json"));
+    }
 
     // Configuración de usuario estándar (XDG / AppData)
     if let Some(config_dir) = dirs::config_dir() {

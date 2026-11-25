@@ -359,6 +359,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
 
+        // Vigilar archivos de configuración MCP existentes (opencode.json / mcp.json)
+        let mut watched_mcp_files = std::collections::HashSet::new();
+        for cfg_path in hudr2::paths::opencode_config_candidates(&project_dir_for_watch)
+            .into_iter()
+            .chain(hudr2::paths::pi_mcp_config_candidates(
+                &project_dir_for_watch,
+            ))
+        {
+            if cfg_path.is_file() && watched_mcp_files.insert(cfg_path.clone()) {
+                let _ = watcher.watch(&cfg_path, RecursiveMode::NonRecursive);
+            }
+        }
+
         let mut deadline: Option<Instant> = None;
         let mut pending_git = false;
 
