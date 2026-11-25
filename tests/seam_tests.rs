@@ -9111,4 +9111,301 @@ api-keys:
             "Archivo CRLF no debe mezclar saltos LF sueltos al insertar campo de control:\n{edited_crlf:?}"
         );
     }
+
+    #[test]
+    fn test_read_project_tree_fair_budget_and_symlink_classification() {
+        use hudr2::tree::read_project_tree;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let big_dir = tmp.path().join("a-big-dir");
+        std::fs::create_dir(&big_dir).unwrap();
+        for index in 0..2100 {
+            std::fs::write(big_dir.join(format!("f-{index:04}.txt")), b"").unwrap();
+        }
+
+        let small_dir = tmp.path().join("z-small-dir");
+        std::fs::create_dir(&small_dir).unwrap();
+        for name in ["one.rs", "two.rs", "three.rs"] {
+            std::fs::write(small_dir.join(name), b"").unwrap();
+        }
+
+        let root_file = tmp.path().join("root.txt");
+        std::fs::write(&root_file, b"ok").unwrap();
+
+        let link_dir = tmp.path().join("j-link-dir");
+        #[cfg(target_os = "windows")]
+        let link_created = std::process::Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                link_dir.to_str().unwrap(),
+                small_dir.to_str().unwrap(),
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        #[cfg(not(target_os = "windows"))]
+        let link_created = std::os::unix::fs::symlink(&small_dir, &link_dir).is_ok();
+
+        let tree_data = read_project_tree(tmp.path().to_str().unwrap());
+        let root_names: Vec<_> = tree_data.tree.iter().map(|n| n.name.as_str()).collect();
+
+        assert!(
+            root_names.contains(&"a-big-dir"),
+            "La raíz debe incluir a-big-dir: {root_names:?}"
+        );
+        assert!(
+            root_names.contains(&"z-small-dir"),
+            "a-big-dir no debe acaparar el presupuesto y ocultar z-small-dir: {root_names:?}"
+        );
+        assert!(
+            root_names.contains(&"root.txt"),
+            "a-big-dir no debe ocultar archivos raíz como root.txt: {root_names:?}"
+        );
+
+        let small_node = tree_data
+            .tree
+            .iter()
+            .find(|n| n.name == "z-small-dir")
+            .expect("z-small-dir debe existir en la raíz");
+        let small_children: Vec<_> = small_node.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            small_children,
+            vec!["one.rs", "three.rs", "two.rs"],
+            "z-small-dir debe conservar sus 3 hijos pese a a-big-dir"
+        );
+
+        assert!(
+            tree_data.total_dirs + tree_data.total_files <= 2000,
+            "El árbol total debe respetar el presupuesto máximo de 2000 entradas (obtuvo dirs={}, files={})",
+            tree_data.total_dirs,
+            tree_data.total_files
+        );
+
+        if link_created {
+            let big_node = tree_data
+                .tree
+                .iter()
+                .find(|n| n.name == "a-big-dir")
+                .expect("a-big-dir debe existir en la raíz");
+            let link_node = tree_data
+                .tree
+                .iter()
+                .find(|n| n.name == "j-link-dir")
+                .expect("j-link-dir debe listarse sin quedar oculto por a-big-dir");
+            assert!(
+                link_node.is_dir,
+                "Una junction/symlink a carpeta debe clasificarse como is_dir = true, no como archivo"
+            );
+            assert!(
+                link_node.children.is_empty(),
+                "Una junction/symlink a carpeta no debe recorrerse recursivamente"
+            );
+            assert_eq!(
+                tree_data.total_dirs, 3,
+                "a-big-dir, j-link-dir y z-small-dir deben contarse como exactamente 3 directorios"
+            );
+            assert_eq!(
+                tree_data.total_files,
+                1 + big_node.children.len() + small_node.children.len(),
+                "Una junction/symlink a carpeta no debe contarse en total_files"
+            );
+        }
+    }
+
+    #[test]
+    fn test_project_tree_visibility_skip_and_open_folder_validation() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let sample_file = tmp.path().join("sample.txt");
+        std::fs::write(&sample_file, b"hello").unwrap();
+
+        let mut state = AppState::new();
+        state.tabbed = true;
+        state.active_tab = hudr2::state::ActiveTab::Sesion;
+        state.collapsed_cards[2] = false;
+        assert!(!state.is_project_tree_visible());
+
+        state.active_tab = hudr2::state::ActiveTab::Codigo;
+        assert!(state.is_project_tree_visible());
+
+        state.collapsed_cards[2] = true;
+        assert!(!state.is_project_tree_visible());
+        state.collapsed_cards[2] = false;
+
+        state.toggle_card_visibility("proyecto");
+        assert!(!state.is_project_tree_visible());
+        state.toggle_card_visibility("proyecto");
+        assert!(state.is_project_tree_visible());
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let sentinel_tree = hudr2::models::ProjectTreeData {
+                root_path: "sentinel_tree".to_string(),
+                total_dirs: 1,
+                total_files: 1,
+                tree: Vec::new(),
+            };
+            let app_state = std::sync::Arc::new(tokio::sync::RwLock::new(AppState::new()));
+            {
+                let mut st = app_state.write().await;
+                st.tabbed = true;
+                st.active_tab = hudr2::state::ActiveTab::Sesion;
+                st.collapsed_cards[2] = false;
+                st.snapshot.project_dir = tmp.path().to_string_lossy().to_string();
+                st.snapshot.tree = sentinel_tree.clone();
+            }
+
+            hudr2::app::refresh_all(&app_state).await;
+            {
+                let st = app_state.read().await;
+                assert_eq!(
+                    st.snapshot.tree, sentinel_tree,
+                    "En pestaña inactiva Sesion, read_project_tree debe omitirse"
+                );
+            }
+
+            {
+                let mut st = app_state.write().await;
+                st.active_tab = hudr2::state::ActiveTab::Codigo;
+                st.hidden_cards.insert("proyecto".to_string());
+            }
+            hudr2::app::refresh_all(&app_state).await;
+            {
+                let st = app_state.read().await;
+                assert_eq!(
+                    st.snapshot.tree, sentinel_tree,
+                    "Con proyecto oculto en Personalizar, read_project_tree debe omitirse"
+                );
+            }
+
+            {
+                let mut st = app_state.write().await;
+                st.hidden_cards.remove("proyecto");
+            }
+            hudr2::app::refresh_all(&app_state).await;
+            {
+                let st = app_state.read().await;
+                assert!(
+                    st.snapshot.tree.tree.iter().any(|n| n.name == "sample.txt"),
+                    "Al quedar visible en 2:Cód, refresh_all debe escanear el árbol real"
+                );
+            }
+        });
+
+        let valid_dir = hudr2::app::resolve_openable_folder(tmp.path().to_str().unwrap())
+            .expect("Directorio existente debe resolver");
+        assert!(valid_dir.is_dir());
+        #[cfg(target_os = "windows")]
+        assert!(
+            !valid_dir.to_string_lossy().starts_with(r"\\?\"),
+            "Ruta resuelta en Windows no debe conservar prefijo verbatim \\\\?\\"
+        );
+
+        let err_file = hudr2::app::resolve_openable_folder(sample_file.to_str().unwrap());
+        assert!(
+            err_file.is_err(),
+            "Un archivo regular nunca debe aceptarse como carpeta para abrir en explorador"
+        );
+
+        let missing = tmp.path().join("no_existe");
+        assert!(hudr2::app::resolve_openable_folder(missing.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn test_proyecto_card_uses_active_theme_and_empty_state() {
+        use hudr2::models::{ProjectTreeData, TreeNode};
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+
+        let mut state = AppState::new();
+        state.tabbed = true;
+        state.active_tab = hudr2::state::ActiveTab::Codigo;
+        state.collapsed_cards[2] = false;
+        state.snapshot.project_dir = "D:/work/mi_app".to_string();
+        state.snapshot.tree = ProjectTreeData {
+            root_path: "D:/work/mi_app".to_string(),
+            total_dirs: 1,
+            total_files: 1,
+            tree: vec![
+                TreeNode {
+                    name: "src".to_string(),
+                    is_dir: true,
+                    children: Vec::new(),
+                },
+                TreeNode {
+                    name: "Cargo.toml".to_string(),
+                    is_dir: false,
+                    children: Vec::new(),
+                },
+            ],
+        };
+
+        let render_narrow = ui::render_screen_tabbed(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            32,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(hudr2::state::ActiveTab::Codigo),
+        );
+        let raw_narrow = render_narrow.lines.join("\n");
+        let clean_narrow = ui::strip_ansi(&raw_narrow);
+        assert!(
+            clean_narrow.contains("[abrir en PC ->]"),
+            "Botón [abrir en PC ->] debe mantenerse íntegro a 32 cols:\n{clean_narrow}"
+        );
+        assert!(
+            raw_narrow.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                && raw_narrow.contains(HERDR_TOKYO_NIGHT_DAY.cyan),
+            "Card Proyecto debe usar theme.mint y theme.cyan activos en lugar de constantes oscuras"
+        );
+        let dir_line = render_narrow
+            .lines
+            .iter()
+            .find(|l| ui::strip_ansi(l).contains("> / src/"))
+            .expect("Debe renderizar directorio src");
+        assert!(
+            dir_line.contains(HERDR_TOKYO_NIGHT_DAY.text_primary),
+            "Nombre de carpeta debe usar theme.text_primary activo: {dir_line}"
+        );
+
+        state.snapshot.tree = ProjectTreeData {
+            root_path: "D:/work/mi_app".to_string(),
+            total_dirs: 0,
+            total_files: 0,
+            tree: Vec::new(),
+        };
+        for w in [32usize, 48usize] {
+            let render_empty = ui::render_screen_tabbed(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(hudr2::state::ActiveTab::Codigo),
+            );
+            for line in &render_empty.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea vacía excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let clean_empty = ui::strip_ansi(&render_empty.lines.join("\n"));
+            assert!(
+                clean_empty.contains("Sin archivos visibles"),
+                "Árbol vacío debe mostrar 'Sin archivos visibles' a ancho {w}:\n{clean_empty}"
+            );
+        }
+    }
 }

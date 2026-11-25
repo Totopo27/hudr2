@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
-    let (project_dir, mut accounts_copy, is_tree_collapsed, cache_path) = {
+    let (project_dir, mut accounts_copy, should_read_tree, cache_path) = {
         let state = app_state.read().await;
         let cp = state
             .config_path
@@ -20,7 +20,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         (
             state.snapshot.project_dir.clone(),
             state.snapshot.accounts.clone(),
-            state.collapsed_cards[2],
+            state.is_project_tree_visible(),
             cp,
         )
     };
@@ -68,7 +68,7 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
         g
     });
 
-    let tree_fut = if is_tree_collapsed {
+    let tree_fut = if !should_read_tree {
         None
     } else {
         let dir_clone = project_dir.clone();
@@ -552,23 +552,65 @@ async fn clear_stale_quota_progress_notice(
     }
 }
 
-pub fn open_folder_in_explorer(target_path: &str) {
-    let resolved_path = if target_path.is_empty() || target_path == "." {
-        std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
+#[cfg(target_os = "windows")]
+fn strip_windows_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    let raw = path.to_string_lossy();
+    if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{unc}"))
+    } else if let Some(rest) = raw.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest)
     } else {
-        target_path.to_string()
+        path.to_path_buf()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn strip_windows_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
+pub fn resolve_openable_folder(target_path: &str) -> Result<std::path::PathBuf, String> {
+    let trimmed = target_path.trim();
+    let candidate = if trimmed.is_empty() || trimmed == "." {
+        std::env::current_dir()
+            .map_err(|e| format!("No se pudo obtener el directorio actual: {e}"))?
+    } else {
+        let p = std::path::Path::new(trimmed);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("No se pudo obtener el directorio actual: {e}"))?
+                .join(p)
+        }
     };
+
+    let canonical = std::fs::canonicalize(&candidate)
+        .map_err(|_| format!("Carpeta no encontrada: {trimmed}"))?;
+    let resolved = strip_windows_verbatim_prefix(&canonical);
+    if !resolved.is_dir() {
+        return Err(format!("No es una carpeta válida: {}", resolved.display()));
+    }
+    Ok(resolved)
+}
+
+pub fn try_open_folder_in_explorer(target_path: &str) -> Result<std::path::PathBuf, String> {
+    let resolved = resolve_openable_folder(target_path)?;
 
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
-        let mut wide_path: Vec<u16> = std::ffi::OsStr::new(&resolved_path).encode_wide().collect();
+        let mut wide_path: Vec<u16> = resolved.as_os_str().encode_wide().collect();
         wide_path.push(0);
 
-        let mut wide_op: Vec<u16> = std::ffi::OsStr::new("open").encode_wide().collect();
+        let mut wide_op: Vec<u16> = std::ffi::OsStr::new("explore").encode_wide().collect();
         wide_op.push(0);
+
+        #[link(name = "ole32")]
+        unsafe extern "system" {
+            fn CoInitializeEx(pvReserved: *mut std::ffi::c_void, dwCoInit: u32) -> i32;
+            fn CoUninitialize();
+        }
 
         #[link(name = "shell32")]
         unsafe extern "system" {
@@ -582,7 +624,22 @@ pub fn open_folder_in_explorer(target_path: &str) {
             ) -> isize;
         }
 
-        unsafe {
+        struct ComGuard(bool);
+        impl Drop for ComGuard {
+            fn drop(&mut self) {
+                if self.0 {
+                    unsafe {
+                        CoUninitialize();
+                    }
+                }
+            }
+        }
+
+        // COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE
+        let hr = unsafe { CoInitializeEx(std::ptr::null_mut(), 0x2 | 0x4) };
+        let _com_guard = ComGuard(hr == 0 || hr == 1);
+
+        let rc = unsafe {
             ShellExecuteW(
                 std::ptr::null_mut(),
                 wide_op.as_ptr(),
@@ -590,27 +647,38 @@ pub fn open_folder_in_explorer(target_path: &str) {
                 std::ptr::null(),
                 std::ptr::null(),
                 1, // SW_SHOWNORMAL
-            );
+            )
+        };
+        if rc <= 32 {
+            return Err(format!("No se pudo abrir el explorador (código {rc})"));
         }
     }
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
-            .arg(&resolved_path)
+        std::process::Command::new("open")
+            .arg(&resolved)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+            .map_err(|e| format!("No se pudo abrir Finder: {e}"))?;
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(&resolved_path)
+        std::process::Command::new("xdg-open")
+            .arg(&resolved)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .spawn();
+            .spawn()
+            .map_err(|e| format!("No se pudo abrir el gestor de archivos: {e}"))?;
     }
+
+    Ok(resolved)
+}
+
+pub fn open_folder_in_explorer(target_path: &str) {
+    let _ = try_open_folder_in_explorer(target_path);
 }
 
 pub fn open_url_in_browser(url: &str) {

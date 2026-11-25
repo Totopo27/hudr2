@@ -5,31 +5,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-const TREE_SKIP_NAMES: [&str; 9] = [
-    ".git",
-    "node_modules",
-    "dist",
-    ".cache",
-    ".next",
-    "coverage",
-    ".turbo",
-    "build",
-    "target",
-];
+const TREE_SKIP_NAMES: [&str; 5] = ["node_modules", "dist", "coverage", "build", "target"];
 
 const TREE_MAX_ENTRIES: usize = 2000;
 const MCP_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
 
-fn is_real_dir(entry: &fs::DirEntry) -> bool {
-    entry
-        .file_type()
-        .map(|t| t.is_dir() && !t.is_symlink())
-        .unwrap_or(false)
-}
-
 struct RankedDirEntry {
     entry: fs::DirEntry,
     is_dir: bool,
+    can_descend: bool,
     name: String,
     sort_name: String,
     encounter_index: usize,
@@ -41,8 +25,23 @@ impl RankedDirEntry {
         if name.starts_with('.') || TREE_SKIP_NAMES.contains(&name.as_str()) {
             return None;
         }
+        let ft = entry.file_type().ok()?;
+        let (is_dir, can_descend) = if ft.is_symlink() {
+            match fs::metadata(entry.path()).ok() {
+                Some(m) if m.is_dir() => (true, false),
+                Some(m) if m.is_file() => (false, false),
+                _ => return None,
+            }
+        } else if ft.is_dir() {
+            (true, true)
+        } else if ft.is_file() {
+            (false, false)
+        } else {
+            return None;
+        };
         Some(Self {
-            is_dir: is_real_dir(&entry),
+            is_dir,
+            can_descend,
             sort_name: name.to_lowercase(),
             name,
             entry,
@@ -123,33 +122,39 @@ pub fn read_project_tree(target_dir: &str) -> ProjectTreeData {
         ..Default::default()
     };
 
-    let mut budget = TREE_MAX_ENTRIES;
     let p = Path::new(target_dir);
     if p.is_dir() {
-        for entry in select_best_entries(p, budget) {
-            if budget == 0 {
-                break;
-            }
-            budget -= 1;
+        let top_entries = select_best_entries(p, TREE_MAX_ENTRIES);
+        let mut child_budget = TREE_MAX_ENTRIES.saturating_sub(top_entries.len());
+        let mut dirs_left = top_entries.iter().filter(|e| e.can_descend).count();
 
+        for entry in top_entries {
             let is_dir = entry.is_dir;
             let name = entry.name;
 
             if is_dir {
                 data.total_dirs += 1;
                 let mut children = Vec::new();
-                for child in select_best_entries(&entry.entry.path(), budget) {
-                    budget -= 1;
-                    if child.is_dir {
-                        data.total_dirs += 1;
+                if entry.can_descend {
+                    let per_dir_cap = if dirs_left > 0 {
+                        child_budget.div_ceil(dirs_left)
                     } else {
-                        data.total_files += 1;
+                        0
+                    };
+                    dirs_left = dirs_left.saturating_sub(1);
+                    for child in select_best_entries(&entry.entry.path(), per_dir_cap) {
+                        child_budget = child_budget.saturating_sub(1);
+                        if child.is_dir {
+                            data.total_dirs += 1;
+                        } else {
+                            data.total_files += 1;
+                        }
+                        children.push(TreeNode {
+                            name: child.name,
+                            is_dir: child.is_dir,
+                            children: Vec::new(),
+                        });
                     }
-                    children.push(TreeNode {
-                        name: child.name,
-                        is_dir: child.is_dir,
-                        children: Vec::new(),
-                    });
                 }
                 data.tree.push(TreeNode {
                     name,

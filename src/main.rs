@@ -200,6 +200,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     hudr2::theme::set_active_theme(active_theme);
 
+    if cli.once {
+        initial_state.tabbed = false;
+    }
+
     let app_state = Arc::new(RwLock::new(initial_state));
 
     // 1. Carga inicial rápida de datos locales
@@ -646,42 +650,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::Down(MouseButton::Left) => {
                             let mut state = app_state.write().await;
-                            if let Some(switched_tab) = state.handle_tab_click(
-                                mouse.column as usize,
-                                mouse.row as usize,
-                                last_rendered_offset,
-                            ) {
-                                if switched_tab == state::ActiveTab::Codigo
-                                    && !state.collapsed_cards[2]
-                                    && state.snapshot.tree.root_path.is_empty()
-                                {
-                                    refresh_needed = true;
-                                }
-                            } else if let Some(action) =
-                                state.handle_mouse_click(mouse.row as usize, last_rendered_offset)
+                            let was_tree_visible = state.is_project_tree_visible();
+                            if state
+                                .handle_tab_click(
+                                    mouse.column as usize,
+                                    mouse.row as usize,
+                                    last_rendered_offset,
+                                )
+                                .is_none()
+                                && let Some(action) = state
+                                    .handle_mouse_click(mouse.row as usize, last_rendered_offset)
                             {
                                 match action {
                                     state::ClickAction::OpenFolder(path_to_open) => {
-                                        let folder_name = std::path::Path::new(&path_to_open)
-                                            .file_name()
-                                            .and_then(|n| n.to_str())
-                                            .unwrap_or(&path_to_open);
-                                        state.set_flash_notice(
-                                            Some(format!("+ Abierto en explorador: {folder_name}")),
-                                            4000,
+                                        spawn_open_folder(
+                                            path_to_open,
+                                            app_state.clone(),
+                                            tx.clone(),
                                         );
-                                        tokio::task::spawn_blocking(move || {
-                                            app::open_folder_in_explorer(&path_to_open);
-                                        });
                                     }
-                                    state::ClickAction::ToggledCard(idx) => {
-                                        if idx == 2
-                                            && !state.collapsed_cards[2]
-                                            && state.snapshot.tree.root_path.is_empty()
-                                        {
-                                            refresh_needed = true;
-                                        }
-                                    }
+                                    state::ClickAction::ToggledCard(_) => {}
                                     state::ClickAction::ToggleCheckUpdates(now_enabled) => {
                                         if now_enabled {
                                             spawn_upstream_check(app_state.clone(), tx.clone());
@@ -738,6 +726,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     | state::ClickAction::CycleSoundMode(_)
                                     | state::ClickAction::ToggleTabbedView(_) => {}
                                 }
+                            }
+                            if !was_tree_visible && state.is_project_tree_visible() {
+                                refresh_needed = true;
                             }
                         }
                         MouseEventKind::ScrollUp => {
@@ -815,15 +806,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         || key.modifiers.contains(KeyModifiers::ALT);
 
                                 if !has_control_or_alt {
+                                    let was_tree_visible = state.is_project_tree_visible();
                                     match norm_code {
                                         KeyCode::Char('q') => should_quit = true,
                                         KeyCode::Char('c') => {
                                             state.toggle_all_collapse();
-                                            if !state.collapsed_cards[2]
-                                                && state.snapshot.tree.root_path.is_empty()
-                                            {
-                                                refresh_needed = true;
-                                            }
                                         }
                                         KeyCode::Char('v') => {
                                             state.toggle_tabbed();
@@ -838,24 +825,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                         KeyCode::Tab => {
                                             if state.tabbed {
-                                                let next = state.next_tab();
-                                                if next == state::ActiveTab::Codigo
-                                                    && !state.collapsed_cards[2]
-                                                    && state.snapshot.tree.root_path.is_empty()
-                                                {
-                                                    refresh_needed = true;
-                                                }
+                                                state.next_tab();
                                             }
                                         }
                                         KeyCode::BackTab => {
                                             if state.tabbed {
-                                                let prev = state.prev_tab();
-                                                if prev == state::ActiveTab::Codigo
-                                                    && !state.collapsed_cards[2]
-                                                    && state.snapshot.tree.root_path.is_empty()
-                                                {
-                                                    refresh_needed = true;
-                                                }
+                                                state.prev_tab();
                                             }
                                         }
                                         KeyCode::Char('1') => {
@@ -868,11 +843,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         KeyCode::Char('2') => {
                                             if state.tabbed {
                                                 state.switch_tab(state::ActiveTab::Codigo);
-                                                if !state.collapsed_cards[2]
-                                                    && state.snapshot.tree.root_path.is_empty()
-                                                {
-                                                    refresh_needed = true;
-                                                }
                                             } else {
                                                 state.toggle_card(1);
                                             }
@@ -882,11 +852,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 state.switch_tab(state::ActiveTab::Modelos);
                                             } else {
                                                 state.toggle_card(2);
-                                                if !state.collapsed_cards[2]
-                                                    && state.snapshot.tree.root_path.is_empty()
-                                                {
-                                                    refresh_needed = true;
-                                                }
                                             }
                                         }
                                         KeyCode::Char('4') => {
@@ -1067,21 +1032,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             });
                                         }
                                         KeyCode::Char('o') => {
-                                            let proj_dir = state.snapshot.project_dir.clone();
-                                            let folder_name = std::path::Path::new(&proj_dir)
-                                                .file_name()
-                                                .and_then(|n| n.to_str())
-                                                .unwrap_or(&proj_dir)
-                                                .to_string();
-                                            state.set_flash_notice(
-                                                Some(format!(
-                                                    "+ Abierto en explorador: {folder_name}"
-                                                )),
-                                                4000,
+                                            let proj_dir = if !state.snapshot.tree.root_path.is_empty() {
+                                                state.snapshot.tree.root_path.clone()
+                                            } else {
+                                                state.snapshot.project_dir.clone()
+                                            };
+                                            spawn_open_folder(
+                                                proj_dir,
+                                                app_state.clone(),
+                                                tx.clone(),
                                             );
-                                            tokio::task::spawn_blocking(move || {
-                                                app::open_folder_in_explorer(&proj_dir);
-                                            });
                                         }
                                         KeyCode::Char('d') => {
                                             let state_ref = app_state.clone();
@@ -1110,6 +1070,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         KeyCode::Up | KeyCode::Char('k') => state.scroll_up(),
                                         KeyCode::Down | KeyCode::Char('j') => state.scroll_down(),
                                         _ => {}
+                                    }
+                                    if !was_tree_visible && state.is_project_tree_visible() {
+                                        refresh_needed = true;
                                     }
                                 }
                             }
@@ -1271,6 +1234,38 @@ fn spawn_tool_update(
                 &st.snapshot.ecosystem,
             );
             st.snapshot.ecosystem = fresh_eco;
+            st.needs_redraw = true;
+        }
+        let _ = wake_tx.send(MainMsg::Redraw);
+    });
+}
+
+fn spawn_open_folder(
+    path: String,
+    app_state: Arc<RwLock<state::AppState>>,
+    wake_tx: mpsc::UnboundedSender<MainMsg>,
+) {
+    tokio::spawn(async move {
+        let res = tokio::task::spawn_blocking(move || app::try_open_folder_in_explorer(&path))
+            .await
+            .map_err(|e| format!("Error interno al abrir carpeta: {e}"))
+            .and_then(|inner| inner);
+
+        let (msg, ttl) = match res {
+            Ok(resolved) => {
+                let folder_name = resolved
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| resolved.display().to_string());
+                (format!("+ Abierto en explorador: {folder_name}"), 4000)
+            }
+            Err(err) => (format!("Error: {err}"), 5000),
+        };
+
+        {
+            let mut st = app_state.write().await;
+            st.set_flash_notice(Some(msg), ttl);
             st.needs_redraw = true;
         }
         let _ = wake_tx.send(MainMsg::Redraw);

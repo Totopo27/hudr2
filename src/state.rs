@@ -763,6 +763,12 @@ impl AppState {
         }
     }
 
+    pub fn is_project_tree_visible(&self) -> bool {
+        !self.collapsed_cards[2]
+            && !self.is_card_hidden("proyecto")
+            && (!self.tabbed || self.active_tab == ActiveTab::Codigo)
+    }
+
     pub fn toggle_git_file_diff(&mut self, rel_path: &str) {
         if self.selected_diff_file.as_deref() == Some(rel_path) {
             self.selected_diff_file = None;

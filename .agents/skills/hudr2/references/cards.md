@@ -36,8 +36,8 @@
 
 ## 2. `~ Proyecto` (`id: "proyecto"`, index `2`)
 - **Header:** `~ Proyecto · <root_name> <dirs>d · <files>f`.
-- **Action row (`id: "open_folder"`):** `>> [abrir en PC ->]` (never truncated even at width 36; clicking opens the project folder in the OS file explorer).
-- **Tree rows:** Directories first (`+ name/`), then files (`  name`), alphabetical case-insensitive, skipped when card `2` is collapsed.
+- **Action row (`id: "open_folder"`):** `Ruta [abrir en PC ->]` + truncated path on the right (never truncated even at width 32; clicking or pressing `o` canonicalizes/verifies directory existence without verbatim Windows `\\?\` prefix and opens it in the OS explorer via `try_open_folder_in_explorer`, reporting result in `flash_notice`).
+- **Tree rows:** Directories first (`> / name/ (N)` with up to 2 children `└ / sub` / `└ file`, up to 6 top-level items + `… y M elementos más` or `Sin archivos visibles`), alphabetical case-insensitive; fair depth-2 budget (`TREE_MAX_ENTRIES = 2000` reserving top-level entries first and distributing child budget across directories), symlink/junction dirs classified as dirs without descending, and lazy scanning only when visible (`is_project_tree_visible()`).
 
 ## 3. `Integraciones` (`id: "integraciones"`, index `3`)
 - **Header:** `Integraciones · <N> cuentas` or `! <N> crític` (`CORAL`) when any account is critical for the **active session's model family**.

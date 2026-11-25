@@ -951,11 +951,11 @@ pub fn render_screen_tabbed(
     if !hidden_cards.contains("proyecto") && should_render_card("proyecto", tab) {
         let proj_start = lines.len();
         let stats_badge = format!(
-            "{TEXT_DIM}{}d \u{00b7} {}f{RESET}",
+            "{text_dim}{}d \u{00b7} {}f{RESET}",
             snap.tree.total_dirs, snap.tree.total_files
         );
         let proj_title = format!(
-            "{accent_primary}~{RESET} {BOLD}{title_color}Proyecto{RESET} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{folder}{RESET} {stats_badge}"
+            "{accent_primary}~{RESET} {BOLD}{title_color}Proyecto{RESET} {text_dim}\u{00b7}{RESET} {cyan}{folder}{RESET} {stats_badge}"
         );
         lines.push(draw_top(&proj_title, collapsed[2], width));
         if !collapsed[2] {
@@ -966,7 +966,7 @@ pub fn render_screen_tabbed(
                 &snap.tree.root_path
             };
             let normalized_path = raw_proj_path.replace('\\', "/");
-            let btn_label = format!("{label_color}Ruta{RESET} {MINT}[abrir en PC ->]{RESET}");
+            let btn_label = format!("{label_color}Ruta{RESET} {mint}[abrir en PC ->]{RESET}");
             let btn_w = string_width(&btn_label);
             let target_inner = width.saturating_sub(4);
             let avail_right = target_inner.saturating_sub(btn_w + 1);
@@ -983,7 +983,7 @@ pub fn render_screen_tabbed(
             };
             lines.push(draw_row(
                 &btn_label,
-                &format!("{TEXT_PRIMARY}{disp_path}{RESET}"),
+                &format!("{text_primary}{disp_path}{RESET}"),
                 width,
             ));
             bounds.push(CardBounds {
@@ -996,11 +996,18 @@ pub fn render_screen_tabbed(
 
             let max_items = 6;
             let total_items = snap.tree.tree.len();
+            if total_items == 0 {
+                lines.push(draw_row(
+                    &format!("{text_dim}Sin archivos visibles{RESET}"),
+                    "",
+                    width,
+                ));
+            }
             for item in snap.tree.tree.iter().take(max_items) {
                 if item.is_dir {
                     lines.push(draw_row(
                         &format!(
-                            "{CYAN}> /{RESET} {TEXT_PRIMARY}{}/{RESET} {TEXT_DIM}({}){RESET}",
+                            "{cyan}> /{RESET} {text_primary}{}/{RESET} {text_dim}({}){RESET}",
                             item.name,
                             item.children.len()
                         ),
@@ -1009,19 +1016,19 @@ pub fn render_screen_tabbed(
                     ));
                     for sub in item.children.iter().take(2) {
                         let sub_icon = if sub.is_dir {
-                            format!("{CYAN}\u{2514} /{RESET}")
+                            format!("{cyan}\u{2514} /{RESET}")
                         } else {
-                            format!("{TEXT_DIM}\u{2514} {RESET}")
+                            format!("{text_dim}\u{2514} {RESET}")
                         };
                         lines.push(draw_row(
-                            &format!("   {sub_icon} {TEXT_MUTED}{}{RESET}", sub.name),
+                            &format!("   {sub_icon} {text_muted}{}{RESET}", sub.name),
                             "",
                             width,
                         ));
                     }
                 } else {
                     lines.push(draw_row(
-                        &format!("{TEXT_DIM}\u{2022} {RESET}{TEXT_MUTED}{}{RESET}", item.name),
+                        &format!("{text_dim}\u{2022} {RESET}{text_muted}{}{RESET}", item.name),
                         "",
                         width,
                     ));
@@ -1030,7 +1037,7 @@ pub fn render_screen_tabbed(
             if total_items > max_items {
                 let remaining = total_items - max_items;
                 lines.push(draw_row(
-                    &format!("{TEXT_DIM}\u{2026} y {remaining} elementos m\u{00e1}s{RESET}"),
+                    &format!("{text_dim}\u{2026} y {remaining} elementos m\u{00e1}s{RESET}"),
                     "",
                     width,
                 ));
