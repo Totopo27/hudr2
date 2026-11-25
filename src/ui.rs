@@ -1056,7 +1056,7 @@ pub fn render_screen_tabbed(
     // 5. Integraciones Card (3)
     if !hidden_cards.contains("integraciones") && should_render_card("integraciones", tab) {
         let int_start = lines.len();
-        let count_str = format!("{TEXT_DIM}{} cuentas{RESET}", snap.accounts.len());
+        let count_str = format!("{text_dim}{} cuentas{RESET}", snap.accounts.len());
         let critical_count = snap
             .accounts
             .iter()
@@ -1064,17 +1064,17 @@ pub fn render_screen_tabbed(
             .count();
         let int_title = if critical_count > 0 {
             format!(
-                "{title_color}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {BOLD}{CORAL}! {critical_count} cr\u{00ed}tic{RESET}"
+                "{title_color}Integraciones{RESET} {text_dim}\u{00b7}{RESET} {BOLD}{coral}! {critical_count} cr\u{00ed}tic{RESET}"
             )
         } else {
-            format!("{title_color}Integraciones{RESET} {TEXT_DIM}\u{00b7}{RESET} {count_str}")
+            format!("{title_color}Integraciones{RESET} {text_dim}\u{00b7}{RESET} {count_str}")
         };
         lines.push(draw_top(&int_title, collapsed[3], width));
         if !collapsed[3] {
             if snap.accounts.is_empty() {
                 lines.push(draw_row(
-                    &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
-                    &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                    &format!("{text_dim}Sin proveedor de cuotas activo{RESET}"),
+                    &format!("{text_dim}[inactivo]{RESET}"),
                     width,
                 ));
             } else {
@@ -1085,18 +1085,12 @@ pub fn render_screen_tabbed(
                     let is_antigravity = crate::quotas::is_antigravity_account(acc);
                     let is_unknown = crate::quotas::is_unfetched(acc);
                     let right_normal = if is_api || !is_antigravity {
-                        format!("{TEXT_DIM}[{}]{RESET}", eff.reset_5h)
+                        format!("{text_dim}[{}]{RESET}", eff.reset_5h)
                     } else {
-                        format!("{TEXT_DIM}en {}{RESET}", eff.reset_5h)
+                        format!("{text_dim}en {}{RESET}", eff.reset_5h)
                     };
 
-                    let (status_glyph, pct_color, right_text) = if is_unknown {
-                        (
-                            format!("{AMBER}?{RESET}"),
-                            AMBER,
-                            format!("{AMBER}[sin consultar]{RESET}"),
-                        )
-                    } else if acc.has_error {
+                    let (status_glyph, pct_color, right_text) = if acc.has_error {
                         let err_display = if acc.error_msg.to_lowercase().contains("expirado") {
                             if width < 34 {
                                 "exp".to_string()
@@ -1111,32 +1105,38 @@ pub fn render_screen_tabbed(
                             acc.error_msg.clone()
                         };
                         (
-                            format!("{AMBER}?{RESET}"),
-                            AMBER,
-                            format!("{AMBER}[{err_display}]{RESET}"),
+                            format!("{amber}?{RESET}"),
+                            amber,
+                            format!("{amber}[{err_display}]{RESET}"),
+                        )
+                    } else if is_unknown {
+                        (
+                            format!("{amber}?{RESET}"),
+                            amber,
+                            format!("{amber}[sin consultar]{RESET}"),
                         )
                     } else if eff.is_critical {
                         (
-                            format!("{BOLD}{CORAL}!{RESET}"),
-                            CORAL,
+                            format!("{BOLD}{coral}!{RESET}"),
+                            coral,
                             if is_api {
-                                format!("{BOLD}{CORAL}[SALDO AGOTADO]{RESET}")
+                                format!("{BOLD}{coral}[SALDO AGOTADO]{RESET}")
                             } else {
-                                format!("{BOLD}{CORAL}[AGOT\u{00c1}NDOSE]{RESET}")
+                                format!("{BOLD}{coral}[AGOT\u{00c1}NDOSE]{RESET}")
                             },
                         )
                     } else if eff.is_warning {
                         (
-                            format!("{BOLD}{AMBER}!{RESET}"),
-                            AMBER,
+                            format!("{BOLD}{amber}!{RESET}"),
+                            amber,
                             if is_api {
-                                format!("{AMBER}[AVISO SALDO]{RESET}")
+                                format!("{amber}[AVISO SALDO]{RESET}")
                             } else {
-                                format!("{AMBER}[AVISO 70%]{RESET}")
+                                format!("{amber}[AVISO 70%]{RESET}")
                             },
                         )
                     } else {
-                        (format!("{MINT}\u{25cf}{RESET}"), MINT, right_normal)
+                        (format!("{mint}\u{25cf}{RESET}"), mint, right_normal)
                     };
 
                     let pfx_w = if width < 38 {
@@ -1147,7 +1147,7 @@ pub fn render_screen_tabbed(
                         7
                     };
                     let pfx_clean = format!("{:<width$}", acc.prefix, width = pfx_w);
-                    let pfx_disp = format!("{TEXT_PRIMARY}{pfx_clean}{RESET}");
+                    let pfx_disp = format!("{text_primary}{pfx_clean}{RESET}");
                     let left = if is_api {
                         let (cost_to_apply, _) =
                             crate::quotas::cliproxy::api_account_attributed_usage(
@@ -1182,25 +1182,27 @@ pub fn render_screen_tabbed(
                                 }
                             }
                         }
-                    } else if is_unknown {
-                        format!("{status_glyph} {pfx_disp} {TEXT_DIM}cuota desconocida{RESET}")
+                    } else if is_unknown
+                        || (acc.has_error && eff.reset_5h == crate::quotas::UNFETCHED_RESET)
+                    {
+                        format!("{status_glyph} {pfx_disp} {text_dim}cuota desconocida{RESET}")
                     } else {
                         let bar_len = if width < 38 { 2 } else { 3 };
                         let bar = render_gauge_inline(eff.rem_5h, bar_len, pct_color);
                         let pct_5h = format!("{BOLD}{pct_color}{:>3}%{RESET}", eff.rem_5h);
-                        let wk_color = if eff.is_critical {
-                            CORAL
-                        } else if eff.is_warning {
-                            AMBER
+                        let wk_color = if acc.has_error || eff.is_warning {
+                            amber
+                        } else if eff.is_critical {
+                            coral
                         } else {
-                            MINT
+                            mint
                         };
                         let wk_str = if width < 36 {
                             String::new()
                         } else {
                             let wk_label = if width < 40 { "W:" } else { "Wk:" };
                             format!(
-                                " {TEXT_DIM}{wk_label}{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                                " {text_dim}{wk_label}{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
                                 eff.rem_wk
                             )
                         };

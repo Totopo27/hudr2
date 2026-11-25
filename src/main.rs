@@ -247,7 +247,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 2. Disparar en segundo plano el refresco selectivo de cuotas (activas + nuevas/vencidas; el resto carga en 0ms desde caché)
     let (tx, mut rx) = mpsc::unbounded_channel::<MainMsg>();
 
-    if hudr2::quotas::is_available() {
+    let init_proj = app_state.read().await.snapshot.project_dir.clone();
+    if hudr2::quotas::is_available_for(&init_proj) {
         let initial_fetch_state = app_state.clone();
         let tx_quota = tx.clone();
         tokio::spawn(async move {
@@ -451,7 +452,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 break;
             }
 
-            if hudr2::quotas::is_available()
+            let timer_proj = { timer_state.read().await.snapshot.project_dir.clone() };
+            if hudr2::quotas::is_available_for(&timer_proj)
                 && last_quota_refresh.elapsed() >= Duration::from_secs(120)
             {
                 last_quota_refresh = tokio::time::Instant::now();

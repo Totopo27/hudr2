@@ -9955,4 +9955,400 @@ api-keys:
             );
         }
     }
+
+    #[test]
+    fn test_integraciones_security_non_agy_oauth_no_google_leak_api_key_sweep_and_discovery() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            use hudr2::app::{select_accounts_for_refresh, select_yellow_zone_prewarm_candidates};
+            use hudr2::models::{AccountQuota, QuotaPool};
+            use hudr2::quotas::{
+                UNFETCHED_RESET, discover_accounts_for, fetch_quota_for_account_with_cache,
+                is_available_for, needs_refresh, parse_api_key_accounts_from_opencode_json,
+            };
+            use std::collections::HashSet;
+
+            let tmp = tempfile::tempdir().unwrap();
+            let auths_dir = tmp.path().join("auths");
+            std::fs::create_dir_all(&auths_dir).unwrap();
+
+            let claude_path = auths_dir.join("claude-pro-oauth.json");
+            std::fs::write(
+                &claude_path,
+                r#"{
+                    "type": "claude",
+                    "access_token": "tok_claude_secret",
+                    "plan_type": "pro",
+                    "disabled": false,
+                    "expired": "2035-01-01T00:00:00Z"
+                }"#,
+            )
+            .unwrap();
+
+            let kimi_path = auths_dir.join("kimi-disabled.json");
+            std::fs::write(
+                &kimi_path,
+                r#"{
+                    "type": "kimi",
+                    "access_token": "tok_kimi_secret",
+                    "disabled": true,
+                    "expired": "2035-01-01T00:00:00Z"
+                }"#,
+            )
+            .unwrap();
+
+            let ws_profiles_dir = tmp.path().join("ws-profiles");
+            std::fs::create_dir_all(ws_profiles_dir.join(".gentle-ai")).unwrap();
+            std::fs::write(
+                ws_profiles_dir.join(".gentle-ai/profiles.json"),
+                r#"{"profiles":{"pi":{"orchestrator":"custompi/model-z"}}}"#,
+            )
+            .unwrap();
+
+            let missing_cfg = tmp.path().join("missing-config.yaml");
+            let missing_oc = tmp.path().join("missing-opencode.json");
+            let hudr2_cfg = tmp.path().join("hudr2.json");
+            std::fs::write(&hudr2_cfg, "{}").unwrap();
+
+            let (discovered, pi_only_available) = {
+                let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                unsafe {
+                    std::env::set_var("CLIPROXY_AUTHS_DIR", auths_dir.to_str().unwrap());
+                    std::env::set_var("CLIPROXY_CONFIG_PATH", missing_cfg.to_str().unwrap());
+                    std::env::set_var("OPENCODE_CONFIG_PATH", missing_oc.to_str().unwrap());
+                    std::env::set_var("HUDR2_CONFIG_PATH", hudr2_cfg.to_str().unwrap());
+                    std::env::remove_var("GENTLE_AI_PROFILES_PATH");
+                    std::env::remove_var("PI_PROFILES_PATH");
+                }
+                let mut accs = Vec::new();
+                discover_accounts_for(tmp.path().to_str().unwrap(), &mut accs);
+
+                // Vaciar auths_dir para probar workspace con solo .gentle-ai/profiles.json
+                let empty_auths = tmp.path().join("empty-auths");
+                std::fs::create_dir_all(&empty_auths).unwrap();
+                unsafe {
+                    std::env::set_var("CLIPROXY_AUTHS_DIR", empty_auths.to_str().unwrap());
+                }
+                let avail = is_available_for(ws_profiles_dir.to_str().unwrap());
+
+                unsafe {
+                    std::env::remove_var("CLIPROXY_AUTHS_DIR");
+                    std::env::remove_var("CLIPROXY_CONFIG_PATH");
+                    std::env::remove_var("OPENCODE_CONFIG_PATH");
+                    std::env::remove_var("HUDR2_CONFIG_PATH");
+                }
+                (accs, avail)
+            };
+
+            // 1. OAuth no-AGY y no-Codex no deben nacer sin consultar ni ser disparadas al loop de Google
+            let claude_acc = discovered
+                .iter()
+                .find(|a| a.prefix == "claude")
+                .expect("debe descubrir cuenta OAuth claude");
+            assert_eq!(claude_acc.reset_5h, "pro");
+            assert_eq!(claude_acc.rem_5h, 100);
+            assert!(!claude_acc.has_error);
+            assert!(
+                !needs_refresh(claude_acc),
+                "cuenta OAuth no-AGY válida en disco no debe pedir refresh remoto"
+            );
+
+            let kimi_acc = discovered
+                .iter()
+                .find(|a| a.prefix == "kimi")
+                .expect("debe descubrir cuenta OAuth kimi");
+            assert!(kimi_acc.has_error);
+            assert_eq!(kimi_acc.error_msg, "deshabilitado");
+
+            // Incluso si una cuenta OAuth no-AGY queda con UNFETCHED_RESET, NO debe enviar su token a QUOTA_URL
+            let mut claude_forced = AccountQuota {
+                prefix: "claude".to_string(),
+                auth_file: claude_path.to_str().unwrap().to_string(),
+                rem_5h: 0,
+                reset_5h: UNFETCHED_RESET.to_string(),
+                rem_wk: 0,
+                reset_wk: UNFETCHED_RESET.to_string(),
+                is_critical: false,
+                is_warning: false,
+                has_error: false,
+                error_msg: String::new(),
+                pools: vec![QuotaPool {
+                    label: "Claude Pro".to_string(),
+                    percent: 0,
+                    reset: UNFETCHED_RESET.to_string(),
+                    pace: "sin consultar".to_string(),
+                }],
+            };
+            let cache_path = tmp.path().join("cache.json");
+            let status =
+                fetch_quota_for_account_with_cache(&mut claude_forced, Some(&cache_path)).await;
+            assert_eq!(
+                status, 200,
+                "OAuth no-AGY debe validarse localmente en disco sin pegar a Google QUOTA_URL (msg={})",
+                claude_forced.error_msg
+            );
+            assert!(!claude_forced.has_error);
+            assert_eq!(claude_forced.reset_5h, "pro");
+            assert_eq!(claude_forced.rem_5h, 100);
+
+            // 2. API keys no deben entrar en barridos force_all ni perder su rem_5h/rem_wk manual/calculado
+            let mut api_acc = AccountQuota {
+                prefix: "tavoclaude".to_string(),
+                auth_file: "config.yaml#tavoclaude".to_string(),
+                rem_5h: 12,
+                reset_5h: "api-key".to_string(),
+                rem_wk: 45,
+                reset_wk: "api-key".to_string(),
+                is_critical: false,
+                is_warning: true,
+                has_error: false,
+                error_msg: String::new(),
+                pools: Vec::new(),
+            };
+            let active = HashSet::from(["tavoclaude".to_string()]);
+            assert!(
+                select_accounts_for_refresh(&[api_acc.clone()], Some("tavoclaude"), &active, true, false)
+                    .is_empty(),
+                "API key nunca debe entrar a select_accounts_for_refresh incluso con force_all=true"
+            );
+            let api_status =
+                fetch_quota_for_account_with_cache(&mut api_acc, Some(&cache_path)).await;
+            assert_eq!(api_status, 200);
+            assert_eq!(api_acc.rem_5h, 12);
+            assert_eq!(api_acc.rem_wk, 45);
+
+            // 3. Tres API keys saludables no deben bloquear el prewarm amarillo de cuentas AGY
+            let agy1 = AccountQuota {
+                prefix: "t6-agy1".to_string(),
+                auth_file: auths_dir.join("antigravity-t6-agy1.json").display().to_string(),
+                rem_5h: 15,
+                reset_5h: "1h 20m".to_string(),
+                rem_wk: 60,
+                reset_wk: "3d 0h".to_string(),
+                is_critical: false,
+                is_warning: true,
+                has_error: false,
+                error_msg: String::new(),
+                pools: vec![QuotaPool {
+                    label: "Gemini 3 Pro".to_string(),
+                    percent: 15,
+                    reset: "1h 20m".to_string(),
+                    pace: "ok".to_string(),
+                }],
+            };
+            let agy2 = AccountQuota {
+                prefix: "t6-agy2".to_string(),
+                auth_file: auths_dir.join("antigravity-t6-agy2.json").display().to_string(),
+                rem_5h: 0,
+                reset_5h: UNFETCHED_RESET.to_string(),
+                rem_wk: 0,
+                reset_wk: UNFETCHED_RESET.to_string(),
+                is_critical: false,
+                is_warning: false,
+                has_error: false,
+                error_msg: String::new(),
+                pools: Vec::new(),
+            };
+            let mut mixed_accounts = vec![agy1, agy2];
+            for idx in 1..=3 {
+                mixed_accounts.push(AccountQuota {
+                    prefix: format!("apikey{idx}"),
+                    auth_file: format!("config.yaml#apikey{idx}"),
+                    rem_5h: 100,
+                    reset_5h: "api-key".to_string(),
+                    rem_wk: 100,
+                    reset_wk: "api-key".to_string(),
+                    is_critical: false,
+                    is_warning: false,
+                    has_error: false,
+                    error_msg: String::new(),
+                    pools: Vec::new(),
+                });
+            }
+            let prewarm = select_yellow_zone_prewarm_candidates(
+                &mixed_accounts,
+                &HashSet::from(["t6-agy1".to_string()]),
+                "gemini-3-pro",
+                240,
+                2,
+            );
+            assert!(
+                prewarm.iter().any(|a| a.prefix == "t6-agy2"),
+                "API keys saludables no deben impedir prewarm de respaldo AGY: {:?}",
+                prewarm.iter().map(|a| &a.prefix).collect::<Vec<_>>()
+            );
+
+            // 4. opencode.json ignora zen/ y zenwarp/
+            let oc_json = r#"{
+                "provider": {
+                    "custom": {
+                        "models": {
+                            "zen/glm-5-free": {},
+                            "zenwarp/gpt-5": {},
+                            "tavoclaude/claude-opus-5-5": {}
+                        }
+                    }
+                }
+            }"#;
+            let parsed_oc = parse_api_key_accounts_from_opencode_json(oc_json);
+            assert_eq!(parsed_oc, vec![("tavoclaude".to_string(), "Claude".to_string())]);
+
+            // 5. Workspace con solo .gentle-ai/profiles.json debe habilitar disponibilidad
+            assert!(
+                pi_only_available,
+                "is_available_for debe devolver true en workspace con .gentle-ai/profiles.json"
+            );
+        });
+    }
+
+    #[test]
+    fn test_integraciones_errored_codex_agy_health_and_theme_rendering() {
+        use hudr2::models::{AccountQuota, AgentSession, QuotaPool, TelemetrySnapshot};
+        use hudr2::quotas::{
+            UNFETCHED_RESET, apply_quota_error, evaluate_account_for_model,
+            hydrate_accounts_from_cache, record_cached_quota_error_at,
+        };
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_path = tmp.path().join("quota-cache.json");
+
+        // 1. apply_quota_error en AGY 429 limpia is_critical / is_warning y evaluate_account_for_model no marca crítico
+        let mut agy_acc = AccountQuota {
+            prefix: "t6-agy-err".to_string(),
+            auth_file: "antigravity-t6-err.json".to_string(),
+            rem_5h: 3,
+            reset_5h: "2h 10m".to_string(),
+            rem_wk: 0,
+            reset_wk: "3d 0h".to_string(),
+            is_critical: true,
+            is_warning: true,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![QuotaPool {
+                label: "Gemini 3 Pro".to_string(),
+                percent: 3,
+                reset: "2h 10m".to_string(),
+                pace: "ok".to_string(),
+            }],
+        };
+        apply_quota_error(&mut agy_acc, 429, &serde_json::json!({}));
+        assert!(agy_acc.has_error);
+        assert_eq!(agy_acc.error_msg, "rate limited");
+        assert!(!agy_acc.is_critical);
+        assert!(!agy_acc.is_warning);
+        let eff = evaluate_account_for_model(&agy_acc, "gemini-3-pro");
+        assert!(!eff.is_critical && !eff.is_warning);
+
+        // 2. Codex 403 en caché e hidratación preserva "acceso denegado"
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let mut codex_acc = AccountQuota {
+            prefix: "t6-codex-err".to_string(),
+            auth_file: "t6-codex-err.json".to_string(),
+            rem_5h: 0,
+            reset_5h: UNFETCHED_RESET.to_string(),
+            rem_wk: 0,
+            reset_wk: UNFETCHED_RESET.to_string(),
+            is_critical: false,
+            is_warning: false,
+            has_error: false,
+            error_msg: String::new(),
+            pools: vec![QuotaPool {
+                label: "Codex Plus".to_string(),
+                percent: 0,
+                reset: UNFETCHED_RESET.to_string(),
+                pace: "sin consultar".to_string(),
+            }],
+        };
+        record_cached_quota_error_at(
+            &mut codex_acc,
+            403,
+            &serde_json::Value::Null,
+            now_epoch,
+            Some(&cache_path),
+        );
+        assert!(codex_acc.has_error);
+        assert_eq!(codex_acc.error_msg, "acceso denegado");
+
+        let mut hydrated_codex = AccountQuota {
+            has_error: false,
+            error_msg: String::new(),
+            ..codex_acc.clone()
+        };
+        hydrate_accounts_from_cache(
+            std::slice::from_mut(&mut hydrated_codex),
+            Some(&cache_path),
+        );
+        assert!(hydrated_codex.has_error);
+        assert_eq!(hydrated_codex.error_msg, "acceso denegado");
+
+        // 3. Tarjeta Integraciones con tema activo muestra error Codex (no [sin consultar]), sin Wk mint y sin ! 1 crític
+        let snap = TelemetrySnapshot {
+            agent_session: AgentSession {
+                local_prefix: Some("t6-agy-err".to_string()),
+                model: "gemini-3-pro".to_string(),
+                model_short: "gemini-3-pro".to_string(),
+                ..Default::default()
+            },
+            accounts: vec![agy_acc, hydrated_codex],
+            ..Default::default()
+        };
+        let collapsed = [false; 13];
+        let hidden = HashSet::new();
+        let out = ui::render_screen_tabbed(
+            &snap,
+            &collapsed,
+            None,
+            None,
+            &[],
+            &hidden,
+            56,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let raw = out.lines.join("\n");
+        let clean = ui::strip_ansi(&raw);
+        assert!(
+            clean.contains("acceso den"),
+            "Codex con error y UNFETCHED_RESET debe mostrar error y no [sin consultar]:\n{clean}"
+        );
+        assert!(
+            !clean.contains("[sin consultar]"),
+            "No debe ocultar error tras [sin consultar]:\n{clean}"
+        );
+        assert!(
+            !clean.contains("1 crític"),
+            "Cuenta con error no debe contarse como crític:\n{clean}"
+        );
+        let agy_line = out
+            .lines
+            .iter()
+            .find(|l| ui::strip_ansi(l).contains("Wk:"))
+            .expect("debe renderizar fila de AGY con Wk:");
+        assert!(
+            !agy_line.contains(HERDR_TOKYO_NIGHT_DAY.mint),
+            "Cuenta AGY con error no debe pintar Wk en mint:\n{}",
+            agy_line
+        );
+        let int_bounds = out
+            .bounds
+            .iter()
+            .find(|b| b.id == "integraciones")
+            .expect("debe registrar bounds de integraciones");
+        let int_raw = out.lines[int_bounds.start_line..=int_bounds.end_line].join("\n");
+        assert!(
+            agy_line.contains(HERDR_TOKYO_NIGHT_DAY.amber)
+                && int_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim)
+                && int_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary),
+            "Tarjeta Integraciones debe usar paleta del tema activo"
+        );
+    }
 }

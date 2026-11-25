@@ -225,16 +225,11 @@ pub fn hydrate_accounts_from_cache(accounts: &mut [AccountQuota], cache_path: Op
                 || matches!(status, 401 | 403)
                 || (now_epoch - rec.fetched_at) < ttl
             {
-                if status == 0 {
-                    acc.has_error = true;
-                    acc.error_msg = "sin red".to_string();
-                } else {
-                    apply_quota_error(
-                        acc,
-                        status,
-                        rec.error_body.as_ref().unwrap_or(&serde_json::Value::Null),
-                    );
-                }
+                apply_cached_error_status(
+                    acc,
+                    status,
+                    rec.error_body.as_ref().unwrap_or(&serde_json::Value::Null),
+                );
             }
         }
     }
@@ -270,6 +265,28 @@ pub fn record_cached_quota_at(
     }
 }
 
+fn codex_error_message(status: u16) -> &'static str {
+    match status {
+        401 => "expirado",
+        403 => "acceso denegado",
+        429 => "rate limited",
+        _ => "cuota no disponible",
+    }
+}
+
+fn apply_cached_error_status(acc: &mut AccountQuota, status: u16, err_val: &serde_json::Value) {
+    if status == 0 {
+        acc.has_error = true;
+        acc.error_msg = "sin red".to_string();
+        acc.is_critical = false;
+        acc.is_warning = false;
+    } else if is_codex_account(acc) {
+        mark_quota_unknown(acc, codex_error_message(status));
+    } else {
+        apply_quota_error(acc, status, err_val);
+    }
+}
+
 /// Registra un estado de error HTTP o de red (`status == 0`) en la caché con TTL de reintento,
 /// preservando los últimos datos conocidos en memoria para no borrar el aviso ante `DataChanged`.
 pub fn record_cached_quota_error_at(
@@ -279,12 +296,7 @@ pub fn record_cached_quota_error_at(
     fetched_at: i64,
     cache_path: Option<&Path>,
 ) {
-    if status == 0 {
-        acc.has_error = true;
-        acc.error_msg = "sin red".to_string();
-    } else {
-        apply_quota_error(acc, status, err_val);
-    }
+    apply_cached_error_status(acc, status, err_val);
 
     if let Ok(mut guard) = QUOTA_CACHE_STATE.lock() {
         if let Some(cp) = cache_path {
@@ -369,10 +381,11 @@ pub fn is_unfetched(acc: &AccountQuota) -> bool {
 pub fn is_codex_account(acc: &AccountQuota) -> bool {
     acc.prefix.to_lowercase().contains("codex")
         || acc.auth_file.to_lowercase().contains("codex")
-        || matches!(
-            acc.reset_5h.as_str(),
-            "plus" | "pro" | "team" | "free" | "codex"
-        )
+        || acc.reset_5h.eq_ignore_ascii_case("codex")
+        || acc
+            .pools
+            .iter()
+            .any(|p| p.label.to_ascii_lowercase().starts_with("codex"))
 }
 
 /// Comprueba si una cuenta corresponde a un perfil configurado vía API Key (prepago/saldo por tokens)
@@ -483,6 +496,34 @@ pub fn parse_api_key_accounts_from_yaml(content: &str) -> Vec<(String, String)> 
     accounts
 }
 
+fn is_builtin_virtual_provider(pfx: &str) -> bool {
+    matches!(
+        pfx.to_ascii_lowercase().as_str(),
+        "cliproxy" | "opencode" | "cpamc" | "relay" | "zen" | "zenwarp"
+    )
+}
+
+fn discover_profile_configs_for(target_dir: &str, has_explicit_auths: bool) -> Vec<PathBuf> {
+    if !has_explicit_auths {
+        return gentle_ai_profiles_candidates(target_dir);
+    }
+    let mut paths = Vec::new();
+    for env_key in ["GENTLE_AI_PROFILES_PATH", "PI_PROFILES_PATH"] {
+        if let Ok(path_str) = std::env::var(env_key) {
+            let p = PathBuf::from(path_str.trim());
+            if p.exists() {
+                paths.push(p);
+                return paths;
+            }
+        }
+    }
+    let local_profile = Path::new(target_dir).join(".gentle-ai").join("profiles.json");
+    if local_profile.exists() {
+        paths.push(local_profile);
+    }
+    paths
+}
+
 /// Extrae prefijos de cuenta y modelo configurados en `opencode.json` (`providers.<proxy>.models` y `agents`)
 pub fn parse_api_key_accounts_from_opencode_json(content: &str) -> Vec<(String, String)> {
     let mut accounts = Vec::new();
@@ -497,12 +538,7 @@ pub fn parse_api_key_accounts_from_opencode_json(content: &str) -> Vec<(String, 
                 if let Some(models_map) = prov_val.get("models").and_then(|m| m.as_object()) {
                     for (model_key, model_entry) in models_map {
                         if let Some((pfx, model_part)) = model_key.split_once('/') {
-                            if pfx.is_empty()
-                                || matches!(
-                                    pfx.to_ascii_lowercase().as_str(),
-                                    "cliproxy" | "opencode" | "cpamc" | "relay"
-                                )
-                            {
+                            if pfx.is_empty() || is_builtin_virtual_provider(pfx) {
                                 continue;
                             }
                             let name_str = model_entry
@@ -541,10 +577,7 @@ pub fn parse_api_key_accounts_from_profiles_json(content: &str) -> Vec<(String, 
                 let clean = crate::opencode::normalize_model_str(model_str);
                 if let Some((pfx, model_part)) = clean.split_once('/')
                     && !pfx.is_empty()
-                    && !matches!(
-                        pfx.to_ascii_lowercase().as_str(),
-                        "cliproxy" | "opencode" | "cpamc" | "relay"
-                    )
+                    && !is_builtin_virtual_provider(pfx)
                 {
                     let family = resolve_model_family(model_part).unwrap_or("Claude");
                     if !accounts.iter().any(|(p, _)| p.eq_ignore_ascii_case(pfx)) {
@@ -585,7 +618,7 @@ pub fn is_available_for(target_dir: &str) -> bool {
         }
     }
 
-    // Comprobar modelos en opencode.json si no hay entorno de auths explícito
+    // Comprobar modelos en opencode.json y perfiles en .gentle-ai/profiles.json
     let has_explicit_auths =
         std::env::var("CLIPROXY_AUTHS_DIR").is_ok() || std::env::var("CPAMC_AUTHS_DIR").is_ok();
     if !has_explicit_auths || std::env::var("OPENCODE_CONFIG_PATH").is_ok() {
@@ -595,6 +628,14 @@ pub fn is_available_for(target_dir: &str) -> bool {
             {
                 return true;
             }
+        }
+    }
+
+    for cfg in discover_profile_configs_for(target_dir, has_explicit_auths) {
+        if let Ok(c) = crate::paths::read_config_string(&cfg)
+            && !parse_api_key_accounts_from_profiles_json(&c).is_empty()
+        {
+            return true;
         }
     }
 
@@ -1073,13 +1114,6 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         _ => plan,
                     };
 
-                    let pools = vec![QuotaPool {
-                        label: format!("{provider_name} {plan_display}"),
-                        percent: 0,
-                        reset: UNFETCHED_RESET.to_string(),
-                        pace: "sin consultar".to_string(),
-                    }];
-
                     let is_disabled = val
                         .get("disabled")
                         .and_then(|d| d.as_bool())
@@ -1099,16 +1133,44 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         (false, String::new())
                     };
 
+                    let is_codex_oauth =
+                        cred_type.eq_ignore_ascii_case("codex") || provider_name == "Codex";
+                    let (rem_val, reset_val, pools) = if is_codex_oauth {
+                        (
+                            0,
+                            UNFETCHED_RESET.to_string(),
+                            vec![QuotaPool {
+                                label: format!("{provider_name} {plan_display}"),
+                                percent: 0,
+                                reset: UNFETCHED_RESET.to_string(),
+                                pace: "sin consultar".to_string(),
+                            }],
+                        )
+                    } else {
+                        let rem = if has_error { 0 } else { 100 };
+                        let pace = if has_error { "error" } else { "local" };
+                        (
+                            rem,
+                            badge.clone(),
+                            vec![QuotaPool {
+                                label: format!("{provider_name} {plan_display}"),
+                                percent: rem,
+                                reset: badge.clone(),
+                                pace: pace.to_string(),
+                            }],
+                        )
+                    };
+
                     if let Some(existing) = target_list
                         .iter_mut()
                         .find(|a| a.auth_file == path_str || a.prefix.eq_ignore_ascii_case(&prefix))
                     {
                         existing.prefix = prefix;
                         existing.auth_file = path_str;
-                        existing.rem_5h = 0;
-                        existing.rem_wk = 0;
-                        existing.reset_5h = UNFETCHED_RESET.to_string();
-                        existing.reset_wk = UNFETCHED_RESET.to_string();
+                        existing.rem_5h = rem_val;
+                        existing.rem_wk = rem_val;
+                        existing.reset_5h = reset_val.clone();
+                        existing.reset_wk = reset_val;
                         existing.has_error = has_error;
                         existing.error_msg = error_msg;
                         if existing.pools.is_empty()
@@ -1120,10 +1182,10 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
                         target_list.push(AccountQuota {
                             prefix,
                             auth_file: path_str,
-                            rem_5h: 0,
-                            reset_5h: UNFETCHED_RESET.to_string(),
-                            rem_wk: 0,
-                            reset_wk: UNFETCHED_RESET.to_string(),
+                            rem_5h: rem_val,
+                            reset_5h: reset_val.clone(),
+                            rem_wk: rem_val,
+                            reset_wk: reset_val,
                             is_critical: false,
                             is_warning: false,
                             has_error,
@@ -1232,27 +1294,25 @@ pub fn discover_accounts_for(target_dir: &str, target_list: &mut Vec<AccountQuot
     }
 
     // 4. Descubrimiento de perfiles de orquestador en profiles.json (Gentle AI / Pi)
-    if !has_explicit_auths {
-        for cfg_path in gentle_ai_profiles_candidates(target_dir) {
-            if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
-                let api_accounts = parse_api_key_accounts_from_profiles_json(&content);
-                for (prefix, provider) in api_accounts {
-                    let p_low = prefix.to_lowercase();
-                    let auth_file_str = format!("{}#{}", cfg_path.display(), prefix);
-                    seen_files.insert(auth_file_str.clone());
+    for cfg_path in discover_profile_configs_for(target_dir, has_explicit_auths) {
+        if let Ok(content) = crate::paths::read_config_string(&cfg_path) {
+            let api_accounts = parse_api_key_accounts_from_profiles_json(&content);
+            for (prefix, provider) in api_accounts {
+                let p_low = prefix.to_lowercase();
+                let auth_file_str = format!("{}#{}", cfg_path.display(), prefix);
+                seen_files.insert(auth_file_str.clone());
 
-                    if seen_prefixes.contains(&p_low) {
-                        continue;
-                    }
-                    seen_prefixes.insert(p_low);
-
-                    register_or_update_api_key_account(
-                        target_list,
-                        &prefix,
-                        &provider,
-                        &auth_file_str,
-                    );
+                if seen_prefixes.contains(&p_low) {
+                    continue;
                 }
+                seen_prefixes.insert(p_low);
+
+                register_or_update_api_key_account(
+                    target_list,
+                    &prefix,
+                    &provider,
+                    &auth_file_str,
+                );
             }
         }
     }
@@ -1296,8 +1356,8 @@ pub async fn fetch_quota_for_account_with_cache(
     if is_api_key(acc) {
         acc.has_error = false;
         acc.error_msg.clear();
-        acc.rem_5h = 100;
-        acc.rem_wk = 100;
+        acc.is_critical = false;
+        acc.is_warning = false;
         if acc.reset_5h.is_empty() || acc.reset_5h == UNFETCHED_RESET {
             acc.reset_5h = "api-key".to_string();
             acc.reset_wk = "api-key".to_string();
@@ -1373,12 +1433,7 @@ pub async fn fetch_quota_for_account_with_cache(
                         _ => mark_quota_unknown(acc, "respuesta sin cuota"),
                     }
                 } else {
-                    let message = match status {
-                        401 => "expirado",
-                        403 => "acceso denegado",
-                        429 => "rate limited",
-                        _ => "cuota no disponible",
-                    };
+                    let message = codex_error_message(status);
                     mark_quota_unknown(acc, message);
                     record_cached_quota_error_at(
                         acc,
@@ -1404,37 +1459,22 @@ pub async fn fetch_quota_for_account_with_cache(
         }
     }
 
-    // 3. Cuentas OAuth de plataforma / suscripción (Claude OAuth, Kimi, Muse, xAI, etc.):
-    // Tienen pools asignados y reset propio (no UNFETCHED_RESET), validan vigencia en disco
-    // sin enviar tokens a QUOTA_URL de Google
-    if !is_antigravity_account(acc) && (!acc.pools.is_empty() && acc.reset_5h != UNFETCHED_RESET) {
-        if Path::new(&acc.auth_file).exists()
-            && !acc.auth_file.contains('#')
-            && let Ok(content) = crate::paths::read_config_string(&acc.auth_file)
-            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
-        {
-            if v.get("disabled").and_then(|d| d.as_bool()) == Some(true) {
-                acc.has_error = true;
-                acc.error_msg = "deshabilitado".to_string();
-                return 200;
-            }
-            if let Some(exp_str) = v.get("expired").and_then(|e| e.as_str())
-                && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp_str)
-                && dt.timestamp() < chrono::Utc::now().timestamp()
-            {
-                acc.has_error = true;
-                acc.error_msg = "expirado".to_string();
-                return 200;
-            }
+    // 3. Cuentas OAuth no-Antigravity (Claude OAuth, Kimi, Muse, xAI, etc.):
+    // Validan vigencia en disco sin enviar jamás tokens de terceros a QUOTA_URL de Google.
+    if !is_antigravity_account(acc) {
+        if !Path::new(&acc.auth_file).exists() || acc.auth_file.contains('#') {
+            return 0;
         }
-        acc.has_error = false;
-        acc.error_msg.clear();
-        acc.rem_5h = 100;
-        acc.rem_wk = 100;
-        return 200;
+        let Ok(content) = crate::paths::read_config_string(&acc.auth_file) else {
+            return 0;
+        };
+        let Ok(cred) = serde_json::from_str::<serde_json::Value>(&content) else {
+            return 0;
+        };
+        return validate_non_agy_oauth_on_disk(acc, &cred);
     }
 
-    // 4. Cuentas Google Antigravity (y mocks de prueba) que consultan QUOTA_URL de Google
+    // 4. Cuentas Google Antigravity que consultan QUOTA_URL de Google
     if !Path::new(&acc.auth_file).exists() {
         return 0;
     }
@@ -1448,6 +1488,15 @@ pub async fn fetch_quota_for_account_with_cache(
         Ok(v) => v,
         Err(_) => return 0,
     };
+
+    let cred_type = val
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if !cred_type.is_empty() && !matches!(cred_type.as_str(), "antigravity" | "google" | "gemini") {
+        return validate_non_agy_oauth_on_disk(acc, &val);
+    }
 
     let token = match val.get("access_token").and_then(|t| t.as_str()) {
         Some(t) => t,
@@ -1494,9 +1543,66 @@ pub async fn fetch_quota_for_account_with_cache(
     0
 }
 
+fn validate_non_agy_oauth_on_disk(acc: &mut AccountQuota, cred: &serde_json::Value) -> u16 {
+    if cred.get("disabled").and_then(|d| d.as_bool()) == Some(true) {
+        acc.has_error = true;
+        acc.error_msg = "deshabilitado".to_string();
+        acc.is_critical = false;
+        acc.is_warning = false;
+        acc.rem_5h = 0;
+        acc.rem_wk = 0;
+        return 200;
+    }
+    if let Some(exp_str) = cred.get("expired").and_then(|e| e.as_str())
+        && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(exp_str)
+        && dt.timestamp() < chrono::Utc::now().timestamp()
+    {
+        acc.has_error = true;
+        acc.error_msg = "expirado".to_string();
+        acc.is_critical = false;
+        acc.is_warning = false;
+        acc.rem_5h = 0;
+        acc.rem_wk = 0;
+        return 200;
+    }
+    let badge = cred
+        .get("plan_type")
+        .and_then(|p| p.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            (!acc.reset_5h.is_empty() && acc.reset_5h != UNFETCHED_RESET)
+                .then(|| acc.reset_5h.clone())
+        })
+        .or_else(|| {
+            cred.get("type")
+                .and_then(|t| t.as_str())
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "sub".to_string());
+
+    acc.has_error = false;
+    acc.error_msg.clear();
+    acc.is_critical = false;
+    acc.is_warning = false;
+    acc.rem_5h = 100;
+    acc.rem_wk = 100;
+    acc.reset_5h = badge.clone();
+    acc.reset_wk = badge.clone();
+    for pool in &mut acc.pools {
+        pool.percent = 100;
+        pool.reset = badge.clone();
+        pool.pace = "local".to_string();
+    }
+    200
+}
+
 /// Registra estados de error HTTP (401 expirado, 403 TOS/verificación, 429 rate limit) en la cuenta.
 pub fn apply_quota_error(acc: &mut AccountQuota, status: u16, err_val: &serde_json::Value) {
     acc.has_error = true;
+    acc.is_critical = false;
+    acc.is_warning = false;
     let msg = err_val
         .get("error")
         .and_then(|e| e.get("message"))
@@ -1806,8 +1912,8 @@ pub fn evaluate_account_for_model(
             reset_5h: acc.reset_5h.clone(),
             rem_wk: acc.rem_wk,
             reset_wk: acc.reset_wk.clone(),
-            is_critical: acc.is_critical,
-            is_warning: acc.is_warning,
+            is_critical: !acc.has_error && acc.is_critical,
+            is_warning: !acc.has_error && acc.is_warning,
             family: "Gemini",
         };
     }
@@ -1870,8 +1976,8 @@ pub fn evaluate_account_for_model(
         reset_5h: acc.reset_5h.clone(),
         rem_wk: acc.rem_wk,
         reset_wk: acc.reset_wk.clone(),
-        is_critical: acc.is_critical,
-        is_warning: acc.is_warning,
+        is_critical: !acc.has_error && acc.is_critical,
+        is_warning: !acc.has_error && acc.is_warning,
         family: "Gemini",
     }
 }

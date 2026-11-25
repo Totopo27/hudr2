@@ -230,6 +230,11 @@ pub fn select_accounts_for_refresh(
     let mut tiered: Vec<(u8, AccountQuota)> = accounts
         .iter()
         .filter_map(|acc| {
+            // Las API keys se calculan localmente (presupuesto - costo); nunca deben entrar en
+            // barridos de refresh remoto ni siquiera con `force_all`.
+            if quotas::is_api_key(acc) {
+                return None;
+            }
             let p_low = acc.prefix.to_lowercase();
             let tier = if local_lower.as_deref() == Some(p_low.as_str()) {
                 0
@@ -268,7 +273,7 @@ pub fn select_yellow_zone_prewarm_candidates(
     target_ready: usize,
 ) -> Vec<AccountQuota> {
     let any_active_pressured = accounts.iter().any(|a| {
-        if !active_prefixes.contains(&a.prefix.to_lowercase()) {
+        if quotas::is_api_key(a) || !active_prefixes.contains(&a.prefix.to_lowercase()) {
             return false;
         }
         let eff = quotas::evaluate_account_for_model(a, active_model);
@@ -281,7 +286,10 @@ pub fn select_yellow_zone_prewarm_candidates(
     let already_ready = accounts
         .iter()
         .filter(|a| {
-            if active_prefixes.contains(&a.prefix.to_lowercase()) || a.has_error {
+            if quotas::is_api_key(a)
+                || active_prefixes.contains(&a.prefix.to_lowercase())
+                || a.has_error
+            {
                 return false;
             }
             let eff = quotas::evaluate_account_for_model(a, active_model);
@@ -302,7 +310,8 @@ pub fn select_yellow_zone_prewarm_candidates(
         .into_iter()
         .filter_map(|pfx| {
             accounts.iter().find(|a| {
-                a.prefix.eq_ignore_ascii_case(&pfx)
+                !quotas::is_api_key(a)
+                    && a.prefix.eq_ignore_ascii_case(&pfx)
                     && !quotas::is_fresh_within(a, max_fresh_age_secs)
             })
         })
