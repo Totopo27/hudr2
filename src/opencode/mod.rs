@@ -578,33 +578,43 @@ fn parse_tokens_from_value(val: &serde_json::Value) -> Option<i64> {
     if total > 0 { Some(total) } else { None }
 }
 
-fn record_tool_item(
-    tool_name: &str,
-    item: &serde_json::Value,
-    session: &mut AgentSession,
-    modified_files: &mut HashSet<String>,
-) {
-    session.tool_total += 1;
-    let lower = tool_name.to_lowercase();
-    if lower.contains("read") || lower.contains("glob") || lower.contains("grep") {
-        session.tool_reads += 1;
-    } else if lower.contains("write") || lower.contains("edit") || lower.contains("apply") {
-        session.tool_writes += 1;
-        if let Some(path_str) = extract_tool_path(item) {
-            let norm = path_str.trim().replace('\\', "/");
-            let clean = norm.strip_prefix("./").unwrap_or(&norm).trim();
-            if !clean.is_empty() {
-                modified_files.insert(clean.to_string());
+#[derive(Default)]
+struct ToolStatsAcc {
+    total: usize,
+    reads: usize,
+    writes: usize,
+    bash: usize,
+    engram: usize,
+    modified_files: HashSet<String>,
+}
+
+fn is_tool_type(t: &str) -> bool {
+    matches!(
+        t.trim().to_ascii_lowercase().as_str(),
+        "tool" | "tool-call" | "tool_call" | "tool-invocation" | "tool_use" | "toolcall"
+    )
+}
+
+fn record_tool_item(tool_name: &str, item: &serde_json::Value, acc: &mut ToolStatsAcc) {
+    if tool_name.trim().is_empty() {
+        return;
+    }
+    acc.total += 1;
+    match crate::models::classify_tool_name(tool_name) {
+        crate::models::ToolCategory::Engram => acc.engram += 1,
+        crate::models::ToolCategory::Read => acc.reads += 1,
+        crate::models::ToolCategory::Write => {
+            acc.writes += 1;
+            if let Some(path_str) = extract_tool_path(item) {
+                let norm = path_str.trim().replace('\\', "/");
+                let clean = norm.strip_prefix("./").unwrap_or(&norm).trim();
+                if !clean.is_empty() {
+                    acc.modified_files.insert(clean.to_string());
+                }
             }
         }
-    } else if lower.contains("bash")
-        || lower.contains("shell")
-        || lower.contains("exec")
-        || lower.contains("cmd")
-    {
-        session.tool_bash += 1;
-    } else if lower.contains("engram") || lower.contains("mem_") {
-        session.tool_engram += 1;
+        crate::models::ToolCategory::Bash => acc.bash += 1,
+        crate::models::ToolCategory::Other => {}
     }
 }
 
@@ -652,7 +662,8 @@ fn collect_message_stats(
         return;
     }
 
-    let mut modified_files = HashSet::new();
+    let mut msg_tools = ToolStatsAcc::default();
+    let mut part_tools = ToolStatsAcc::default();
     let mut found_active_tokens = false;
     let mut msg_active_tokens: Option<(i64, i64)> = None;
     let mut part_active_tokens: Option<(i64, i64)> = None;
@@ -764,30 +775,37 @@ fn collect_message_stats(
                 msg_cost += turn_cost;
 
                 // Uso de herramientas en contenido estructurado
+                let mut msg_had_content_tools = false;
                 if let Some(content_arr) = val.get("content").and_then(|c| c.as_array()) {
                     for item in content_arr {
-                        let t = item.get("type").and_then(|t| t.as_str());
-                        if t == Some("tool")
-                            || t == Some("tool-call")
-                            || t == Some("tool_call")
-                            || item.get("name").is_some()
-                            || item.get("tool").is_some()
-                        {
+                        let is_tool = item
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .is_some_and(is_tool_type)
+                            || item
+                                .get("tool")
+                                .and_then(|t| t.as_str())
+                                .is_some_and(|s| !s.trim().is_empty());
+                        if is_tool {
                             let tool_name = item
                                 .get("name")
                                 .and_then(|n| n.as_str())
                                 .or_else(|| item.get("tool").and_then(|t| t.as_str()))
                                 .unwrap_or("");
-                            record_tool_item(tool_name, item, session, &mut modified_files);
+                            if !tool_name.trim().is_empty() {
+                                msg_had_content_tools = true;
+                                record_tool_item(tool_name, item, &mut msg_tools);
+                            }
                         }
                     }
                 }
 
-                // Uso de herramientas en arrays alternativos (tool_calls / tools)
-                if let Some(tools_arr) = val
-                    .get("tool_calls")
-                    .or_else(|| val.get("tools"))
-                    .and_then(|t| t.as_array())
+                // Uso de herramientas en arrays alternativos (solo si content no aportó tool calls)
+                if !msg_had_content_tools
+                    && let Some(tools_arr) = val
+                        .get("tool_calls")
+                        .or_else(|| val.get("tools"))
+                        .and_then(|t| t.as_array())
                 {
                     for item in tools_arr {
                         let tool_name = item
@@ -795,8 +813,9 @@ fn collect_message_stats(
                             .and_then(|f| f.get("name"))
                             .and_then(|n| n.as_str())
                             .or_else(|| item.get("name").and_then(|n| n.as_str()))
+                            .or_else(|| item.get("tool").and_then(|t| t.as_str()))
                             .unwrap_or("");
-                        record_tool_item(tool_name, item, session, &mut modified_files);
+                        record_tool_item(tool_name, item, &mut msg_tools);
                     }
                 }
             }
@@ -813,7 +832,7 @@ fn collect_message_stats(
             "'unknown' AS type"
         };
         let type_filter = if has_column(conn, ptbl, "type") {
-            "AND type IN ('tool', 'tool-call', 'tool_call', 'step-finish', 'finish', 'tokens')"
+            "AND type IN ('tool', 'tool-call', 'tool_call', 'tool-invocation', 'tool_use', 'toolCall', 'step-finish', 'finish', 'tokens')"
         } else {
             ""
         };
@@ -907,18 +926,19 @@ fn collect_message_stats(
                     part_cost += turn_cost;
                 }
 
-                if effective_type == "tool"
-                    || effective_type == "tool-call"
-                    || effective_type == "tool_call"
-                    || val.get("tool").is_some()
-                    || val.get("name").is_some()
+                if is_tool_type(effective_type)
+                    || (!is_step_tokens
+                        && val
+                            .get("tool")
+                            .and_then(|t| t.as_str())
+                            .is_some_and(|s| !s.trim().is_empty()))
                 {
                     let tool_name = val
                         .get("name")
                         .and_then(|n| n.as_str())
                         .or_else(|| val.get("tool").and_then(|t| t.as_str()))
                         .unwrap_or("");
-                    record_tool_item(tool_name, &val, session, &mut modified_files);
+                    record_tool_item(tool_name, &val, &mut part_tools);
                 }
             }
         }
@@ -1002,8 +1022,18 @@ fn collect_message_stats(
         session.active_turn_tokens = session.tokens_input + session.tokens_output;
     }
 
+    let chosen_tools = if part_tools.total > 0 {
+        part_tools
+    } else {
+        msg_tools
+    };
+    session.tool_total = chosen_tools.total;
+    session.tool_reads = chosen_tools.reads;
+    session.tool_writes = chosen_tools.writes;
+    session.tool_bash = chosen_tools.bash;
+    session.tool_engram = chosen_tools.engram;
     session.attributed_changes = AttributedChanges {
-        files_count: modified_files.len(),
+        files_count: chosen_tools.modified_files.len(),
         additions: 0,
     };
 

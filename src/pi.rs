@@ -227,27 +227,33 @@ impl PiTail {
                                     continue;
                                 }
                                 self.session.tool_total += 1;
-                                if name == "read" || name == "grep" || name == "glob" {
-                                    self.session.tool_reads += 1;
-                                } else if name == "edit" || name == "write" {
-                                    self.session.tool_writes += 1;
-                                    if let Some(p) = item["arguments"]["path"]
-                                        .as_str()
-                                        .or_else(|| item["arguments"]["file_path"].as_str())
-                                        .or_else(|| item["arguments"]["filePath"].as_str())
-                                        .map(str::trim)
-                                        .filter(|p| !p.is_empty())
-                                    {
-                                        let norm = p.replace('\\', "/");
-                                        let clean = norm.strip_prefix("./").unwrap_or(&norm);
-                                        if !clean.is_empty() {
-                                            self.modified_files.insert(clean.to_string());
+                                match crate::models::classify_tool_name(&name) {
+                                    crate::models::ToolCategory::Engram => {
+                                        self.session.tool_engram += 1;
+                                    }
+                                    crate::models::ToolCategory::Read => {
+                                        self.session.tool_reads += 1;
+                                    }
+                                    crate::models::ToolCategory::Write => {
+                                        self.session.tool_writes += 1;
+                                        if let Some(p) = item["arguments"]["path"]
+                                            .as_str()
+                                            .or_else(|| item["arguments"]["file_path"].as_str())
+                                            .or_else(|| item["arguments"]["filePath"].as_str())
+                                            .map(str::trim)
+                                            .filter(|p| !p.is_empty())
+                                        {
+                                            let norm = p.replace('\\', "/");
+                                            let clean = norm.strip_prefix("./").unwrap_or(&norm);
+                                            if !clean.is_empty() {
+                                                self.modified_files.insert(clean.to_string());
+                                            }
                                         }
                                     }
-                                } else if name == "bash" || name == "shell" {
-                                    self.session.tool_bash += 1;
-                                } else if name.starts_with("mem_") || name.contains("engram") {
-                                    self.session.tool_engram += 1;
+                                    crate::models::ToolCategory::Bash => {
+                                        self.session.tool_bash += 1;
+                                    }
+                                    crate::models::ToolCategory::Other => {}
                                 }
                             }
                         }

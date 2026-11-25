@@ -9745,4 +9745,214 @@ api-keys:
             "Quick Peek debe renderizar usando el tema activo"
         );
     }
+
+    #[test]
+    fn test_tools_classification_dedup_opencode_and_pi() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use hudr2::opencode::{clear_message_stats_cache, read_opencode_session};
+        use hudr2::pi::{clear_pi_tail_cache, read_pi_session_file};
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("opencode.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                title TEXT,
+                model TEXT,
+                cost REAL,
+                tokens_input INTEGER,
+                tokens_output INTEGER,
+                time_created INTEGER,
+                time_updated INTEGER,
+                time_archived INTEGER
+            );
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                role TEXT,
+                time_created INTEGER,
+                time_updated INTEGER,
+                data TEXT
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                message_id TEXT,
+                type TEXT,
+                data TEXT,
+                time_created INTEGER,
+                time_updated INTEGER
+            );",
+        )
+        .unwrap();
+
+        let proj_dir = "d:/work/tools-test";
+        let now = 1_720_000_000i64;
+        conn.execute(
+            "INSERT INTO session VALUES ('ses_tools', ?, 'Tools Session', 'gemini-3.8-flash', 0.0, 100, 20, ?, ?, NULL)",
+            rusqlite::params![proj_dir, now - 100, now],
+        )
+        .unwrap();
+
+        // Message row also contains mirrored tools + a non-tool {"type":"file","name":"readme.md"}
+        let msg_json = r#"{
+            "role": "assistant",
+            "content": [
+                {"type":"tool","name":"read","state":{"input":{"path":"src/main.rs"}}},
+                {"type":"tool","name":"bash","state":{"input":{"command":"cargo test"}}},
+                {"type":"file","name":"readme.md"}
+            ]
+        }"#;
+        conn.execute(
+            "INSERT INTO message VALUES ('m1', 'ses_tools', 'assistant', ?, ?, ?)",
+            rusqlite::params![now - 50, now - 50, msg_json],
+        )
+        .unwrap();
+
+        // Part rows hold the canonical 8 tool calls + 1 step-finish with "name":"done"
+        let parts = [
+            ("p1", "tool", r#"{"type":"tool","tool":"mem_read"}"#),
+            ("p2", "tool", r#"{"type":"tool","tool":"mem_write"}"#),
+            ("p3", "tool", r#"{"type":"tool","tool":"todoread"}"#),
+            ("p4", "tool", r#"{"type":"tool","tool":"todowrite"}"#),
+            ("p5", "tool", r#"{"type":"tool","tool":"thread_reply"}"#),
+            ("p6", "tool", r#"{"type":"tool","tool":"read","state":{"input":{"path":"src/main.rs"}}}"#),
+            ("p7", "tool", r#"{"type":"tool","tool":"apply_patch","state":{"input":{"filePath":"./src\\a.rs"}}}"#),
+            ("p8", "tool", r#"{"type":"tool","tool":"bash"}"#),
+            ("p9", "step-finish", r#"{"type":"step-finish","name":"done","tokens":{"input":100,"output":20}}"#),
+        ];
+        for (idx, (pid, ptype, pdata)) in parts.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO part VALUES (?, 'ses_tools', 'm1', ?, ?, ?, ?)",
+                rusqlite::params![pid, ptype, pdata, now - 40 + idx as i64, now - 40 + idx as i64],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        unsafe {
+            std::env::set_var("OPENCODE_DB_PATH", db_path.to_str().unwrap());
+        }
+        clear_message_stats_cache();
+        let oc = read_opencode_session(proj_dir, &[], &[], None, None);
+        unsafe {
+            std::env::remove_var("OPENCODE_DB_PATH");
+        }
+        clear_message_stats_cache();
+
+        assert_eq!(oc.tool_total, 8, "No debe duplicar message+part ni contar file/step-finish");
+        assert_eq!(oc.tool_engram, 2, "mem_read y mem_write deben contar como Engram");
+        assert_eq!(oc.tool_reads, 1, "Solo 'read' cuenta como lectura (no mem_read/todoread/thread)");
+        assert_eq!(oc.tool_writes, 1, "Solo 'apply_patch' cuenta como escritura (no mem_write/todowrite)");
+        assert_eq!(oc.tool_bash, 1);
+        assert_eq!(oc.attributed_changes.files_count, 1);
+
+        // Pi .jsonl with expanded tool aliases + path normalization
+        clear_pi_tail_cache();
+        let jsonl_path = tmp.path().join("pi-tools.jsonl");
+        let mut f = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"message","message":{{"role":"assistant","model":"gpt-5.6-sol","provider":"cpamc","usage":{{"input":200,"output":50,"totalTokens":250}},"content":[{{"type":"toolCall","name":"find"}},{{"type":"toolCall","name":"ls"}},{{"type":"toolCall","name":"apply_patch","arguments":{{"path":"./src/a.rs"}}}},{{"type":"toolCall","name":"write_file","arguments":{{"file_path":"src\\a.rs"}}}},{{"type":"toolCall","name":"edit_file","arguments":{{"filePath":"src/a.rs"}}}},{{"type":"toolCall","name":"multi_edit","arguments":{{"path":"./src/a.rs"}}}},{{"type":"toolCall","name":"run_command"}},{{"type":"toolCall","name":"exec"}},{{"type":"toolCall","name":"cmd"}},{{"type":"toolCall","name":"mem_save"}},{{"type":"toolCall","name":"mem_read"}},{{"type":"toolCall","name":"todowrite"}}]}}}}"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let pi = read_pi_session_file(&jsonl_path, &[], "idle").unwrap();
+        clear_pi_tail_cache();
+
+        assert_eq!(pi.tool_total, 12);
+        assert_eq!(pi.tool_reads, 2, "find + ls");
+        assert_eq!(pi.tool_writes, 4, "apply_patch + write_file + edit_file + multi_edit");
+        assert_eq!(pi.tool_bash, 3, "run_command + exec + cmd");
+        assert_eq!(pi.tool_engram, 2, "mem_save + mem_read");
+        assert_eq!(
+            pi.attributed_changes.files_count, 1,
+            "./src/a.rs y src\\a.rs deben normalizarse a un solo archivo modificado"
+        );
+    }
+
+    #[test]
+    fn test_herramientas_card_renders_subagents_other_theme_and_narrow_fit() {
+        use hudr2::models::{AgentSession, SubagentInvocation};
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+
+        let mut state = AppState::new();
+        state.tabbed = true;
+        state.active_tab = hudr2::state::ActiveTab::Codigo;
+        state.collapsed_cards[9] = false;
+        state.snapshot.agent_session = AgentSession {
+            tool_total: 15,
+            tool_reads: 6,
+            tool_writes: 4,
+            tool_bash: 2,
+            tool_engram: 1,
+            subagent_invocations: vec![
+                SubagentInvocation {
+                    session_id: "sub1".to_string(),
+                    role: "explore".to_string(),
+                    status: "idle".to_string(),
+                    ..Default::default()
+                },
+                SubagentInvocation {
+                    session_id: "sub2".to_string(),
+                    role: "worker".to_string(),
+                    status: "working".to_string(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        for w in [32usize, 36usize, 48usize] {
+            let out = ui::render_screen_tabbed(
+                &state.snapshot,
+                &state.collapsed_cards,
+                None,
+                None,
+                &[],
+                &state.hidden_cards,
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(hudr2::state::ActiveTab::Codigo),
+            );
+            for line in &out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea en Herramientas excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let raw = out.lines.join("\n");
+            let clean = ui::strip_ansi(&raw);
+            assert!(
+                clean.contains("mem: 1"),
+                "mem: 1 no debe recortarse en ancho {w}:\n{clean}"
+            );
+            assert!(
+                clean.contains("$ 2 cmds") && clean.contains("2 otros"),
+                "Debe mostrar '$ 2 cmds' y reconciliar '2 otros' en ancho {w}:\n{clean}"
+            );
+            assert!(
+                clean.contains("subagentes: 2") || clean.contains("subag: 2"),
+                "Debe renderizar subagentes en ancho {w}:\n{clean}"
+            );
+            if w >= 42 {
+                assert!(clean.contains("6 lecturas") && clean.contains("4 escritu"));
+                assert!(clean.contains("subagentes: 2"));
+            } else {
+                assert!(clean.contains("6 lect") && clean.contains("4 escr"));
+            }
+            assert!(
+                raw.contains(HERDR_TOKYO_NIGHT_DAY.accent_secondary)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.cyan)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim),
+                "Tarjeta Herramientas debe usar colores del tema activo en ancho {w}"
+            );
+        }
+    }
 }

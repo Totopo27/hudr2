@@ -123,7 +123,7 @@
 ## 9. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `9` & `10`)
 - `Herramientas` is index `9` (key `9`).
 - `MCP` is index `10` (toggleable via mouse click).
-- **`Herramientas · <total> llamadas`:** `@ <reads> lecturas`, `@ <writes> escritu`, `mem: <engram>`, and optional `$ <bash> cmds` / `subagentes: <N>`.
+- **`Herramientas · <total> llamadas`:** Unified OpenCode/Pi tool classification (`classify_tool_name`, `message`/`part` dedup, non-tool JSON exclusion); renders `@ <reads> lecturas` / `lect`, `@ <writes> escritu` / `escr`, width-protected `mem: <engram>`, and optional Row 2 with `$ <bash> cmds`, `<N> otros`, and `subagentes: <N>` (`subag: <N>` at `< 38`).
 - **`MCP · <N> configurados` (· `<M> deshabilitado(s)` cuando aplica; `conf`/`off` en anchos `< 52`):** Lists deduplicated MCP servers (project `opencode.json` before `OPENCODE_CONFIG_DIR`; V2 `mcp.servers` before V1 legacy) with their real state: `● <name> [<tipo>·<scope>]` where `scope` is `proj` (archivo del proyecto), `global` (config de usuario) or `agente` (Pi / Gentle Shell), or `Sin servidores MCP configurados` when empty. The row preserves the right control (`[apagar]`/`[encender]`, `[off]`/`[on]` at `< 36`, `sin interruptor`/`fijo` for `AgentHost`). A row click emits `toggle_mcp`, edits only the effective (last) control field preserving CRLF/LF and key order, and displays `flash_notice` globally when `Integraciones` is off-tab; existing MCP configs are watched for external edits.
 
 ## 11. `Stack · Ecosistema` (`id: "ecosystem"`, index `11`, key `e`)

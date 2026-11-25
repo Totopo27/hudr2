@@ -399,3 +399,65 @@ pub struct TelemetrySnapshot {
     pub sound_mode: crate::sound::SoundMode,
     pub tabbed_view: bool,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    Engram,
+    Read,
+    Write,
+    Bash,
+    Other,
+}
+
+pub fn classify_tool_name(raw: &str) -> ToolCategory {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return ToolCategory::Other;
+    }
+
+    if lower.contains("engram")
+        || lower.starts_with("mem_")
+        || lower.contains("_mem_")
+        || lower.contains(":mem_")
+        || lower.contains("/mem_")
+    {
+        return ToolCategory::Engram;
+    }
+
+    if matches!(
+        lower.as_str(),
+        "todoread" | "todowrite" | "todo_read" | "todo_write"
+    ) || lower.contains("thread")
+    {
+        return ToolCategory::Other;
+    }
+
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if tokens
+        .iter()
+        .any(|t| matches!(*t, "write" | "edit" | "patch" | "multiedit" | "replace"))
+    {
+        return ToolCategory::Write;
+    }
+
+    if lower == "list_dir"
+        || tokens
+            .iter()
+            .any(|t| matches!(*t, "read" | "glob" | "grep" | "find" | "ls" | "rg" | "ripgrep" | "view"))
+    {
+        return ToolCategory::Read;
+    }
+
+    if tokens
+        .iter()
+        .any(|t| matches!(*t, "bash" | "shell" | "exec" | "cmd" | "command" | "terminal"))
+    {
+        return ToolCategory::Bash;
+    }
+
+    ToolCategory::Other
+}

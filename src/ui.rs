@@ -2434,24 +2434,62 @@ pub fn render_screen_tabbed(
     if !hidden_cards.contains("tools") && should_render_card("tools", tab) {
         let tools_start = lines.len();
         let tool_title = format!(
-            "{BOLD}{title_color}Herramientas{RESET} {TEXT_DIM}\u{00b7} {} llamadas{RESET}",
+            "{BOLD}{title_color}Herramientas{RESET} {text_dim}\u{00b7} {} llamadas{RESET}",
             snap.agent_session.tool_total
         );
         lines.push(draw_top(&tool_title, collapsed[9], width));
         if !collapsed[9] {
+            let (read_label, write_label) = if width >= 42 {
+                ("lecturas", "escritu")
+            } else {
+                ("lect", "escr")
+            };
             let p_read = format!(
-                "{MAGENTA}@ {} lecturas{RESET}",
+                "{accent_secondary}@ {} {read_label}{RESET}",
                 snap.agent_session.tool_reads
             );
-            let p_write = format!("{CYAN}@ {} escritu{RESET}", snap.agent_session.tool_writes);
-            let p_mem = format!("{CORAL}mem: {}{RESET}", snap.agent_session.tool_engram);
-            lines.push(draw_row(&format!("{p_read}  {p_write}"), &p_mem, width));
-            if snap.agent_session.tool_bash > 0 {
-                let p_bash = format!(
-                    "{label_color}$ {} cmds{RESET}",
-                    snap.agent_session.tool_bash
-                );
-                lines.push(draw_row(&p_bash, "", width));
+            let p_write = format!(
+                "{cyan}@ {} {write_label}{RESET}",
+                snap.agent_session.tool_writes
+            );
+            let p_mem = format!("{coral}mem: {}{RESET}", snap.agent_session.tool_engram);
+            let target_inner = width.saturating_sub(4);
+            let max_left = target_inner.saturating_sub(string_width(&p_mem) + 1);
+            let left_row1 = format!("{p_read}  {p_write}");
+            let safe_left_row1 = if string_width(&left_row1) > max_left {
+                truncate_to_width(&left_row1, max_left)
+            } else {
+                left_row1
+            };
+            lines.push(draw_row(&safe_left_row1, &p_mem, width));
+
+            let categorized = snap.agent_session.tool_reads
+                + snap.agent_session.tool_writes
+                + snap.agent_session.tool_bash
+                + snap.agent_session.tool_engram;
+            let tool_other = snap.agent_session.tool_total.saturating_sub(categorized);
+            let sub_count = snap.agent_session.subagent_invocations.len();
+            if snap.agent_session.tool_bash > 0 || tool_other > 0 || sub_count > 0 {
+                let mut left_parts = Vec::new();
+                if snap.agent_session.tool_bash > 0 {
+                    left_parts.push(format!(
+                        "{label_color}$ {} cmds{RESET}",
+                        snap.agent_session.tool_bash
+                    ));
+                }
+                if tool_other > 0 {
+                    left_parts.push(format!("{text_muted}{tool_other} otros{RESET}"));
+                }
+                let right_sub = if sub_count > 0 {
+                    if width >= 38 {
+                        format!("{accent_primary}subagentes: {sub_count}{RESET}")
+                    } else {
+                        format!("{accent_primary}subag: {sub_count}{RESET}")
+                    }
+                } else {
+                    String::new()
+                };
+                lines.push(draw_row(&left_parts.join("  "), &right_sub, width));
             }
         }
         lines.push(draw_bottom(width));
