@@ -31,3 +31,9 @@ notify = "8"
 [dev-dependencies]
 tempfile = "3.17"
 tokio = { version = "1.43", features = ["net", "io-util"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
