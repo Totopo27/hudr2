@@ -159,6 +159,86 @@ pub fn truncate_to_width(s: &str, max_width: usize) -> String {
     out
 }
 
+fn wrap_plain_text(text: &str, max_width: usize, max_lines: usize) -> Vec<String> {
+    let cap = max_width.max(4);
+    let max_rows = max_lines.max(1);
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        let word_w = string_width(word);
+        if current.is_empty() {
+            if word_w <= cap {
+                current.push_str(word);
+            } else {
+                let mut rest = word;
+                while !rest.is_empty() {
+                    if out.len() + 1 >= max_rows {
+                        out.push(truncate_to_width(rest, cap));
+                        return out;
+                    }
+                    let mut take_bytes = 0usize;
+                    let mut w = 0usize;
+                    for (idx, ch) in rest.char_indices() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if w + cw > cap && take_bytes > 0 {
+                            break;
+                        }
+                        w += cw;
+                        take_bytes = idx + ch.len_utf8();
+                    }
+                    out.push(rest[..take_bytes].to_string());
+                    rest = &rest[take_bytes..];
+                }
+            }
+        } else if string_width(&current) + 1 + word_w <= cap {
+            current.push(' ');
+            current.push_str(word);
+        } else if out.len() + 1 >= max_rows {
+            let remaining = format!("{current} {word}");
+            out.push(truncate_to_width(&remaining, cap));
+            return out;
+        } else {
+            out.push(current);
+            current = String::new();
+            if word_w <= cap {
+                current.push_str(word);
+            } else {
+                let mut rest = word;
+                while !rest.is_empty() {
+                    if out.len() + 1 >= max_rows {
+                        out.push(truncate_to_width(rest, cap));
+                        return out;
+                    }
+                    let mut take_bytes = 0usize;
+                    let mut w = 0usize;
+                    for (idx, ch) in rest.char_indices() {
+                        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        if w + cw > cap && take_bytes > 0 {
+                            break;
+                        }
+                        w += cw;
+                        take_bytes = idx + ch.len_utf8();
+                    }
+                    if string_width(rest) <= cap {
+                        current.push_str(rest);
+                        break;
+                    }
+                    out.push(rest[..take_bytes].to_string());
+                    rest = &rest[take_bytes..];
+                }
+            }
+        }
+    }
+    if !current.is_empty() && out.len() < max_rows {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
 fn format_invocation_clock(timestamp: Option<i64>) -> String {
     let Some(timestamp) = timestamp else {
         return "--".to_string();
@@ -2822,40 +2902,6 @@ pub fn render_screen_tabbed(
             } else {
                 for tool in &snap.ecosystem.tools {
                     let row_line_idx = lines.len();
-                    let left = if tool.is_installed {
-                        let ver_str = tool.version.as_deref().unwrap_or("");
-                        if tool.is_updating && width < 48 {
-                            format!("{mint}\u{25cf}{RESET} {text_primary}{}{RESET}", tool.name)
-                        } else if tool.is_updating {
-                            format!(
-                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
-                                tool.name, ver_str
-                            )
-                        } else if snap.check_updates
-                            && tool.update_available
-                            && let Some(ref up_ver) = tool.upstream_version
-                        {
-                            format!(
-                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET} {amber}\u{2191}{}{RESET}",
-                                tool.name, ver_str, up_ver
-                            )
-                        } else {
-                            format!(
-                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
-                                tool.name, ver_str
-                            )
-                        }
-                    } else if snap.check_updates
-                        && let Some(ref up_ver) = tool.upstream_version
-                    {
-                        format!(
-                            "{text_dim}\u{25cb} {} - (disp {}){RESET}",
-                            tool.name, up_ver
-                        )
-                    } else {
-                        format!("{text_dim}\u{25cb} {} -{RESET}", tool.name)
-                    };
-
                     let right = if tool.is_updating {
                         const SPINNER_FRAMES: &[char] = &['|', '/', '-', '\\'];
                         let is_done = tool
@@ -2916,6 +2962,54 @@ pub fn render_screen_tabbed(
                         format!("{amber}{btn_txt}{RESET}")
                     } else {
                         String::new()
+                    };
+
+                    let left = if tool.is_installed {
+                        let ver_str = tool.version.as_deref().unwrap_or("");
+                        if tool.is_updating && width < 48 {
+                            format!("{mint}\u{25cf}{RESET} {text_primary}{}{RESET}", tool.name)
+                        } else if tool.is_updating {
+                            format!(
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
+                                tool.name, ver_str
+                            )
+                        } else if snap.check_updates
+                            && tool.update_available
+                            && let Some(ref up_ver) = tool.upstream_version
+                        {
+                            let full_left = format!(
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET} {amber}\u{2191}{}{RESET}",
+                                tool.name, ver_str, up_ver
+                            );
+                            let avail_left = width.saturating_sub(4 + string_width(&right) + 1);
+                            if right.is_empty() || string_width(&full_left) <= avail_left {
+                                full_left
+                            } else {
+                                let compact_left = format!(
+                                    "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {amber}\u{2191}{}{RESET}",
+                                    tool.name, up_ver
+                                );
+                                if string_width(&compact_left) <= avail_left {
+                                    compact_left
+                                } else {
+                                    truncate_to_width(&compact_left, avail_left)
+                                }
+                            }
+                        } else {
+                            format!(
+                                "{mint}\u{25cf}{RESET} {text_primary}{}{RESET} {text_muted}{}{RESET}",
+                                tool.name, ver_str
+                            )
+                        }
+                    } else if snap.check_updates
+                        && let Some(ref up_ver) = tool.upstream_version
+                    {
+                        format!(
+                            "{text_dim}\u{25cb} {} - (disp {}){RESET}",
+                            tool.name, up_ver
+                        )
+                    } else {
+                        format!("{text_dim}\u{25cb} {} -{RESET}", tool.name)
                     };
 
                     lines.push(draw_row(&left, &right, width));
@@ -3117,10 +3211,12 @@ pub fn render_screen_tabbed(
         && let Some(notice) = flash_notice
     {
         let notice_color = flash_color(notice);
-        lines.push(truncate_to_width(
-            &format!("{BOLD}{notice_color} {notice}{RESET}"),
-            width,
-        ));
+        for chunk in wrap_plain_text(notice, width.saturating_sub(2).max(8), 3) {
+            lines.push(truncate_to_width(
+                &format!("{BOLD}{notice_color} {chunk}{RESET}"),
+                width,
+            ));
+        }
     }
 
     // Footer de atajos

@@ -11989,4 +11989,251 @@ api-keys:
             "DB offline debe usar coral del tema activo"
         );
     }
+
+    #[test]
+    fn test_ecosystem_semver_clean_version_offline_cache_backoff_and_go_major_path() {
+        use hudr2::ecosystem::{
+            UPSTREAM_CACHE_TTL_SECS, UpstreamCache, clean_version_output,
+            clear_upstream_attempt_backoff, is_newer_version, is_upstream_cache_expired,
+            merge_upstream_fetch_results, record_upstream_attempt, save_upstream_cache,
+            should_run_upstream_check, update_cmd_for_tool_target, upstream_cache_path_for,
+        };
+        use std::collections::HashMap;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_upstream_attempt_backoff();
+
+        // 1. SemVer 2.0.0 prerelease, trailing zeros, and invalid core rejection
+        assert!(is_newer_version("v4.5.1-main.14f44d", "v4.5.1"));
+        assert!(!is_newer_version("v4.5.1", "v4.5.1-rc.1"));
+        assert!(is_newer_version("v1.0.0-rc.2", "v1.0.0-rc.10"));
+        assert!(is_newer_version("v1.0.0-alpha.1", "v1.0.0-beta.1"));
+        assert!(!is_newer_version("v1.0.0-beta.1", "v1.0.0-alpha.1"));
+        assert!(!is_newer_version("v1.2", "v1.2.0"));
+        assert!(!is_newer_version("v1.2.0", "v1.2"));
+        assert!(is_newer_version("v1.2", "v1.2.1"));
+        assert!(!is_newer_version("v1.foo.5", "v1.6.0"));
+        assert!(!is_newer_version("v1.0.0", "v1.foo.5"));
+
+        // 2. clean_version_output strips optional "version" keyword
+        assert_eq!(
+            clean_version_output("gentle-ai", "gentle-ai version 4.3.1"),
+            "v4.3.1"
+        );
+        assert_eq!(
+            clean_version_output("engram", "engram version v3.6.2"),
+            "v3.6.2"
+        );
+
+        // 3. Offline cache handling + poisoned all-None cache expiration + retry backoff
+        let all_none = vec![
+            ("pi".to_string(), None),
+            ("hudr2".to_string(), None),
+            ("gentle-shell".to_string(), None),
+            ("gentle-ai".to_string(), None),
+            ("engram".to_string(), None),
+            ("herdr".to_string(), None),
+        ];
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (merged_empty, should_persist_empty) =
+            merge_upstream_fetch_results(all_none.clone(), None, now);
+        assert!(!should_persist_empty);
+        assert_eq!(merged_empty.last_checked_unix, 0);
+
+        let mut old_versions = HashMap::new();
+        old_versions.insert("pi".to_string(), Some("v1.5.0".to_string()));
+        let old_cache = UpstreamCache {
+            last_checked_unix: now.saturating_sub(120),
+            versions: old_versions,
+        };
+        let (merged_old, should_persist_old) =
+            merge_upstream_fetch_results(all_none.clone(), Some(&old_cache), now);
+        assert!(!should_persist_old);
+        assert_eq!(merged_old.last_checked_unix, old_cache.last_checked_unix);
+        assert_eq!(
+            merged_old.versions.get("pi").and_then(|v| v.as_deref()),
+            Some("v1.5.0")
+        );
+
+        let mut partial = all_none;
+        partial[4] = ("engram".to_string(), Some("v3.7.0".to_string()));
+        let (merged_partial, should_persist_partial) =
+            merge_upstream_fetch_results(partial, Some(&old_cache), now);
+        assert!(should_persist_partial);
+        assert_eq!(merged_partial.last_checked_unix, now);
+        assert_eq!(
+            merged_partial.versions.get("pi").and_then(|v| v.as_deref()),
+            Some("v1.5.0")
+        );
+        assert_eq!(
+            merged_partial
+                .versions
+                .get("engram")
+                .and_then(|v| v.as_deref()),
+            Some("v3.7.0")
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("hudr2.json");
+        std::fs::write(&cfg, "{}").unwrap();
+        let cache_path = upstream_cache_path_for(Some(&cfg));
+
+        let mut poisoned_versions = HashMap::new();
+        poisoned_versions.insert("pi".to_string(), None);
+        poisoned_versions.insert("engram".to_string(), None);
+        save_upstream_cache(
+            &cache_path,
+            &UpstreamCache {
+                last_checked_unix: now,
+                versions: poisoned_versions,
+            },
+        )
+        .unwrap();
+        assert!(
+            is_upstream_cache_expired(Some(&cfg)),
+            "Cache solo con None debe considerarse expirado aunque last_checked_unix sea reciente"
+        );
+
+        record_upstream_attempt();
+        assert!(
+            !should_run_upstream_check(Some(&cfg), true, false),
+            "Backoff tras intento fallido debe evitar reintento automático inmediato"
+        );
+        assert!(
+            should_run_upstream_check(Some(&cfg), true, true),
+            "force=true (manual 'r' o toggle) debe omitir backoff cuando el caché está expirado"
+        );
+
+        save_upstream_cache(
+            &cache_path,
+            &UpstreamCache {
+                last_checked_unix: now.saturating_sub(UPSTREAM_CACHE_TTL_SECS / 2),
+                versions: old_cache.versions,
+            },
+        )
+        .unwrap();
+        assert!(
+            !should_run_upstream_check(Some(&cfg), true, true),
+            "Caché válido no expirado no debe disparar nuevo fetch"
+        );
+        clear_upstream_attempt_backoff();
+
+        // 4. Dynamic Go major path for gentle-ai on Windows
+        if cfg!(target_os = "windows") {
+            let (bin5, args5) = update_cmd_for_tool_target("gentle-ai", Some("v5.1.0")).unwrap();
+            assert_eq!(bin5, "go");
+            assert_eq!(
+                args5,
+                vec![
+                    "install",
+                    "github.com/gentleman-programming/gentle-ai/v5/cmd/gentle-ai@latest"
+                ]
+            );
+            let (bin4, args4) = update_cmd_for_tool_target("gentle-ai", Some("v4.9.0")).unwrap();
+            assert_eq!(bin4, "go");
+            assert_eq!(
+                args4,
+                vec![
+                    "install",
+                    "github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@latest"
+                ]
+            );
+            let (_bin_none, args_none) = update_cmd_for_tool_target("gentle-ai", None).unwrap();
+            assert_eq!(
+                args_none,
+                vec![
+                    "install",
+                    "github.com/gentleman-programming/gentle-ai/v4/cmd/gentle-ai@latest"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn test_stack_tab4_assisted_flash_notice_wrapping_and_narrow_update_button_protection() {
+        use hudr2::ecosystem::assisted_update_notice;
+        use hudr2::models::{EcosystemTelemetry, ToolVersionInfo};
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        let mut st = AppState::new();
+        st.snapshot.ecosystem = EcosystemTelemetry {
+            tools: vec![
+                ToolVersionInfo {
+                    name: "hudr2".to_string(),
+                    version: Some("v0.1.0".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v0.2.0".to_string()),
+                    update_available: true,
+                    ..Default::default()
+                },
+                ToolVersionInfo {
+                    name: "gentle-shell".to_string(),
+                    version: Some("v4.5.1-main.14f44d".to_string()),
+                    is_installed: true,
+                    upstream_version: Some("v4.7.0".to_string()),
+                    update_available: true,
+                    ..Default::default()
+                },
+            ],
+        };
+        let notice = assisted_update_notice("hudr2").unwrap();
+
+        for w in [36usize, 48] {
+            let out = ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                Some(notice),
+                None,
+                &[],
+                &HashSet::new(),
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Stack),
+            );
+            for line in &out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea en Tab 4 excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let joined_words = out
+                .lines
+                .iter()
+                .map(|l| ui::strip_ansi(l))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(
+                joined_words.contains("cargo install --git https://github.com/Totopo27/hudr2"),
+                "Tab 4 debe envolver flash_notice completo en ancho {w}:\n{}",
+                ui::strip_ansi(&out.lines.join("\n"))
+            );
+            let eb = out
+                .bounds
+                .iter()
+                .find(|b| b.id == "ecosystem")
+                .expect("debe existir CardBounds ecosystem");
+            let stack_clean = ui::strip_ansi(&out.lines[eb.start_line..=eb.end_line].join("\n"));
+            if w == 48 {
+                assert!(
+                    stack_clean.contains("[asistido]") && stack_clean.contains("[actualizar]"),
+                    "Ancho 48 debe conservar [asistido] y [actualizar]:\n{stack_clean}"
+                );
+            } else {
+                assert!(
+                    stack_clean.contains("[\u{2191}]"),
+                    "Ancho 36 debe conservar botón [↑] sin truncarse:\n{stack_clean}"
+                );
+            }
+        }
+    }
 }

@@ -106,7 +106,20 @@ pub fn clean_version_output(tool_name: &str, raw: &str) -> String {
         }
     }
 
-    let clean = v.strip_prefix('v').unwrap_or(v).trim();
+    if v.len() >= 7 && v[..7].eq_ignore_ascii_case("version") {
+        let after = &v[7..];
+        if after.is_empty()
+            || after.starts_with(|c: char| c.is_whitespace() || c == ':' || c == '=')
+        {
+            v = after.trim_start_matches(|c: char| c.is_whitespace() || c == ':' || c == '=');
+        }
+    }
+
+    let clean = v
+        .strip_prefix('v')
+        .or_else(|| v.strip_prefix('V'))
+        .unwrap_or(v)
+        .trim();
     if clean.is_empty() {
         "-".to_string()
     } else {
@@ -295,6 +308,34 @@ pub fn update_cmd_for_tool(name: &str) -> Option<(&'static str, Vec<&'static str
         "herdr" => Some(("herdr", vec!["update"])),
         _ => None,
     }
+}
+
+/// Resuelve binario y argumentos de actualización considerando `target_version`
+/// para soportar cambios de ruta mayor en módulos Go de Windows (`gentle-ai/vN`).
+pub fn update_cmd_for_tool_target(
+    name: &str,
+    target_version: Option<&str>,
+) -> Option<(String, Vec<String>)> {
+    if name == "gentle-ai" && cfg!(target_os = "windows") {
+        let major = target_version
+            .and_then(|v| {
+                let core = v.trim().trim_start_matches(['v', 'V']);
+                core.split('.').next()?.parse::<u64>().ok()
+            })
+            .unwrap_or(4);
+        let pkg = if major >= 2 {
+            format!("github.com/gentleman-programming/gentle-ai/v{major}/cmd/gentle-ai@latest")
+        } else {
+            "github.com/gentleman-programming/gentle-ai/cmd/gentle-ai@latest".to_string()
+        };
+        return Some(("go".to_string(), vec!["install".to_string(), pkg]));
+    }
+    update_cmd_for_tool(name).map(|(bin, args)| {
+        (
+            bin.to_string(),
+            args.into_iter().map(str::to_string).collect(),
+        )
+    })
 }
 
 /// Devuelve instrucciones asistidas para herramientas que deben actualizarse fuera
@@ -590,6 +631,19 @@ fn sync_active_windows_binary(bin_name: &str, deadline: Instant) {
 /// seguro y no bloqueante con timeout de 120s, reportando progreso en tiempo real a `on_progress`.
 pub fn execute_tool_update_with_progress<F>(
     name: &str,
+    on_progress: F,
+) -> Result<String, String>
+where
+    F: FnMut(u8, &str, usize, u64) + Send,
+{
+    execute_tool_update_with_progress_target(name, None, on_progress)
+}
+
+/// Variante de [`execute_tool_update_with_progress`] que recibe `target_version` upstream
+/// para resolver paquetes con sufijo mayor (como `gentle-ai` en Windows).
+pub fn execute_tool_update_with_progress_target<F>(
+    name: &str,
+    target_version: Option<&str>,
     mut on_progress: F,
 ) -> Result<String, String>
 where
@@ -606,12 +660,12 @@ where
         );
     }
 
-    let (bin, args) = update_cmd_for_tool(name)
+    let (bin, args) = update_cmd_for_tool_target(name, target_version)
         .ok_or_else(|| format!("no hay comando de actualización definido para '{name}'"))?;
 
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = std::process::Command::new("cmd");
-        c.args(["/C", bin]);
+        c.args(["/C", &bin]);
         for arg in &args {
             c.arg(arg);
         }
@@ -623,7 +677,7 @@ where
         }
         c
     } else {
-        let mut c = std::process::Command::new(bin);
+        let mut c = std::process::Command::new(&bin);
         for arg in &args {
             c.arg(arg);
         }
@@ -713,22 +767,80 @@ where
     }
 }
 
-/// Compara dos versiones semver normalizadas (`vX.Y.Z[-tag]`).
+fn parse_semver(v: &str) -> Option<(Vec<u64>, Option<Vec<&str>>)> {
+    let trimmed = v.trim();
+    let stripped = trimmed
+        .strip_prefix('v')
+        .or_else(|| trimmed.strip_prefix('V'))
+        .unwrap_or(trimmed);
+    let no_build = stripped.split('+').next().unwrap_or(stripped);
+    if no_build.is_empty() {
+        return None;
+    }
+    let (core_str, pre_opt) = match no_build.split_once('-') {
+        Some((c, p)) if !p.is_empty() => (c, Some(p.split('.').collect::<Vec<&str>>())),
+        Some((c, _)) => (c, None),
+        None => (no_build, None),
+    };
+    let mut core = Vec::new();
+    for seg in core_str.split('.') {
+        if seg.is_empty() {
+            return None;
+        }
+        core.push(seg.parse::<u64>().ok()?);
+    }
+    if core.is_empty() {
+        return None;
+    }
+    if let Some(ref pre) = pre_opt
+        && pre.iter().any(|p| p.is_empty())
+    {
+        return None;
+    }
+    Some((core, pre_opt))
+}
+
+fn compare_prerelease(cur: &[&str], up: &[&str]) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    for (a, b) in cur.iter().zip(up.iter()) {
+        let ord = match (a.parse::<u64>(), b.parse::<u64>()) {
+            (Ok(na), Ok(nb)) => na.cmp(&nb),
+            (Ok(_), Err(_)) => Ordering::Less,
+            (Err(_), Ok(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => a.cmp(b),
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    cur.len().cmp(&up.len())
+}
+
+/// Compara dos versiones SemVer 2.0.0 normalizadas (`vX.Y.Z[-tag]`).
 /// Devuelve `true` si `upstream` es estrictamente mayor que `current`.
 pub fn is_newer_version(current: &str, upstream: &str) -> bool {
-    let parse_nums = |v: &str| -> Vec<u64> {
-        let v = v.strip_prefix('v').unwrap_or(v);
-        let core = v.split(['-', '+']).next().unwrap_or(v);
-        core.split('.')
-            .filter_map(|part| part.parse::<u64>().ok())
-            .collect()
-    };
-    let cur_parts = parse_nums(current);
-    let up_parts = parse_nums(upstream);
-    if cur_parts.is_empty() || up_parts.is_empty() {
+    use std::cmp::Ordering;
+    let (Some((cur_core, cur_pre)), Some((up_core, up_pre))) =
+        (parse_semver(current), parse_semver(upstream))
+    else {
         return false;
+    };
+    let max_len = cur_core.len().max(up_core.len());
+    for i in 0..max_len {
+        let c = *cur_core.get(i).unwrap_or(&0);
+        let u = *up_core.get(i).unwrap_or(&0);
+        match u.cmp(&c) {
+            Ordering::Greater => return true,
+            Ordering::Less => return false,
+            Ordering::Equal => {}
+        }
     }
-    up_parts > cur_parts
+    match (cur_pre.as_deref(), up_pre.as_deref()) {
+        (Some(_), None) => true,
+        (None, Some(_)) => false,
+        (None, None) => false,
+        (Some(cp), Some(up)) => compare_prerelease(cp, up) == Ordering::Less,
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
@@ -756,10 +868,29 @@ pub fn save_upstream_cache(path: &std::path::Path, cache: &UpstreamCache) -> std
 }
 
 pub const UPSTREAM_CACHE_TTL_SECS: u64 = 3 * 3600; // 3 horas
+pub const UPSTREAM_RETRY_COOLDOWN_SECS: u64 = 300; // 5 minutos ante fallo/offline
+
+static LAST_UPSTREAM_ATTEMPT: LazyLock<Mutex<Option<Instant>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+pub fn clear_upstream_attempt_backoff() {
+    if let Ok(mut guard) = LAST_UPSTREAM_ATTEMPT.lock() {
+        *guard = None;
+    }
+}
+
+pub fn record_upstream_attempt() {
+    if let Ok(mut guard) = LAST_UPSTREAM_ATTEMPT.lock() {
+        *guard = Some(Instant::now());
+    }
+}
 
 pub fn is_upstream_cache_expired(config_path: Option<&std::path::Path>) -> bool {
     let path = upstream_cache_path_for(config_path);
     if let Some(cache) = load_upstream_cache(&path) {
+        if !cache.versions.values().any(Option::is_some) {
+            return true;
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -768,6 +899,52 @@ pub fn is_upstream_cache_expired(config_path: Option<&std::path::Path>) -> bool 
     } else {
         true
     }
+}
+
+pub fn should_run_upstream_check(
+    config_path: Option<&std::path::Path>,
+    check_updates: bool,
+    force: bool,
+) -> bool {
+    if !check_updates || !is_upstream_cache_expired(config_path) {
+        return false;
+    }
+    if force {
+        return true;
+    }
+    if let Ok(guard) = LAST_UPSTREAM_ATTEMPT.lock()
+        && let Some(last) = *guard
+    {
+        return last.elapsed() >= Duration::from_secs(UPSTREAM_RETRY_COOLDOWN_SECS);
+    }
+    true
+}
+
+pub fn merge_upstream_fetch_results(
+    fetched: Vec<(String, Option<String>)>,
+    old_cache: Option<&UpstreamCache>,
+    now_unix: u64,
+) -> (UpstreamCache, bool) {
+    let any_fresh = fetched.iter().any(|(_, tag)| tag.is_some());
+    let mut versions = std::collections::HashMap::new();
+    for (name, tag) in fetched {
+        let resolved = tag.or_else(|| {
+            old_cache
+                .and_then(|c| c.versions.get(&name))
+                .cloned()
+                .flatten()
+        });
+        versions.insert(name, resolved);
+    }
+    let cache = UpstreamCache {
+        last_checked_unix: if any_fresh {
+            now_unix
+        } else {
+            old_cache.map(|c| c.last_checked_unix).unwrap_or(0)
+        },
+        versions,
+    };
+    (cache, any_fresh)
 }
 
 pub fn apply_upstream_cache_to_ecosystem(eco: &mut EcosystemTelemetry, cache: &UpstreamCache) {
@@ -857,26 +1034,12 @@ pub async fn fetch_upstream_versions_with_cache(
         .unwrap_or_default()
         .as_secs();
 
-    let mut versions = std::collections::HashMap::new();
-    for (name, tag) in [t0, t1, t2, t3, t4, t5] {
-        versions.insert(name, tag);
+    let old_cache = load_upstream_cache(&path);
+    let (cache, should_persist) =
+        merge_upstream_fetch_results(vec![t0, t1, t2, t3, t4, t5], old_cache.as_ref(), now);
+    if should_persist {
+        let _ = save_upstream_cache(&path, &cache);
     }
-
-    if let Some(old_cache) = load_upstream_cache(&path) {
-        for (name, tag) in &mut versions {
-            if tag.is_none()
-                && let Some(old_val) = old_cache.versions.get(name)
-            {
-                *tag = old_val.clone();
-            }
-        }
-    }
-
-    let cache = UpstreamCache {
-        last_checked_unix: now,
-        versions,
-    };
-    let _ = save_upstream_cache(&path, &cache);
     cache
 }
 

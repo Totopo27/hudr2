@@ -459,6 +459,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 last_quota_refresh = tokio::time::Instant::now();
                 let _ = tx_timer.send(MainMsg::QuotaTick);
             }
+
+            let should_check_upstream = {
+                let st = timer_state.read().await;
+                hudr2::ecosystem::should_run_upstream_check(
+                    st.config_path.as_deref(),
+                    st.check_updates,
+                    false,
+                )
+            };
+            if should_check_upstream {
+                spawn_upstream_check_with_force(timer_state.clone(), tx_timer.clone(), false);
+            }
         }
     });
 
@@ -1003,6 +1015,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             });
                                         }
                                         KeyCode::Char('r') => {
+                                            spawn_upstream_check_with_force(
+                                                app_state.clone(),
+                                                tx.clone(),
+                                                true,
+                                            );
                                             let state_ref = app_state.clone();
                                             let tx_done = tx.clone();
                                             tokio::spawn(async move {
@@ -1132,12 +1149,21 @@ fn spawn_upstream_check(
     app_state: Arc<RwLock<state::AppState>>,
     wake_tx: mpsc::UnboundedSender<MainMsg>,
 ) {
+    spawn_upstream_check_with_force(app_state, wake_tx, true);
+}
+
+fn spawn_upstream_check_with_force(
+    app_state: Arc<RwLock<state::AppState>>,
+    wake_tx: mpsc::UnboundedSender<MainMsg>,
+    force: bool,
+) {
     tokio::spawn(async move {
         let (check_updates, cfg_path) = {
             let st = app_state.read().await;
             (st.check_updates, st.config_path.clone())
         };
-        if check_updates && hudr2::ecosystem::is_upstream_cache_expired(cfg_path.as_deref()) {
+        if hudr2::ecosystem::should_run_upstream_check(cfg_path.as_deref(), check_updates, force) {
+            hudr2::ecosystem::record_upstream_attempt();
             let cache =
                 hudr2::ecosystem::fetch_upstream_versions_with_cache(cfg_path.as_deref()).await;
             let mut st = app_state.write().await;
@@ -1167,6 +1193,7 @@ fn spawn_tool_update(
         }
 
         // 1. Marcar como actualizándose en el snapshot y avisar con flash notice
+        let mut target_version = None;
         {
             let mut st = app_state.write().await;
             if let Some(tool) = st
@@ -1179,6 +1206,7 @@ fn spawn_tool_update(
                 if tool.is_updating {
                     return;
                 }
+                target_version = tool.upstream_version.clone();
                 tool.is_updating = true;
                 tool.update_progress = Some(hudr2::models::ToolUpdateProgress {
                     percent: 0,
@@ -1201,8 +1229,9 @@ fn spawn_tool_update(
         let tool_name_for_cb = tool_name.clone();
 
         let res = tokio::task::spawn_blocking(move || {
-            hudr2::ecosystem::execute_tool_update_with_progress(
+            hudr2::ecosystem::execute_tool_update_with_progress_target(
                 &tool_for_cmd,
+                target_version.as_deref(),
                 move |pct, stage, sp_idx, elapsed| {
                     let _ = wake_tx_progress.send(MainMsg::ToolProgress {
                         name: tool_name_for_cb.clone(),
