@@ -1,6 +1,5 @@
 use crate::config::{
-    ACCENT_PRIMARY, AMBER, BOLD, CORAL, CYAN, MAGENTA, MINT, RESET, TEXT_DIM, TEXT_MUTED,
-    TEXT_PRIMARY,
+    AMBER, BOLD, CORAL, MAGENTA, MINT, RESET, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
 };
 use crate::models::TelemetrySnapshot;
 use crate::state::{ActiveTab, TabBounds};
@@ -2522,31 +2521,42 @@ pub fn render_screen_tabbed(
         });
     }
 
-    // 8. Engram Card (7)
+    // 8. Engram Card (8)
     if !hidden_cards.contains("engram") && should_render_card("engram", tab) {
         let engram_start = lines.len();
+        let proj_name = if !snap.engram.project.is_empty() {
+            snap.engram.project.as_str()
+        } else {
+            folder
+        };
+        let proj_disp = truncate_plain(proj_name, width.saturating_sub(22).max(6));
+        let daemon_glyph = if snap.engram.daemon_online {
+            format!("{mint}^{RESET}")
+        } else {
+            format!("{text_dim}v{RESET}")
+        };
         lines.push(draw_top(
-            &format!("{ACCENT_PRIMARY}Engram:{RESET} {CYAN}{folder}{RESET} {TEXT_DIM}^{RESET}"),
+            &format!("{accent_primary}Engram:{RESET} {cyan}{proj_disp}{RESET} {daemon_glyph}"),
             collapsed[8],
             width,
         ));
         if !collapsed[8] {
             let online = if snap.engram.online {
-                format!("{MINT}\u{25cf} En linea{RESET}")
+                format!("{mint}\u{25cf} En linea{RESET}")
             } else {
-                format!("{CORAL}\u{25cb} Offline{RESET}")
+                format!("{coral}\u{25cb} Offline{RESET}")
             };
             // El estado "en línea" se deriva de poder abrir engram.db (SQLite local),
             // no de un puerto HTTP, así que la etiqueta refleja la fuente real.
             let local_label = if width < 40 {
-                "engram.db"
+                format!("{text_primary}engram.db{RESET}")
             } else {
-                "Local (engram.db)"
+                format!("{text_primary}Local (engram.db){RESET}")
             };
             lines.push(draw_row(
-                local_label,
+                &local_label,
                 &format!(
-                    "{online} {TEXT_DIM}\u{00b7}{RESET} {CYAN}{} obs{RESET}",
+                    "{online} {text_dim}\u{00b7}{RESET} {cyan}{} obs{RESET}",
                     snap.engram.obs_count
                 ),
                 width,
@@ -2562,37 +2572,39 @@ pub fn render_screen_tabbed(
             } else {
                 "Cloud: solo local o no configurado"
             };
-            lines.push(draw_row(cloud_row, "", width));
-            if snap.engram.daemon_online || snap.engram.sync_status.is_some() {
-                let d_badge = if snap.engram.daemon_online {
-                    format!("{MINT}daemon ok{RESET}")
-                } else {
-                    format!("{TEXT_DIM}daemon off{RESET}")
-                };
-                let s_badge = snap
-                    .engram
-                    .sync_status
-                    .as_deref()
-                    .map(|s| format!("{CYAN}{s}{RESET}"))
-                    .unwrap_or_default();
-                lines.push(draw_row(
-                    &format!("{TEXT_DIM}Servicio:{RESET} {d_badge}"),
-                    &s_badge,
-                    width,
-                ));
-            }
+            lines.push(draw_row(
+                &format!("{text_primary}{cloud_row}{RESET}"),
+                "",
+                width,
+            ));
+            let d_badge = if snap.engram.daemon_online {
+                format!("{mint}daemon ok{RESET}")
+            } else {
+                format!("{text_dim}daemon off{RESET}")
+            };
+            let s_badge = snap
+                .engram
+                .sync_status
+                .as_deref()
+                .map(|s| format!("{cyan}{s}{RESET}"))
+                .unwrap_or_default();
+            lines.push(draw_row(
+                &format!("{text_dim}Servicio:{RESET} {d_badge}"),
+                &s_badge,
+                width,
+            ));
             if let Some(ref handoff) = snap.engram.last_handoff {
                 lines.push(draw_divider(width));
                 lines.push(draw_row(
                     &format!(
-                        "{label_color}Handoff{RESET} {TEXT_DIM}#{} {RESET}",
+                        "{label_color}Handoff{RESET} {text_dim}#{} {RESET}",
                         handoff.id
                     ),
-                    &format!("{TEXT_MUTED}{}{RESET}", handoff.relative_time),
+                    &format!("{text_muted}{}{RESET}", handoff.relative_time),
                     width,
                 ));
                 for hl in handoff.lines.iter().take(3) {
-                    lines.push(draw_row(&format!("{TEXT_MUTED}{hl}{RESET}"), "", width));
+                    lines.push(draw_row(&format!("{text_muted}{hl}{RESET}"), "", width));
                 }
             }
         }

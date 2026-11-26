@@ -297,9 +297,9 @@ pub fn gentle_ai_profiles_candidates(target_dir: &str) -> Vec<PathBuf> {
 /// Resuelve la ruta al archivo SQLite de Engram
 pub fn resolve_engram_db_path() -> PathBuf {
     if let Ok(p) = std::env::var("ENGRAM_DB_PATH") {
-        let p_buf = PathBuf::from(p.trim());
-        if p_buf.exists() {
-            return p_buf;
+        let trimmed = p.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
         }
     }
 

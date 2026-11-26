@@ -11700,4 +11700,293 @@ api-keys:
                 && b.action_path.as_deref() == Some("https://platform.deepseek.com/top_up"))
         );
     }
+
+    #[test]
+    fn test_engram_project_resolution_git_remote_dot_cwd_unix_epoch_and_missing_db_daemon_probe() {
+        use hudr2::engram::{
+            clear_engram_cache, read_engram_telemetry, resolve_engram_project_candidates,
+        };
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_engram_cache();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("engram.db");
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let handoff_epoch = now_secs - 120;
+
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT,
+                type TEXT,
+                content TEXT,
+                created_at TEXT,
+                deleted_at TEXT
+            );
+            CREATE TABLE sync_enrolled_projects (
+                project TEXT PRIMARY KEY
+            );
+            INSERT INTO observations (project, type, content, created_at, deleted_at)
+            VALUES ('cfg-proj', 'discovery', 'config priority ok', '{now_secs}', NULL);
+            INSERT INTO observations (project, type, content, created_at, deleted_at)
+            VALUES ('Totopo27/hudr2', 'session_summary', '## Goal\nImplementar T10 real\n- Paso 1', '{handoff_epoch}', NULL);
+            INSERT INTO sync_enrolled_projects (project) VALUES ('Totopo27/hudr2');
+            INSERT INTO observations (project, type, content, created_at, deleted_at)
+            VALUES ('MyMixedCase', 'decision', 'mixed case match', '{now_secs}', NULL);"
+        ))
+        .unwrap();
+        drop(conn);
+
+        // Case A1: .engram/config.json wins over folder basename
+        let cfg_proj_dir = tmp.path().join("custom-folder");
+        std::fs::create_dir_all(cfg_proj_dir.join(".engram")).unwrap();
+        std::fs::write(
+            cfg_proj_dir.join(".engram").join("config.json"),
+            r#"{"project":"cfg-proj"}"#,
+        )
+        .unwrap();
+
+        // Case A2: Git worktree/repo remote slug matches DB even when folder basename differs
+        let wt_dir = tmp.path().join("hudr2-wt");
+        std::fs::create_dir_all(wt_dir.join(".git")).unwrap();
+        std::fs::write(
+            wt_dir.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://github.com/Totopo27/hudr2.git\n",
+        )
+        .unwrap();
+
+        // Case A3: Case-insensitive fallback match on basename
+        let mixed_dir = tmp.path().join("mymixedcase");
+        std::fs::create_dir_all(&mixed_dir).unwrap();
+
+        unsafe {
+            std::env::set_var("ENGRAM_DB_PATH", db_path.to_str().unwrap());
+            std::env::remove_var("ENGRAM_PORT");
+        }
+
+        // "." resolves real cwd name, never literal "proyecto"
+        let dot_candidates = resolve_engram_project_candidates(".");
+        assert!(!dot_candidates.is_empty());
+        assert!(
+            !dot_candidates.iter().any(|c| c == "proyecto" || c == "." || c == ".."),
+            "'.' debe resolver candidatos reales: {dot_candidates:?}"
+        );
+
+        let wt_candidates = resolve_engram_project_candidates(wt_dir.to_str().unwrap());
+        assert!(
+            wt_candidates.contains(&"Totopo27/hudr2".to_string())
+                && wt_candidates.contains(&"hudr2".to_string()),
+            "Debe extraer slug y nombre del remoto git: {wt_candidates:?}"
+        );
+
+        let tele_cfg = read_engram_telemetry(cfg_proj_dir.to_str().unwrap());
+        assert!(tele_cfg.online);
+        assert_eq!(tele_cfg.project, "cfg-proj");
+        assert_eq!(tele_cfg.obs_count, 1);
+
+        let tele_wt = read_engram_telemetry(wt_dir.to_str().unwrap());
+        assert!(tele_wt.online);
+        assert_eq!(tele_wt.project, "Totopo27/hudr2");
+        assert_eq!(tele_wt.obs_count, 1);
+        assert!(tele_wt.enrolled);
+        let handoff = tele_wt.last_handoff.as_ref().expect("debe cargar handoff");
+        assert_ne!(
+            handoff.relative_time, "nunca",
+            "Unix epoch en created_at debe formatearse como tiempo relativo"
+        );
+        assert!(
+            handoff.lines.first().map(String::as_str) == Some("Implementar T10 real"),
+            "Debe saltar encabezados Markdown vacíos como '## Goal': {:?}",
+            handoff.lines
+        );
+
+        let tele_mixed = read_engram_telemetry(mixed_dir.to_str().unwrap());
+        assert!(tele_mixed.online);
+        assert_eq!(tele_mixed.project, "MyMixedCase");
+        assert_eq!(tele_mixed.obs_count, 1);
+
+        // Case B: missing ENGRAM_DB_PATH keeps configured path and still probes :7437/ENGRAM_PORT daemon
+        let missing_db = tmp.path().join("nonexistent-subdir").join("engram.db");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_srv = Arc::clone(&stop);
+        let srv = std::thread::spawn(move || {
+            while !stop_srv.load(Ordering::Relaxed) {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    if stop_srv.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut buf = [0u8; 512];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let body = if req.contains("/health") {
+                        r#"{"status":"ok"}"#
+                    } else if req.contains("/sync/status") {
+                        r#"{"phase":"synced","last_sync_at":"2026-11-25T18:00:00Z"}"#
+                    } else {
+                        "{}"
+                    };
+                    let resp = format!(
+                        "HTTP/1.0 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                }
+            }
+        });
+
+        unsafe {
+            std::env::set_var("ENGRAM_DB_PATH", missing_db.to_str().unwrap());
+            std::env::set_var("ENGRAM_PORT", port.to_string());
+        }
+        clear_engram_cache();
+
+        assert_eq!(
+            hudr2::paths::resolve_engram_db_path(),
+            missing_db,
+            "resolve_engram_db_path debe respetar ENGRAM_DB_PATH aunque no exista todavía"
+        );
+
+        let tele_daemon_only = read_engram_telemetry(wt_dir.to_str().unwrap());
+        stop.store(true, Ordering::Relaxed);
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+        let _ = srv.join();
+
+        clear_engram_cache();
+        unsafe {
+            std::env::remove_var("ENGRAM_DB_PATH");
+            std::env::remove_var("ENGRAM_PORT");
+        }
+
+        assert!(!tele_daemon_only.online);
+        assert!(
+            tele_daemon_only.daemon_online,
+            "Debe sondear daemon de Engram aunque engram.db local no exista"
+        );
+        assert!(
+            tele_daemon_only.sync_status.is_some(),
+            "Debe obtener sync_status del daemon si responde /sync/status"
+        );
+    }
+
+    #[test]
+    fn test_engram_card_header_daemon_indicator_offline_row_and_theme() {
+        use hudr2::models::{EngramTelemetry, HandoffSummary};
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        let mut st = AppState::new();
+        st.snapshot.project_dir = "D:/work/hudr2-wt".to_string();
+        st.snapshot.engram = EngramTelemetry {
+            project: "Totopo27/hudr2".to_string(),
+            online: true,
+            daemon_online: true,
+            obs_count: 12,
+            enrolled: true,
+            sync_status: Some("synced (hace 1m)".to_string()),
+            last_handoff: Some(HandoffSummary {
+                id: 99,
+                created_at_epoch: Some(1_700_000_000),
+                relative_time: "hace 5m".to_string(),
+                lines: vec!["T10 Engram fix".to_string()],
+            }),
+        };
+
+        for w in [32usize, 36, 48] {
+            let out = ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Stack),
+            );
+            let eb = out
+                .bounds
+                .iter()
+                .find(|b| b.id == "engram")
+                .expect("debe existir CardBounds de engram");
+            for line in &out.lines[eb.start_line..=eb.end_line] {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea Engram excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let raw = out.lines[eb.start_line..=eb.end_line].join("\n");
+            let clean = ui::strip_ansi(&raw);
+            let header_raw = &out.lines[eb.start_line];
+            let header_clean = ui::strip_ansi(header_raw);
+            assert!(
+                !header_clean.contains("hudr2-wt"),
+                "Header debe mostrar snap.engram.project y no folder crudo: {header_clean}"
+            );
+            assert!(
+                header_raw.contains(&format!("{}\u{5e}", HERDR_TOKYO_NIGHT_DAY.mint))
+                    || header_raw.contains(&format!("{}^", HERDR_TOKYO_NIGHT_DAY.mint)),
+                "Header con daemon_online=true debe pintar '^' en mint: {header_clean}"
+            );
+            assert!(
+                clean.contains("Servicio:") && clean.contains("daemon ok"),
+                "Debe mostrar Servicio: daemon ok:\n{clean}"
+            );
+            assert!(
+                raw.contains(HERDR_TOKYO_NIGHT_DAY.accent_primary)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.cyan)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_muted),
+                "Card 8 Engram debe usar tokens del tema activo en ancho {w}"
+            );
+        }
+
+        // Daemon offline + sync_status=None + DB offline
+        st.snapshot.engram.online = false;
+        st.snapshot.engram.daemon_online = false;
+        st.snapshot.engram.sync_status = None;
+        let off_out = ui::render_screen_tabbed(
+            &st.snapshot,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            48,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Stack),
+        );
+        let eb = off_out.bounds.iter().find(|b| b.id == "engram").unwrap();
+        let off_raw = off_out.lines[eb.start_line..=eb.end_line].join("\n");
+        let off_clean = ui::strip_ansi(&off_raw);
+        let off_header_raw = &off_out.lines[eb.start_line];
+        assert!(
+            off_header_raw.contains(&format!("{}v", HERDR_TOKYO_NIGHT_DAY.text_dim)),
+            "Header con daemon offline debe mostrar 'v' en text_dim: {}",
+            ui::strip_ansi(off_header_raw)
+        );
+        assert!(
+            off_clean.contains("Servicio:") && off_clean.contains("daemon off"),
+            "Debe renderizar Servicio: daemon off aunque sync_status sea None:\n{off_clean}"
+        );
+        assert!(
+            off_raw.contains(HERDR_TOKYO_NIGHT_DAY.coral),
+            "DB offline debe usar coral del tema activo"
+        );
+    }
 }

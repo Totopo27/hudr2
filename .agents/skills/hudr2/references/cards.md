@@ -114,11 +114,11 @@
   - Clicking a file toggles an inline 12-line + trailer diff preview underneath (guarded by hardened `is_sensitive_file`; never dumps tracked files as untracked, and refreshes with `GIT_CACHE` 2s working-tree TTL) plus an `>> [vista rápida (Espacio)]` row (`action_type: Some("open_quick_peek")`) opening the themed **Quick Peek** modal (clears `tab_bounds`, captures non-modal shortcuts, and keeps viewport rows filled at bottom scroll).
 
 ## 8. `Engram` (`id: "engram"`, index `8`, key `8`)
-- **Header:** `Engram: <project> ^` (`^` green if daemon `:7437` is online, `v` dim if offline).
+- **Header:** `Engram: <snap.engram.project> ^` (`^` theme `mint` if daemon `:7437` is online, `v` theme `text_dim` if offline; resolves `.engram/config.json`, canonical cwd basename even for `.`/`..`, git `origin` `owner/repo` + repo name, and case-insensitive SQLite project matches).
 - **Rows:**
-  - `Local (engram.db)` + `● En linea · <N> obs` (or `Desconectado`).
-  - `Cloud: <sync_status>`.
-  - Optional `Handoff #<id> (<updated_at>)` block showing extracted lines from the latest `session_summary` observation.
+  - `Local (engram.db)` + `● En linea · <N> obs` (`mint` when DB opens) or `○ Offline · <N> obs` (`coral` if DB absent; `ENGRAM_DB_PATH` honors configured non-existent files and `:7437` daemon probe runs even without a local DB).
+  - `Cloud: proyecto inscrito para sync` / `Cloud: solo local o no configurado` (`sync inscrito` / `solo local` at `< 40`) plus always-visible `Servicio: daemon ok` / `daemon off` (`+ sync_status` relative time refreshed on cache hits), styled with active `Theme` tokens.
+  - Optional `Handoff #<id> (<updated_at>)` block supporting ISO/RFC3339 and Unix integer/ms `created_at` timestamps and skipping bare `#` Markdown headings when body lines exist.
 
 ## 9. `Herramientas` & `MCP` (`id: "tools"` & `id: "mcp"`, index `9` & `10`)
 - `Herramientas` is index `9` (key `9`).
