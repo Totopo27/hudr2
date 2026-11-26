@@ -120,17 +120,18 @@ pub fn emit_alert(mode: SoundMode, kind: AlertKind) {
 pub fn ring_bell(kind: AlertKind) {
     match kind {
         AlertKind::FleetCompleted => {
-            let mut stdout = std::io::stdout();
+            let mut stdout = std::io::stdout().lock();
             let _ = stdout.write_all(b"\x07");
             let _ = stdout.flush();
         }
         AlertKind::QuotaCritical => {
-            let mut stdout = std::io::stdout();
+            let mut stdout = std::io::stdout().lock();
             let _ = stdout.write_all(b"\x07");
             let _ = stdout.flush();
+            drop(stdout);
             std::thread::spawn(|| {
                 std::thread::sleep(Duration::from_millis(120));
-                let mut stdout = std::io::stdout();
+                let mut stdout = std::io::stdout().lock();
                 let _ = stdout.write_all(b"\x07");
                 let _ = stdout.flush();
             });

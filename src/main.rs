@@ -23,7 +23,7 @@ const MOUSE_ON: &str = "\x1b[?1000h\x1b[?1006h";
 const MOUSE_OFF: &str = "\x1b[?1006l\x1b[?1000l";
 
 const HELP_TEXT: &str = "\
-hudr2 [--once] [--attach] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>]
+hudr2 [--once] [--attach] [--pane <HERDR_PANE_ID>] [--cwd <dir>] [--config <file>] [--theme <name>] [--name <title>]
 
 Sidebar de telemetría reactiva para Herdr, OpenCode y Pi / Gentle Shell.
 
@@ -32,7 +32,7 @@ Opciones:
   --attach           Abre un split lateral derecho (20%) en Herdr y lanza hudr2 allí
   --pane <id>        Enlaza el HUD a un pane específico de Herdr (se cierra al cerrarse ese pane)
   --cwd <dir>        Directorio del proyecto a monitorear (por defecto: directorio actual)
-  --config <file>    Archivo JSON donde persistir el estado de tarjetas colapsadas
+  --config <file>    Archivo JSON de configuración y estado persistido de hudr2
   --theme <name>     Tema visual (auto [adaptativo de Herdr], 5 nativos [linear, cyber, bauhaus, synthwave, editorial] o 14 de Herdr [catppuccin, tokyo-night, dracula, nord, gruvbox, ...])
   --name, --title    Nombre personalizado del sidebar (por defecto: HUDR2)
   -v, --version      Muestra la versión de hudr2
@@ -182,7 +182,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut initial_state = state::AppState::with_config(resolved_config, cli.cwd.clone());
 
     if let Some(ref name) = cli.sidebar_name {
-        initial_state.set_sidebar_name(Some(name.clone()));
+        let clean = Some(name.trim().to_string()).filter(|s| !s.is_empty());
+        initial_state.sidebar_name = clean.clone();
+        initial_state.snapshot.sidebar_name = clean;
     }
 
     if let Some(ref th) = cli.theme {
@@ -427,6 +429,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let timer_state = app_state.clone();
     tokio::spawn(async move {
         let mut last_quota_refresh = tokio::time::Instant::now();
+        let mut last_theme_sync = tokio::time::Instant::now();
         let has_ipc = HerdrClient::resolve_ipc_path().is_some();
         loop {
             let sleep_dur = {
@@ -470,6 +473,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
             if should_check_upstream {
                 spawn_upstream_check_with_force(timer_state.clone(), tx_timer.clone(), false);
+            }
+
+            if last_theme_sync.elapsed() >= Duration::from_secs(30) {
+                last_theme_sync = tokio::time::Instant::now();
+                let is_auto = { timer_state.read().await.is_auto_theme() };
+                if is_auto {
+                    let resolved = hudr2::theme::resolve_adaptive_theme();
+                    if resolved.id != hudr2::theme::active_theme().id {
+                        hudr2::theme::set_active_theme(resolved);
+                        timer_state.write().await.needs_redraw = true;
+                        let _ = tx_timer.send(MainMsg::Redraw);
+                    }
+                }
             }
         }
     });

@@ -10,7 +10,7 @@
 | **`[ 2:Cód ]`** | `2` / `Tab` | 4<br>5<br>6 | `proyecto`<br>`git`<br>`tools` | `~ Proyecto`<br>`Cambios`<br>`Herramientas` | Expanded<br>Expanded<br>Expanded |
 | **`[ 3:Mod ]`** | `3` / `Tab` | 7<br>8<br>9<br>10 | `integraciones`<br>`orquestadores`<br>`pools`<br>`saldos` | `Integraciones`<br>`Orquestadores`<br>`Cuota de Modelos`<br>`Saldos API` | Expanded<br>Expanded<br>Expanded<br>Expanded (Auto) |
 | **`[ 4:Stk ]`** | `4` / `Tab` | 11<br>12 | `engram`<br>`ecosystem` | `Engram`<br>`Stack · Ecosistema` | Expanded<br>Expanded |
-| **`[ ☼ Aju ]`** | `5` / `0` / `t` / `v` | 13 | `personalizar` | `Personalizar` | **Expanded** (vista de ajustes) |
+| **`[ ☼ Aju ]`** | `5` / `0` / `t` / `,` / `g` | 13 | `personalizar` | `Personalizar` | **Expanded** (siempre expandida en Ajustes) |
 
 ---
 
@@ -136,15 +136,16 @@
 - **Upstream Cache & Comparison:** Cached in `upstream_cache.json` with 3-hour TTL (only persisted when at least one release tag succeeds; all-`None` offline caches are treated as expired, governed by a 5-minute automatic retry backoff while manual `r`/`u` forces re-check), refreshed on startup, timer ticks, and `r`, using SemVer 2.0.0 comparison (`is_newer_version`, rejecting malformed cores and ordering prereleases) and `version` keyword stripping in `clean_version_output`.
 
 ## 12. `Personalizar` (`id: "personalizar"`, index `12`, key `0` / `t`)
-- **Header:** `Personalizar` (collapsed by default).
+- **Header:** `Personalizar` (expanded by default via `DEFAULT_COLLAPSED`, always expanded on Tab 5 `Ajustes` and immune to single-click collapse there; hiding all cards on Tabs 1–4 renders an empty-tab hint `Sin tarjetas visibles`).
 - **Rows:**
   - One interactive checkbox row per configurable card (`Estado`, `Contexto`, `Proyecto`, `Integraciones`, `Orquestadores`, `Cuota de Modelos`, `Saldos API`, `Cambios (Git)`, `Engram`, `Herramientas`, `MCP`, `Stack · Ecosistema`).
-  - `[x] <Nombre>` with `visible` (`MINT`) or `[ ] <Nombre>` with `oculta` (`TEXT_DIM`). Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
+  - `[x] <Nombre>` with `visible` (`mint`, `text_primary`) or `[ ] <Nombre>` with `oculta` (`text_dim`, `text_muted`), using active `Theme` tokens across Card 12, gauges, tab bar (switching to full labels at `width >= 63`), and footers. Built using ASCII checkboxes `[x]` to prevent missing glyph boxes `[?]` across non-NerdFont Windows and Linux consoles.
   - Clicking any card row toggles its visibility in real time; cards marked `oculta` are completely skipped from rendering (saving vertical space).
   - Redundant fixed row was eliminated to prevent vertical waste (`personalizar` can never hide itself).
   - **Divider & Settings section:**
-    - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Allows in-place editing of top banner `:: <nombre> ::` with live buffer (`> <buffer>_`), saving on `Enter` and canceling on `Esc`. Entering empty or `HUDR2` restores default.
-    - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (Herdr · <id>)`, 5 native palettes, and 14 Herdr themes.
-    - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`), controlling online version checks.
-    - `Avisos  Alertas sonoras` with clickable `[x] campana` / `[x] nativo` / `[ ] silencio` (`action_type: Some("cycle_sound_mode")`), controlling audio feedback for orchestrator fleet completion and critical quota warnings.
-  - State persisted atomically in `hudr2.json` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "...", "check_updates": true, "sound_mode": "bell"}`).
+    - `Nombre  <nombre>` with interactive `[editar >]` button (`action_type: Some("edit_sidebar_name")`, key `n`, or double click on `Personalizar` card). Auto-switches to Tab 5 and expands Card 12; truncates value to protect `[editar >]`; saves on `Enter` (`Esc` cancels, and switching tabs cancels active editing). Clearing to empty/`HUDR2`/`defecto` removes `sidebar_name`/`name`/`title` from `hudr2.json` (while `--once --name` stays in-memory only).
+    - `Tema    <nombre_tema>` with clickable `[cambiar >]` (`action_type: Some("cycle_theme")`, key `m`), dynamically cycling between `Auto (<id>)` (live-synced every 30s even without quotas), 5 native palettes, and 14 Herdr themes; truncates label on narrow widths to keep `[cambiar >]` intact.
+    - `Vista   Diseño` with clickable `[ pestañas ]` / `[ vertical ]` (`action_type: Some("toggle_tabbed_view")`, key `v`), resetting `scroll_offset` on toggle/tab switch (footers advertise `t: pers` in vertical mode and `Enter: guardar` during both name and balance editing).
+    - `Avisos  Alertas sonoras` with clickable `[x] campana` / `[x] nativo` / `[ ] silencio` (`action_type: Some("cycle_sound_mode")`), using locked stdout writes for BEL output.
+    - `Updates Check online` with clickable `[x] activo (3h)` / `[ ] apagado` (`action_type: Some("toggle_check_updates")`, key `u`; `[x] 3h`/`[ ] off` at `< 36` cols), controlling online version checks.
+  - State persisted atomically in `hudr2.json` via capped `read_config_bytes` (`{"collapsed": [...], "hidden": [...], "theme": "...", "sidebar_name": "...", "check_updates": true, "sound_mode": "bell", "tabbed": true}`, removing cleared `theme`/`sidebar_name`/`name`/`title` keys and loading object `account_budgets` cleanly).

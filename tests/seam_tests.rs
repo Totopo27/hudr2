@@ -12236,4 +12236,358 @@ api-keys:
             }
         }
     }
+
+    #[test]
+    fn test_personalizar_config_clearing_account_budgets_scroll_reset_edit_guards_and_herdr_toml() {
+        use hudr2::sound::SoundMode;
+        use hudr2::state::{ActiveTab, load_config, save_config};
+        use hudr2::theme::parse_herdr_theme_name;
+        use std::collections::HashSet;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("hudr2.json");
+        std::fs::write(
+            &cfg,
+            r#"{
+                "name": "OldLegacy",
+                "title": "OldTitle",
+                "sidebar_name": "Custom",
+                "theme": "dracula",
+                "account_budgets": {
+                    "tavoclaude": {
+                        "budget": 25.5,
+                        "baseline_cost": 1.0,
+                        "session_id": "s1"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let loaded_initial = load_config(&cfg);
+        assert_eq!(
+            loaded_initial.account_budgets.get("tavoclaude"),
+            Some(&25.5),
+            "load_config debe leer account_budgets en formato objeto"
+        );
+
+        let mut hidden_with_personalizar = HashSet::new();
+        hidden_with_personalizar.insert("personalizar".to_string());
+        hidden_with_personalizar.insert("tarjetas".to_string());
+        hidden_with_personalizar.insert("mcp".to_string());
+        save_config(
+            &cfg,
+            &[false; 13],
+            &hidden_with_personalizar,
+            None,
+            None,
+            true,
+            SoundMode::Bell,
+            true,
+        )
+        .unwrap();
+
+        let raw_saved: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
+        assert!(
+            raw_saved.get("sidebar_name").is_none()
+                && raw_saved.get("name").is_none()
+                && raw_saved.get("title").is_none()
+                && raw_saved.get("theme").is_none(),
+            "save_config con None debe eliminar sidebar_name/name/title/theme del JSON: {raw_saved:?}"
+        );
+        let loaded_cleared = load_config(&cfg);
+        assert_eq!(loaded_cleared.sidebar_name, None);
+        assert_eq!(loaded_cleared.theme, None);
+        assert!(!loaded_cleared.hidden.contains("personalizar"));
+        assert!(loaded_cleared.hidden.contains("mcp"));
+
+        // Scroll reset, 'n' auto-switch/expand, cancelación al cambiar tab y no-colapso en Tab 5
+        let mut st = AppState::with_config(Some(cfg), None);
+        st.scroll_offset = 6;
+        assert!(st.switch_tab(ActiveTab::Codigo));
+        assert_eq!(st.scroll_offset, 0, "switch_tab debe reiniciar scroll_offset");
+
+        st.scroll_offset = 4;
+        assert!(!st.toggle_tabbed());
+        assert_eq!(st.scroll_offset, 0, "toggle_tabbed debe reiniciar scroll_offset");
+        assert!(st.toggle_tabbed());
+
+        st.switch_tab(ActiveTab::Sesion);
+        st.collapsed_cards[12] = true;
+        st.start_edit_sidebar_name();
+        assert!(st.is_editing_sidebar_name);
+        assert!(
+            !st.collapsed_cards[12],
+            "start_edit_sidebar_name debe expandir Personalizar"
+        );
+        assert_eq!(
+            st.active_tab,
+            ActiveTab::Ajustes,
+            "start_edit_sidebar_name en vista con tabs debe cambiar a Tab Ajustes"
+        );
+        assert!(st.switch_tab(ActiveTab::Sesion));
+        assert!(
+            !st.is_editing_sidebar_name,
+            "Cambiar fuera de Ajustes debe cancelar edición de nombre"
+        );
+
+        st.switch_tab(ActiveTab::Modelos);
+        st.start_edit_balance("tavoclaude");
+        assert!(st.is_editing_balance);
+        assert!(st.switch_tab(ActiveTab::Stack));
+        assert!(
+            !st.is_editing_balance,
+            "Cambiar fuera de Modelos debe cancelar edición de saldo"
+        );
+
+        st.switch_tab(ActiveTab::Ajustes);
+        let tab5_out = ui::render_screen_tabbed(
+            &st.snapshot,
+            &st.collapsed_cards,
+            None,
+            None,
+            &[],
+            &st.hidden_cards,
+            48,
+            hudr2::theme::active_theme(),
+            Some(ActiveTab::Ajustes),
+        );
+        st.card_bounds = tab5_out.bounds;
+        st.last_click_instant = None;
+        st.last_click_row = None;
+        let pers_header = st
+            .card_bounds
+            .iter()
+            .find(|b| b.id == "personalizar" && b.action_type.is_none())
+            .expect("debe existir CardBounds de personalizar")
+            .start_line;
+        assert_eq!(
+            st.handle_mouse_click(pers_header, 0),
+            None,
+            "Clic simple en Personalizar dentro de Tab Ajustes no debe colapsarla"
+        );
+        assert!(!st.collapsed_cards[12]);
+
+        // parse_herdr_theme_name con coincidencia exacta de clave `name`
+        assert_eq!(
+            parse_herdr_theme_name("[theme]\nnamespace = \"wrong\"\nname = \"tokyo-night\"\n")
+                .as_deref(),
+            Some("tokyo-night")
+        );
+        assert_eq!(
+            parse_herdr_theme_name("[theme]\nnamespace = \"wrong\"\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_personalizar_theme_narrow_fit_tab_bar_56_58_empty_tab_footer_and_once_no_persist() {
+        use hudr2::config::{AMBER, CORAL, MINT, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY};
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        let mut st = AppState::new();
+        st.snapshot.sidebar_name = Some("Mi Workspace Personalizado".to_string());
+        st.snapshot.theme_name = Some("catppuccin-latte".to_string());
+        st.hidden_cards.insert("mcp".to_string());
+
+        for w in [32usize, 36, 42, 48, 56, 57, 58, 60, 63] {
+            let out = ui::render_screen_tabbed(
+                &st.snapshot,
+                &st.collapsed_cards,
+                None,
+                None,
+                &[],
+                &st.hidden_cards,
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Ajustes),
+            );
+            for line in &out.lines {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea en Tab 5 ancho {w} desborda: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let raw = out.lines.join("\n");
+            let clean = ui::strip_ansi(&raw);
+            if w >= 36 {
+                assert!(
+                    clean.contains("[editar >]"),
+                    "Debe conservar [editar >] en ancho {w}:\n{clean}"
+                );
+                assert!(
+                    clean.contains("[x] activo (3h)") || clean.contains("[ ] apagado"),
+                    "Debe conservar botón Updates en ancho {w}:\n{clean}"
+                );
+            }
+            if w >= 42 {
+                assert!(
+                    clean.contains("[cambiar >]"),
+                    "Debe conservar [cambiar >] en ancho {w}:\n{clean}"
+                );
+            }
+            assert!(
+                raw.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_muted)
+                    && raw.contains(HERDR_TOKYO_NIGHT_DAY.accent_primary),
+                "Card 12 + Footer debe usar paleta del tema activo en ancho {w}"
+            );
+            for dark_tok in [TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY, MINT, AMBER, CORAL] {
+                assert!(
+                    !raw.contains(dark_tok),
+                    "Card 12 / Footer no debe filtrar constante oscura hardcodeada en ancho {w}"
+                );
+            }
+        }
+
+        // Footers en edición de saldo, edición de nombre y modo vertical
+        st.snapshot.is_editing_balance = true;
+        let bal_footer_out = ui::render_screen_tabbed(
+            &st.snapshot,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            48,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let bal_raw = bal_footer_out.lines.join("\n");
+        assert!(
+            ui::strip_ansi(&bal_raw).contains("Enter: guardar")
+                && bal_raw.contains(HERDR_TOKYO_NIGHT_DAY.amber),
+            "Edición de saldo debe mostrar footer Enter: guardar en amber del tema"
+        );
+        st.snapshot.is_editing_balance = false;
+
+        st.snapshot.is_editing_name = true;
+        let name_36 = ui::strip_ansi(
+            &ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                36,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Ajustes),
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(
+            name_36.contains("[Enter|Esc]"),
+            "Edición de nombre en ancho 36 debe mantener [Enter|Esc]:\n{name_36}"
+        );
+        let name_48 = ui::strip_ansi(
+            &ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                48,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Ajustes),
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(name_48.contains("Nombre  > "));
+        st.snapshot.is_editing_name = false;
+
+        let vert_clean = ui::strip_ansi(
+            &ui::render_screen_tabbed(
+                &st.snapshot,
+                &[true; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                56,
+                &HERDR_TOKYO_NIGHT_DAY,
+                None,
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(
+            vert_clean.contains("t: pers") && !vert_clean.contains("p: pers"),
+            "Footer vertical debe indicar 't: pers' y nunca 'p: pers':\n{vert_clean}"
+        );
+
+        // Pestaña vacía muestra hint útil en vez de pantalla en blanco
+        let mut all_stack_hidden = HashSet::new();
+        all_stack_hidden.insert("engram".to_string());
+        all_stack_hidden.insert("ecosystem".to_string());
+        let empty_tab_clean = ui::strip_ansi(
+            &ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &all_stack_hidden,
+                48,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Stack),
+            )
+            .lines
+            .join("\n"),
+        );
+        assert!(
+            empty_tab_clean.contains("Sin tarjetas visibles"),
+            "Pestaña con todas las cards ocultas debe mostrar aviso claro:\n{empty_tab_clean}"
+        );
+
+        // --once --name no debe sobreescribir hudr2.json y --help debe listar --theme y --name
+        let exe = env!("CARGO_BIN_EXE_hudr2");
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("hudr2.json");
+        std::fs::write(&cfg, r#"{"sidebar_name":"Persisted"}"#).unwrap();
+
+        let once_out = std::process::Command::new(exe)
+            .args([
+                "--once",
+                "--cwd",
+                tmp.path().to_str().unwrap(),
+                "--config",
+                cfg.to_str().unwrap(),
+                "--name",
+                "EphemeralTest",
+            ])
+            .output()
+            .expect("falló --once --name");
+        assert!(once_out.status.success());
+        let stdout_once = String::from_utf8_lossy(&once_out.stdout);
+        assert!(
+            stdout_once.contains(":: EphemeralTest ::"),
+            "Salida --once --name debe renderizar nombre temporal"
+        );
+        let persisted_after = std::fs::read_to_string(&cfg).unwrap();
+        assert!(
+            persisted_after.contains("Persisted") && !persisted_after.contains("EphemeralTest"),
+            "--once --name no debe persistir cambios en hudr2.json: {persisted_after}"
+        );
+
+        let help_out = std::process::Command::new(exe)
+            .arg("--help")
+            .output()
+            .expect("falló --help");
+        let help_text = String::from_utf8_lossy(&help_out.stdout);
+        let usage_line = help_text.lines().next().unwrap_or("");
+        assert!(
+            usage_line.contains("--theme") && usage_line.contains("--name"),
+            "Línea de uso en --help debe listar --theme y --name: {usage_line}"
+        );
+    }
 }

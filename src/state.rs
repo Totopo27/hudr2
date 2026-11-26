@@ -105,7 +105,7 @@ pub struct ConfigData {
 
 /// Carga la configuración (tarjetas colapsadas y ocultas, tema, nombre, updates, modo de sonido y vista por pestañas) desde un archivo JSON.
 pub fn load_config(path: &Path) -> ConfigData {
-    let Ok(bytes) = std::fs::read(path) else {
+    let Ok(bytes) = crate::paths::read_config_bytes(path) else {
         return ConfigData {
             collapsed: DEFAULT_COLLAPSED,
             hidden: HashSet::new(),
@@ -187,7 +187,10 @@ pub fn load_config(path: &Path) -> ConfigData {
     let mut account_budgets = std::collections::HashMap::new();
     if let Some(map) = v.get("account_budgets").and_then(Value::as_object) {
         for (k, val) in map {
-            if let Some(num) = val.as_f64() {
+            if let Some(num) = val
+                .as_f64()
+                .or_else(|| val.get("budget").and_then(Value::as_f64))
+            {
                 account_budgets.insert(k.clone(), num);
             }
         }
@@ -231,10 +234,10 @@ pub fn save_config(
     let hidden_names: Vec<&str> = CARD_KEYS
         .iter()
         .copied()
-        .filter(|&k| k != "tarjetas" && hidden.contains(k))
+        .filter(|&k| k != "personalizar" && k != "tarjetas" && hidden.contains(k))
         .collect();
 
-    let mut payload = if let Ok(existing_bytes) = std::fs::read(path)
+    let mut payload = if let Ok(existing_bytes) = crate::paths::read_config_bytes(path)
         && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&existing_bytes)
     {
         Value::Object(map)
@@ -247,11 +250,21 @@ pub fn save_config(
     payload["check_updates"] = json!(check_updates);
     payload["sound_mode"] = json!(sound_mode.as_str());
     payload["tabbed"] = json!(tabbed);
-    if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
-        payload["theme"] = json!(t);
-    }
-    if let Some(n) = sidebar_name.filter(|s| !s.trim().is_empty()) {
-        payload["sidebar_name"] = json!(n);
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(t) = theme.filter(|s| !s.trim().is_empty()) {
+            obj.insert("theme".to_string(), json!(t));
+        } else {
+            obj.remove("theme");
+        }
+        if let Some(n) = sidebar_name.filter(|s| !s.trim().is_empty()) {
+            obj.insert("sidebar_name".to_string(), json!(n));
+            obj.remove("name");
+            obj.remove("title");
+        } else {
+            obj.remove("sidebar_name");
+            obj.remove("name");
+            obj.remove("title");
+        }
     }
     let body = serde_json::to_vec_pretty(&payload).map_err(|e| e.to_string())?;
     crate::paths::atomic_write_bytes(path, &body).map_err(|e| e.to_string())
@@ -266,7 +279,7 @@ pub fn save_account_budget(
     baseline_cost: f64,
     session_id: Option<String>,
 ) -> Result<(), String> {
-    let mut payload = if let Ok(existing_bytes) = std::fs::read(path)
+    let mut payload = if let Ok(existing_bytes) = crate::paths::read_config_bytes(path)
         && let Ok(Value::Object(map)) = serde_json::from_slice::<Value>(&existing_bytes)
     {
         Value::Object(map)
@@ -429,6 +442,15 @@ impl AppState {
     pub fn toggle_tabbed(&mut self) -> bool {
         self.tabbed = !self.tabbed;
         self.snapshot.tabbed_view = self.tabbed;
+        self.scroll_offset = 0;
+        if self.tabbed {
+            if self.is_editing_sidebar_name && self.active_tab != ActiveTab::Ajustes {
+                self.cancel_edit_sidebar_name();
+            }
+            if self.is_editing_balance && self.active_tab != ActiveTab::Modelos {
+                self.cancel_edit_balance();
+            }
+        }
         self.needs_redraw = true;
         self.persist_config_if_configured();
         self.tabbed
@@ -611,6 +633,10 @@ impl AppState {
     }
 
     pub fn start_edit_sidebar_name(&mut self) {
+        self.collapsed_cards[12] = false;
+        if self.tabbed && self.active_tab != ActiveTab::Ajustes {
+            self.switch_tab(ActiveTab::Ajustes);
+        }
         self.is_editing_sidebar_name = true;
         let current = self
             .sidebar_name
@@ -812,6 +838,13 @@ impl AppState {
 
     pub fn switch_tab(&mut self, tab: ActiveTab) -> bool {
         if self.active_tab != tab {
+            if self.is_editing_sidebar_name && tab != ActiveTab::Ajustes {
+                self.cancel_edit_sidebar_name();
+            }
+            if self.is_editing_balance && tab != ActiveTab::Modelos {
+                self.cancel_edit_balance();
+            }
+            self.scroll_offset = 0;
             self.active_tab = tab;
             self.needs_redraw = true;
             true
@@ -1100,6 +1133,9 @@ impl AppState {
                     .iter()
                     .position(|&k| k == bound.id || (k == "personalizar" && bound.id == "tarjetas"))
             {
+                if idx == 12 && self.tabbed && self.active_tab == ActiveTab::Ajustes {
+                    continue;
+                }
                 let is_collapsed = self.collapsed_cards[idx];
                 let hit = if is_collapsed {
                     absolute_line >= bound.start_line && absolute_line <= bound.end_line

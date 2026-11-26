@@ -1,6 +1,4 @@
-use crate::config::{
-    AMBER, BOLD, CORAL, MAGENTA, MINT, RESET, TEXT_DIM, TEXT_MUTED, TEXT_PRIMARY,
-};
+use crate::config::{BOLD, MAGENTA, RESET};
 use crate::models::TelemetrySnapshot;
 use crate::state::{ActiveTab, TabBounds};
 use unicode_width::UnicodeWidthStr;
@@ -412,7 +410,7 @@ pub fn draw_tab_bar_theme(
         ActiveTab::Ajustes,
     ];
 
-    let labels: [&str; 5] = if width >= 56 {
+    let labels: [&str; 5] = if width >= 63 {
         [
             "1: Sesión",
             "2: Código",
@@ -521,6 +519,20 @@ fn should_render_card(card_id: &str, tab: Option<ActiveTab>) -> bool {
 }
 
 pub fn render_gauge_inline(percent: u8, available_cells: usize, color: &str) -> String {
+    render_gauge_inline_theme(
+        percent,
+        available_cells,
+        color,
+        crate::theme::active_theme().text_dim,
+    )
+}
+
+pub fn render_gauge_inline_theme(
+    percent: u8,
+    available_cells: usize,
+    color: &str,
+    dim_color: &str,
+) -> String {
     let p = percent.clamp(0, 100) as usize;
     let mut filled = (p * available_cells) / 100;
     if p > 0 && p < 100 {
@@ -532,7 +544,7 @@ pub fn render_gauge_inline(percent: u8, available_cells: usize, color: &str) -> 
     }
     let empty = available_cells.saturating_sub(filled);
     format!(
-        "{color}{}{RESET}{TEXT_DIM}{}{RESET}",
+        "{color}{}{RESET}{dim_color}{}{RESET}",
         "\u{2501}".repeat(filled),
         "\u{2500}".repeat(empty)
     )
@@ -735,6 +747,8 @@ pub fn render_screen_tabbed(
     let draw_bottom = |w: usize| draw_bottom_theme(w, theme);
     let draw_divider = |w: usize| draw_divider_theme(w, theme);
     let draw_row = |l: &str, r: &str, w: usize| draw_row_theme(l, r, w, theme);
+    let render_gauge_inline =
+        |pct: u8, cells: usize, col: &str| render_gauge_inline_theme(pct, cells, col, text_dim);
     let mut flash_rendered = false;
     let flash_color = |msg: &str| -> &'static str {
         if msg.starts_with("Error") || msg.starts_with('!') || msg.starts_with('\u{2717}') {
@@ -3071,13 +3085,13 @@ pub fn render_screen_tabbed(
                 let row_line_idx = lines.len();
                 let (left_box, right_status) = if is_hidden {
                     (
-                        format!("{TEXT_DIM}[ ]{RESET} {TEXT_MUTED}{label}{RESET}"),
-                        format!("{TEXT_DIM}oculta{RESET}"),
+                        format!("{text_dim}[ ]{RESET} {text_muted}{label}{RESET}"),
+                        format!("{text_dim}oculta{RESET}"),
                     )
                 } else {
                     (
-                        format!("{MINT}[x]{RESET} {TEXT_PRIMARY}{label}{RESET}"),
-                        format!("{MINT}visible{RESET}"),
+                        format!("{mint}[x]{RESET} {text_primary}{label}{RESET}"),
+                        format!("{mint}visible{RESET}"),
                     )
                 };
                 lines.push(draw_row(&left_box, &right_status, width));
@@ -3096,16 +3110,29 @@ pub fn render_screen_tabbed(
             // 1. Fila de Nombre personalizado del Sidebar (editable en línea)
             let name_row_idx = lines.len();
             if snap.is_editing_name {
-                let input_display = if snap.name_input_buffer.is_empty() {
-                    format!("{TEXT_DIM}_ (escribe nombre){RESET}")
+                let name_right = format!("{amber}[Enter|Esc]{RESET}");
+                let name_left = if width < 42 {
+                    let max_buf = width.saturating_sub(24).max(4);
+                    let input_display = if snap.name_input_buffer.is_empty() {
+                        format!("{text_dim}_{RESET}")
+                    } else {
+                        format!(
+                            "{BOLD}{text_primary}{}{RESET}{mint}_{RESET}",
+                            truncate_plain(&snap.name_input_buffer, max_buf)
+                        )
+                    };
+                    format!("{label_color}Nom{RESET} > {input_display}")
                 } else {
-                    format!(
-                        "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
-                        snap.name_input_buffer
-                    )
+                    let input_display = if snap.name_input_buffer.is_empty() {
+                        format!("{text_dim}_ (escribe nombre){RESET}")
+                    } else {
+                        format!(
+                            "{BOLD}{text_primary}{}{RESET}{mint}_{RESET}",
+                            snap.name_input_buffer
+                        )
+                    };
+                    format!("{label_color}Nombre{RESET}  > {input_display}")
                 };
-                let name_left = format!("{label_color}Nombre{RESET}  > {input_display}");
-                let name_right = format!("{AMBER}[Enter|Esc]{RESET}");
                 lines.push(draw_row(&name_left, &name_right, width));
             } else {
                 let (name_val, badge_text, badge_color) = match snap
@@ -3116,9 +3143,13 @@ pub fn render_screen_tabbed(
                     Some(n) => (n, "[editar >]", accent_primary),
                     None => ("HUDR2", "[editar >]", accent_primary),
                 };
-                let name_left =
-                    format!("{label_color}Nombre{RESET}  {TEXT_PRIMARY}{name_val}{RESET}");
                 let name_right = format!("{badge_color}{badge_text}{RESET}");
+                let max_name = width
+                    .saturating_sub(4 + string_width(&name_right) + 1 + 8)
+                    .max(4);
+                let short_name = truncate_plain(name_val, max_name);
+                let name_left =
+                    format!("{label_color}Nombre{RESET}  {text_primary}{short_name}{RESET}");
                 lines.push(draw_row(&name_left, &name_right, width));
             }
             bounds.push(CardBounds {
@@ -3131,9 +3162,13 @@ pub fn render_screen_tabbed(
 
             // 2. Fila interactiva para ciclar temas visuales
             let theme_label = crate::theme::theme_display_label(snap.theme_name.as_deref());
-            let theme_left =
-                format!("{label_color}Tema{RESET}    {TEXT_PRIMARY}{theme_label}{RESET}");
             let theme_right = format!("{accent_primary}[cambiar >]{RESET}");
+            let max_theme = width
+                .saturating_sub(4 + string_width(&theme_right) + 1 + 8)
+                .max(4);
+            let short_theme = truncate_plain(&theme_label, max_theme);
+            let theme_left =
+                format!("{label_color}Tema{RESET}    {text_primary}{short_theme}{RESET}");
             let theme_row_idx = lines.len();
             lines.push(draw_row(&theme_left, &theme_right, width));
             bounds.push(CardBounds {
@@ -3163,8 +3198,11 @@ pub fn render_screen_tabbed(
             });
 
             // 4. Fila interactiva para configurar alertas sonoras de orquestación
-            let sound_left =
-                format!("{label_color}Avisos{RESET}  {text_primary}Alertas sonoras{RESET}");
+            let sound_left = if width < 40 {
+                format!("{label_color}Avisos{RESET}  {text_primary}Sonido{RESET}")
+            } else {
+                format!("{label_color}Avisos{RESET}  {text_primary}Alertas sonoras{RESET}")
+            };
             let (sound_badge, is_active) = snap.sound_mode.display_badge();
             let sound_color = if is_active { mint } else { text_dim };
             let sound_right = format!("{sound_color}{sound_badge}{RESET}");
@@ -3179,9 +3217,20 @@ pub fn render_screen_tabbed(
             });
 
             // 5. Fila interactiva para activar/desactivar chequeo online de versiones del stack
-            let updates_left =
-                format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}");
-            let (updates_badge, updates_color) = if snap.check_updates {
+            let updates_left = if width < 36 {
+                format!("{label_color}Upd{RESET} {text_primary}Online{RESET}")
+            } else if width < 42 {
+                format!("{label_color}Updates{RESET} {text_primary}Online{RESET}")
+            } else {
+                format!("{label_color}Updates{RESET} {text_primary}Check online{RESET}")
+            };
+            let (updates_badge, updates_color) = if width < 36 {
+                if snap.check_updates {
+                    ("[x] 3h", mint)
+                } else {
+                    ("[ ] off", text_dim)
+                }
+            } else if snap.check_updates {
                 ("[x] activo (3h)", mint)
             } else {
                 ("[ ] apagado", text_dim)
@@ -3207,6 +3256,28 @@ pub fn render_screen_tabbed(
         });
     }
 
+    if let Some(active_tab) = tab
+        && active_tab != ActiveTab::Ajustes
+        && bounds.is_empty()
+    {
+        lines.push(draw_top(
+            &format!("{title_color}Pesta\u{00f1}a vac\u{00ed}a{RESET}"),
+            false,
+            width,
+        ));
+        lines.push(draw_row(
+            &format!("{text_muted}Sin tarjetas visibles{RESET}"),
+            "",
+            width,
+        ));
+        lines.push(draw_row(
+            &format!("{text_dim}Pulsa 0 o 5 para activar{RESET}"),
+            "",
+            width,
+        ));
+        lines.push(draw_bottom(width));
+    }
+
     if !flash_rendered
         && let Some(notice) = flash_notice
     {
@@ -3220,10 +3291,10 @@ pub fn render_screen_tabbed(
     }
 
     // Footer de atajos
-    if snap.is_editing_name {
+    if snap.is_editing_name || snap.is_editing_balance {
         lines.push(truncate_to_width(
             &format!(
-                "{AMBER} Enter: guardar \u{00b7} Esc: cancelar \u{00b7} Retroceso: borrar{RESET}"
+                "{amber} Enter: guardar \u{00b7} Esc: cancelar \u{00b7} Retroceso: borrar{RESET}"
             ),
             width,
         ));
@@ -3231,14 +3302,14 @@ pub fn render_screen_tabbed(
         if current_tab == ActiveTab::Ajustes {
             lines.push(truncate_to_width(
                 &format!(
-                    "{TEXT_DIM} n: nombre \u{00b7} m: tema \u{00b7} v: vista \u{00b7} u: updates \u{00b7} [1-4]: volver{RESET}"
+                    "{text_dim} n: nombre \u{00b7} m: tema \u{00b7} v: vista \u{00b7} u: updates \u{00b7} [1-4]: volver{RESET}"
                 ),
                 width,
             ));
         } else {
             lines.push(truncate_to_width(
                 &format!(
-                    "{TEXT_DIM} 1-4: pest \u{00b7} ☼/0: aju \u{00b7} v: vista \u{00b7} Tab: ciclo \u{00b7} c: colapso{RESET}"
+                    "{text_dim} 1-4: pest \u{00b7} 0/5: aju \u{00b7} v: vista \u{00b7} Tab: ciclo \u{00b7} c: colapso{RESET}"
                 ),
                 width,
             ));
@@ -3246,7 +3317,7 @@ pub fn render_screen_tabbed(
     } else {
         lines.push(truncate_to_width(
             &format!(
-                "{TEXT_DIM} 0-9: colap \u{00b7} v: pestañas \u{00b7} p: pers \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: lib{RESET}"
+                "{text_dim} 0-9: colap \u{00b7} v: pesta\u{00f1}as \u{00b7} t: pers \u{00b7} m: tema \u{00b7} c: todo \u{00b7} d: lib{RESET}"
             ),
             width,
         ));
@@ -3270,14 +3341,14 @@ pub fn render_screen_tabbed(
     let (audit_label, critical_action) = if has_active_critical {
         (
             "a: aud",
-            format!("{CORAL}x: migrar ({target_healthy}){TEXT_DIM} \u{00b7} {RESET}"),
+            format!("{coral}x: migrar ({target_healthy}){text_dim} \u{00b7} {RESET}"),
         )
     } else {
         ("a: auditar", String::new())
     };
     lines.push(truncate_to_width(
         &format!(
-            "{TEXT_DIM} s: sync \u{00b7} r: act \u{00b7} {audit_label} \u{00b7} {critical_action}q: salir{RESET}"
+            "{text_dim} s: sync \u{00b7} r: act \u{00b7} {audit_label} \u{00b7} {critical_action}q: salir{RESET}"
         ),
         width,
     ));

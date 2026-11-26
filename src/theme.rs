@@ -564,8 +564,8 @@ pub fn parse_herdr_theme_name(content: &str) -> Option<String> {
             continue;
         }
         if in_theme_section
-            && clean_line.starts_with("name")
-            && let Some((_, raw_val)) = clean_line.split_once('=')
+            && let Some((key, raw_val)) = clean_line.split_once('=')
+            && key.trim() == "name"
         {
             let clean = raw_val.trim().trim_matches(['"', '\'']);
             if !clean.is_empty() {
