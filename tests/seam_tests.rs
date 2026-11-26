@@ -1515,7 +1515,16 @@ mod tests {
             .all_active_prefixes
             .insert("agy2_1".to_string());
 
-        let render_out = ui::render_screen(&state.snapshot, &state.collapsed_cards, None, 50);
+        let render_out = ui::render_screen_with_diff_and_theme(
+            &state.snapshot,
+            &state.collapsed_cards,
+            None,
+            None,
+            &[],
+            &state.hidden_cards,
+            50,
+            &hudr2::theme::LINEAR_STUDIO,
+        );
         let screen_text = ui::strip_ansi(&render_out.lines.join("\n"));
 
         // 1. La tarjeta NO debe marcar 'crític' en el encabezado
@@ -10938,5 +10947,446 @@ api-keys:
                 "Tarjeta Orquestadores debe usar paleta del tema activo en ancho {w}"
             );
         }
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_compact_labels_agy_family_pools_and_rev4r_heterogeneous() {
+        use hudr2::models::{
+            AccountQuota, AgentSession, OrchestratorProfile, OrchestratorStatus, QuotaPool,
+            SubAgentProfile,
+        };
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        // 1. Honestidad de compact_model_label (sin fabricar "5-5", "3.8-flash" ni "5.6-sol")
+        assert_eq!(ui::compact_model_label("claude-opus-4-6"), "opus-4-6");
+        assert_eq!(
+            ui::compact_model_label("claude-sonnet-4-6-20251022"),
+            "sonnet-4-6"
+        );
+        assert_eq!(ui::compact_model_label("claude-3-7-sonnet"), "3-7-sonnet");
+        assert_eq!(ui::compact_model_label("gemini-2.5-flash"), "2.5-flash");
+        assert_eq!(
+            ui::compact_model_label("glm-5.3-flash-free"),
+            "glm-5.3-flash-free"
+        );
+        assert_eq!(
+            ui::compact_model_label("my-solution-v1"),
+            "my-solution-v1"
+        );
+        // Preservar nombres legados de flota existentes
+        assert_eq!(ui::compact_model_label("claude-opus-5-5"), "opus-5-5");
+        assert_eq!(ui::compact_model_label("claude-sonnet-5-5"), "sonnet-5-5");
+        assert_eq!(ui::compact_model_label("gpt-5.6-sol"), "5.6-sol");
+        assert_eq!(
+            ui::compact_model_label("agy2/gemini-3.8-flash-high"),
+            "3.8-flash"
+        );
+        assert_eq!(ui::compact_model_label("codex-auto-review"), "codex-review");
+
+        // 2. Pools multi-familia en AGY: orch usa Gemini (100%), worker usa Claude (5% [AGOTADO])
+        let agy_acc = AccountQuota {
+            prefix: "agy-t8".to_string(),
+            auth_file: "antigravity-t8.json".to_string(),
+            rem_5h: 100,
+            reset_5h: "4h 50m".to_string(),
+            rem_wk: 100,
+            reset_wk: "4d 10h".to_string(),
+            pools: vec![
+                QuotaPool {
+                    label: "Gemini 5h".to_string(),
+                    percent: 100,
+                    reset: "4h 50m".to_string(),
+                    pace: "ok".to_string(),
+                },
+                QuotaPool {
+                    label: "Gemini Wk".to_string(),
+                    percent: 100,
+                    reset: "4d 10h".to_string(),
+                    pace: "ok".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude 5h".to_string(),
+                    percent: 5,
+                    reset: "1h 20m".to_string(),
+                    pace: "agotado".to_string(),
+                },
+                QuotaPool {
+                    label: "Claude Wk".to_string(),
+                    percent: 12,
+                    reset: "2d 0h".to_string(),
+                    pace: "bajo".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let agy_b = AccountQuota {
+            prefix: "agy-t8-b".to_string(),
+            auth_file: "antigravity-t8-b.json".to_string(),
+            rem_5h: 82,
+            reset_5h: "3h 40m".to_string(),
+            rem_wk: 90,
+            reset_wk: "4d 0h".to_string(),
+            ..Default::default()
+        };
+
+        let orch = OrchestratorProfile {
+            name: "agy-fleet".to_string(),
+            display_name: "agy-fleet".to_string(),
+            model: "agy-t8/gemini-3-pro-high".to_string(),
+            model_short: "gemini-3-pro".to_string(),
+            prefix: Some("agy-t8".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "agy-t8/claude-opus-4-6".to_string(),
+                    model_short: "claude-opus-4-6".to_string(),
+                    prefix: Some("agy-t8".to_string()),
+                    thinking: None,
+                },
+                SubAgentProfile {
+                    role: "review-risk".to_string(),
+                    model: "agy-t8/claude-opus-4-6".to_string(),
+                    model_short: "claude-opus-4-6".to_string(),
+                    prefix: Some("agy-t8".to_string()),
+                    thinking: None,
+                },
+                SubAgentProfile {
+                    role: "review-readability".to_string(),
+                    model: "agy-t8-b/gemini-2.5-flash".to_string(),
+                    model_short: "gemini-2.5-flash".to_string(),
+                    prefix: Some("agy-t8-b".to_string()),
+                    thinking: None,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let mut st = AppState::new();
+        st.snapshot.accounts = vec![agy_acc, agy_b];
+        st.snapshot.orchestrators = vec![orch];
+        st.snapshot.agent_session = AgentSession {
+            agent: "agy-fleet".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy-t8".to_string()),
+            model_short: "gemini-3-pro".to_string(),
+            ..Default::default()
+        };
+
+        let out = ui::render_screen_tabbed(
+            &st.snapshot,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            72,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let pb = out
+            .bounds
+            .iter()
+            .find(|b| b.id == "pools")
+            .expect("debe registrar bounds de pools");
+        let pools_clean = ui::strip_ansi(&out.lines[pb.start_line..=pb.end_line].join("\n"));
+
+        let worker_line = pools_clean
+            .lines()
+            .find(|l| l.contains("worker"))
+            .expect("debe renderizar fila worker");
+        assert!(
+            worker_line.contains("5%") && worker_line.contains("[AGOTADO]"),
+            "worker en AGY con claude-opus-4-6 debe reflejar pool Claude 5% [AGOTADO]: {worker_line}"
+        );
+        assert!(
+            worker_line.contains("opus-4-6"),
+            "worker debe mostrar etiqueta real opus-4-6: {worker_line}"
+        );
+
+        // 3. Revisores heterogéneos no deben colapsar en rev-4r ocultando cuentas/modelos distintos
+        assert!(
+            !pools_clean.contains("rev-4r"),
+            "reviewers con distinta cuenta/modelo no deben colapsarse en rev-4r:\n{pools_clean}"
+        );
+        assert!(
+            pools_clean.contains("rev-risk") && pools_clean.contains("rev-read"),
+            "debe mostrar filas separadas para review-risk y review-readability:\n{pools_clean}"
+        );
+        assert!(
+            pools_clean.contains("2.5-flash") && pools_clean.contains("82%"),
+            "debe preservar modelo 2.5-flash y cuota 82% de agy-t8-b:\n{pools_clean}"
+        );
+    }
+
+    #[test]
+    fn test_cuota_de_modelos_shared_prefix_unused_subagents_clocks_b_safety_and_theme() {
+        use chrono::TimeZone;
+        use hudr2::models::{
+            AccountQuota, AgentSession, HerdrPane, OrchestratorProfile, OrchestratorStatus,
+            QuotaPool, SubAgentProfile, SubagentInvocation, TelemetrySnapshot,
+        };
+        use hudr2::state::ActiveTab;
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::HashSet;
+
+        let shared_acc = AccountQuota {
+            prefix: "agy-shared".to_string(),
+            auth_file: "antigravity-shared.json".to_string(),
+            rem_5h: 92,
+            reset_5h: "4h 10m".to_string(),
+            rem_wk: 88,
+            reset_wk: "4d 0h".to_string(),
+            ..Default::default()
+        };
+        let warn_acc = AccountQuota {
+            prefix: "agy-warn".to_string(),
+            auth_file: "antigravity-warn.json".to_string(),
+            rem_5h: 22,
+            reset_5h: "1h 10m".to_string(),
+            rem_wk: 40,
+            reset_wk: "2d 0h".to_string(),
+            is_warning: true,
+            ..Default::default()
+        };
+        let crit_acc = AccountQuota {
+            prefix: "agy-crit".to_string(),
+            auth_file: "antigravity-crit.json".to_string(),
+            rem_5h: 8,
+            reset_5h: "0h 30m".to_string(),
+            rem_wk: 15,
+            reset_wk: "1d 0h".to_string(),
+            is_critical: true,
+            ..Default::default()
+        };
+        let api_acc = AccountQuota {
+            prefix: "tavoclaude".to_string(),
+            auth_file: "config.yaml#tavoclaude".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            ..Default::default()
+        };
+
+        let real_epoch_sec = 1_764_000_000i64;
+        let expected_local_clock = chrono::Utc
+            .timestamp_opt(real_epoch_sec, 0)
+            .single()
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M:%S")
+            .to_string();
+
+        let mut st = AppState::new();
+        st.tabbed = true;
+        st.active_tab = ActiveTab::Sesion;
+        st.snapshot.project_dir = "D:/my-project".to_string();
+        st.snapshot.accounts = vec![shared_acc, warn_acc, crit_acc, api_acc];
+        st.snapshot.orchestrators = vec![OrchestratorProfile {
+            name: "fleet-shared".to_string(),
+            display_name: "fleet-shared".to_string(),
+            model: "agy-shared/gemini-3-pro".to_string(),
+            model_short: "gemini-3-pro".to_string(),
+            prefix: Some("agy-shared".to_string()),
+            status: OrchestratorStatus::Working,
+            subagents: vec![
+                SubAgentProfile {
+                    role: "worker".to_string(),
+                    model: "agy-shared/gemini-3-flash".to_string(),
+                    model_short: "gemini-3-flash".to_string(),
+                    prefix: Some("agy-shared".to_string()),
+                    thinking: None,
+                },
+                SubAgentProfile {
+                    role: "explore".to_string(),
+                    model: "agy-warn/gemini-3-flash".to_string(),
+                    model_short: "gemini-3-flash".to_string(),
+                    prefix: Some("agy-warn".to_string()),
+                    thinking: None,
+                },
+                SubAgentProfile {
+                    role: "verify".to_string(),
+                    model: "agy-crit/gemini-3-pro".to_string(),
+                    model_short: "gemini-3-pro".to_string(),
+                    prefix: Some("agy-crit".to_string()),
+                    thinking: None,
+                },
+                SubAgentProfile {
+                    role: "audit".to_string(),
+                    model: "agy-shared/gemini-3-flash".to_string(),
+                    model_short: "gemini-3-flash".to_string(),
+                    prefix: Some("agy-shared".to_string()),
+                    thinking: None,
+                },
+            ],
+            ..Default::default()
+        }];
+
+        // all_active_prefixes contiene agy-shared (del orquestador) + pane working ajeno con "worker"
+        let mut active_prefixes = HashSet::new();
+        active_prefixes.insert("agy-shared".to_string());
+        st.snapshot.agent_session = AgentSession {
+            agent: "fleet-shared".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("agy-shared".to_string()),
+            model_short: "gemini-3-pro".to_string(),
+            all_active_prefixes: active_prefixes,
+            subagent_invocations: vec![SubagentInvocation {
+                session_id: "ses_audit".to_string(),
+                role: "audit".to_string(),
+                model: "agy-shared/gemini-3-flash".to_string(),
+                model_short: "gemini-3-flash".to_string(),
+                local_prefix: Some("agy-shared".to_string()),
+                status: "idle".to_string(),
+                tokens_input: 100,
+                tokens_output: 50,
+                started_at: Some(real_epoch_sec),
+                finished_at: Some(real_epoch_sec + 30),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        st.snapshot.panes = vec![HerdrPane {
+            pane_id: "w9:p1".to_string(),
+            cwd: Some("D:/other-project".to_string()),
+            agent: Some("worker".to_string()),
+            agent_status: Some("working".to_string()),
+            ..Default::default()
+        }];
+
+        // 1. Seguridad tecla 'b': bloqueada fuera de Tab Modelos o si 'saldos' está oculta;
+        //    cuando activa usa fallback API key y expande Card 6
+        assert!(!st.can_edit_balance_in_current_view());
+        st.active_tab = ActiveTab::Modelos;
+        assert!(st.can_edit_balance_in_current_view());
+        st.hidden_cards.insert("saldos".to_string());
+        assert!(!st.can_edit_balance_in_current_view());
+        st.hidden_cards.remove("saldos");
+
+        assert_eq!(
+            st.resolve_balance_edit_target(),
+            Some("tavoclaude".to_string())
+        );
+        st.collapsed_cards[6] = true;
+        st.start_edit_balance("tavoclaude");
+        assert!(
+            !st.collapsed_cards[6],
+            "start_edit_balance debe expandir Card 6 Saldos API para mostrar el input"
+        );
+        st.cancel_edit_balance();
+
+        for w in [36usize, 56usize] {
+            let out = ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                w,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Modelos),
+            );
+            let pb = out
+                .bounds
+                .iter()
+                .find(|b| b.id == "pools")
+                .expect("debe registrar bounds de pools");
+            for line in &out.lines[pb.start_line..=pb.end_line] {
+                assert!(
+                    ui::string_width(line) <= w,
+                    "Línea en Cuota de Modelos excede ancho {w}: {}",
+                    ui::strip_ansi(line)
+                );
+            }
+            let pools_raw = out.lines[pb.start_line..=pb.end_line].join("\n");
+            let pools_clean = ui::strip_ansi(&pools_raw);
+            assert!(
+                pools_clean.contains("> orch"),
+                "Orquestador debe estar '> orch':\n{pools_clean}"
+            );
+            assert!(
+                pools_clean.contains("○ worker") && pools_clean.contains("○ explore"),
+                "Subagentes sin invocación (incluido prefijo compartido y pane cwd ajeno) deben permanecer en '○':\n{pools_clean}"
+            );
+            assert!(
+                pools_clean.contains("● audit") && pools_clean.contains(&expected_local_clock),
+                "Subagente audit finalizado debe mostrar '●' y hora local {expected_local_clock}:\n{pools_clean}"
+            );
+            assert!(
+                pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                    && pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.amber)
+                    && pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                    && pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary)
+                    && pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_muted)
+                    && pools_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim),
+                "Tarjeta Cuota de Modelos (fleet) debe usar paleta del tema activo en ancho {w}"
+            );
+        }
+
+        // 2. Fallback legado con etiqueta larga sin exceder ancho ni usar colores oscuros fijos
+        let legacy_snap = TelemetrySnapshot {
+            accounts: vec![AccountQuota {
+                prefix: "agy-legacy".to_string(),
+                auth_file: "antigravity-legacy.json".to_string(),
+                pools: vec![
+                    QuotaPool {
+                        label: "Gemini 3.8 Flash (Extended)".to_string(),
+                        percent: 90,
+                        reset: "4h 50m".to_string(),
+                        pace: "ok".to_string(),
+                    },
+                    QuotaPool {
+                        label: "Warn Pool".to_string(),
+                        percent: 35,
+                        reset: "2h 00m".to_string(),
+                        pace: "bajo".to_string(),
+                    },
+                    QuotaPool {
+                        label: "Crit Pool".to_string(),
+                        percent: 10,
+                        reset: "0h 40m".to_string(),
+                        pace: "agotado".to_string(),
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let leg_out = ui::render_screen_tabbed(
+            &legacy_snap,
+            &[false; 13],
+            None,
+            None,
+            &[],
+            &HashSet::new(),
+            36,
+            &HERDR_TOKYO_NIGHT_DAY,
+            Some(ActiveTab::Modelos),
+        );
+        let lpb = leg_out
+            .bounds
+            .iter()
+            .find(|b| b.id == "pools")
+            .expect("debe registrar bounds legacy de pools");
+        for line in &leg_out.lines[lpb.start_line..=lpb.end_line] {
+            assert!(
+                ui::string_width(line) <= 36,
+                "Fallback legacy excede ancho 36: {}",
+                ui::strip_ansi(line)
+            );
+        }
+        let leg_raw = leg_out.lines[lpb.start_line..=lpb.end_line].join("\n");
+        assert!(
+            leg_raw.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                && leg_raw.contains(HERDR_TOKYO_NIGHT_DAY.amber)
+                && leg_raw.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                && leg_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary)
+                && leg_raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim),
+            "Fallback legacy de Cuota de Modelos debe usar paleta del tema activo"
+        );
     }
 }

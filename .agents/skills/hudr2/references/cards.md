@@ -68,23 +68,23 @@
   - Keybindings: `5` toggles collapse, `x` triggers orchestrator migration, `d` triggers confined idle session liberation.
 
 ## 5. `Cuota de Modelos` (`id: "pools"`, index `5`)
-- **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped exclusively to the active orchestrator, fallback to `<active_acc_prefix> *` or first account).
+- **Header:** `Cuota de Modelos · <active_orch_name> *` (scoped exclusively to the active orchestrator, fallback to `<active_acc_prefix> *` or first account), themed with active `Theme` tokens (`title_color`, `text_dim`, `text_primary`, `text_muted`, `mint`, `amber`, `coral`, `accent_secondary`; `MAGENTA` reserved for passive bullets `●`).
 - **Orchestrator Fleet Breakdown (Diseño Compacto con roles limpios y colapso rev-4r):**
   - Identifies the active orchestrator from Card 4 `Orquestadores` (`Working` -> `Idle` -> `is_default` -> first profile).
   - Inspects only the subagents and orchestrator models configured for that specific orchestrator profile (from Gentle AI `~/.pi/gentle-ai/profiles.json` and OpenCode `opencode.json`). Never mixes subagents from other orchestrators.
   - Runtime-only observations (including ZenWarp actors) never create extra inventory rows; a model appears only when it belongs to the selected configured fleet.
-  - Role simplification: Shortens role identifiers to eliminate redundant prefixes (`gentle-ai-*`, `sdd-*`): `orch`, `worker`, `fix`, `explore`, `verify`, `deep-rsch`, `news-rsch`, `judge-a`, `judge-b`, `ui-design`.
-  - Review consolidation: Groups the 4 review lenses (`review-risk`, `review-readability`, `review-reliability`, `review-resilience`) into a single collapsed active row: `rev-4r (sonnet-5-5)`.
-  - Model abbreviation: Formats model names cleanly: `sonnet-5-5`, `opus-5-5`, `5.6-sol`, `5.6-terra`, `5.6-luna`, `codex-review`, `3.8-flash`.
+  - Role simplification: Shortens role identifiers cleanly via `clean_subagent_role` (`orch`, `worker`, `fix`, `explore`, `verify`, `deep-rsch`, `news-rsch`, `judge-a`, `judge-b`, `ui-design`, `rev-risk`, `rev-read`, `rev-rel`, `rev-res`) padded safely via `pad_to_width` so long labels never overflow narrow panes.
+  - Review consolidation: Collapses review lenses into `rev-4r` **only when homogeneous** in account prefix and compact model; heterogeneous reviewers render as separate `rev-risk`/`rev-read`/etc. rows so distinct accounts/models remain visible.
+  - Model abbreviation: `compact_model_label` strips provider prefixes, thinking suffixes (`-high`, `-medium`, etc.), and `-YYYYMMDD` date stamps honestly without fabricating versions (`claude-opus-4-6` -> `opus-4-6`, `gemini-2.5-flash` -> `2.5-flash`, `codex-auto-review` -> `codex-review`).
    - Runtime visual activity glyphs:
      - `>` in accent color (`ACCENT_SECONDARY`) + bright bold text (`BOLD TEXT_PRIMARY`) for the active working model/agent (`Working`).
-     - `●` in purple (`MAGENTA`) + white text (`TEXT_PRIMARY`) for child sessions that finished or other passive components observed at runtime.
+     - `●` in purple (`MAGENTA`) + `theme.text_primary` for finished child sessions or distinct-prefix runtime activity (subagents sharing the orchestrator's prefix require explicit invocation evidence and otherwise stay `○`; pane activity is scoped by `cwd`). Each child row formats real epoch timestamps (`>= 86_400`) in `chrono::Local` wall-clock time.
      - `○` in gray (`TEXT_DIM`) + gray text (`TEXT_MUTED`) for inactive / unused components in this session.
      - Each observed OpenCode child session adds a compact detail row with local start/end clocks and its own attributable dollar/token consumption; a running child shows `fin activo`.
   - Quota and Balance Projections:
-    - For OAuth accounts (Antigravity): evaluates the sovereign/target pool for that model with traffic-light thresholds (`CORAL` `<= 15%`, `AMBER` `<= 50%`, `MINT` `> 50%`) with inline gauge and `%` remaining (`5h` and `Wk`).
+    - For OAuth accounts (Antigravity): evaluates the subagent/orchestrator's own model family pool via `evaluate_account_for_sovereign_model` (`theme.coral` `<= 15%`, `theme.amber` `<= 50%`, `theme.mint` `> 50%`) with inline gauge and `%` remaining (`5h` and `Wk`).
     - For API key and subscription accounts (Claude, Codex): renders session cost or balance remaining (`$XX.XX disp` / `$X.XX sesión`) with financial traffic-light thresholds (`CORAL` `<= 8%`, `AMBER` `<= 20%`, `MINT` `> 20%`).
-  - Interactive balance editing: Allows in-place balance editing for active API key accounts (`[editar saldo]` / key `b`).
+  - Interactive balance editing: Key `b` is gated by `can_edit_balance_in_current_view()` (only Tab `Modelos` / un-tabbed view when `saldos` is visible), uses `resolve_balance_edit_target()` to target an API-key account, and expands Card 6 (`collapsed_cards[6] = false`).
   - Legacy fallback: When no orchestrator profiles are discovered (e.g. tests or isolated environments), gracefully falls back to single-account pool breakdown.
 
 ## 6. `Saldos API` (`id: "saldos"`, index `6`, key `$`)

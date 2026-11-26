@@ -659,7 +659,52 @@ impl AppState {
         self.needs_redraw = true;
     }
 
+    pub fn can_edit_balance_in_current_view(&self) -> bool {
+        !self.hidden_cards.contains("saldos")
+            && (!self.tabbed || self.active_tab == ActiveTab::Modelos)
+    }
+
+    pub fn resolve_balance_edit_target(&self) -> Option<String> {
+        let is_api_prefix = |pfx: &str| {
+            self.snapshot
+                .accounts
+                .iter()
+                .find(|a| a.prefix.eq_ignore_ascii_case(pfx))
+                .is_some_and(crate::quotas::is_api_key)
+        };
+
+        if let Some(ref lp) = self.snapshot.agent_session.local_prefix
+            && is_api_prefix(lp)
+        {
+            return Some(lp.clone());
+        }
+
+        if let Some(orch_pfx) = self
+            .snapshot
+            .orchestrators
+            .iter()
+            .filter(|o| o.status == crate::models::OrchestratorStatus::Working)
+            .chain(
+                self.snapshot
+                    .orchestrators
+                    .iter()
+                    .filter(|o| o.is_default),
+            )
+            .filter_map(|o| o.prefix.as_deref())
+            .find(|pfx| is_api_prefix(pfx))
+        {
+            return Some(orch_pfx.to_string());
+        }
+
+        self.snapshot
+            .accounts
+            .iter()
+            .find(|a| crate::quotas::is_api_key(a))
+            .map(|a| a.prefix.clone())
+    }
+
     pub fn start_edit_balance(&mut self, prefix: &str) {
+        self.collapsed_cards[6] = false;
         self.is_editing_balance = true;
         self.editing_balance_prefix = Some(prefix.to_string());
         let current_budget = crate::quotas::cliproxy::get_user_configured_budget(prefix);

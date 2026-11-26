@@ -954,35 +954,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             state.start_edit_sidebar_name();
                                         }
                                         KeyCode::Char('b') => {
-                                            let maybe_target = {
-                                                let default_pfx = state
-                                                    .snapshot
-                                                    .accounts
-                                                    .first()
-                                                    .map(|a| a.prefix.as_str())
-                                                    .unwrap_or("local");
-                                                let active_pfx = state
-                                                    .snapshot
-                                                    .agent_session
-                                                    .local_prefix
-                                                    .as_deref()
-                                                    .unwrap_or(default_pfx);
-                                                let is_api = state
-                                                    .snapshot
-                                                    .accounts
-                                                    .iter()
-                                                    .find(|a| {
-                                                        a.prefix.eq_ignore_ascii_case(active_pfx)
-                                                    })
-                                                    .map(hudr2::quotas::is_api_key)
-                                                    .unwrap_or(false);
-                                                if is_api {
-                                                    Some(active_pfx.to_string())
-                                                } else {
-                                                    None
-                                                }
-                                            };
-                                            if let Some(pfx) = maybe_target {
+                                            if state.can_edit_balance_in_current_view()
+                                                && let Some(pfx) =
+                                                    state.resolve_balance_edit_target()
+                                            {
                                                 state.start_edit_balance(&pfx);
                                             }
                                         }

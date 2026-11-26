@@ -173,8 +173,28 @@ fn format_invocation_clock(timestamp: Option<i64>) -> String {
         (timestamp, 0)
     };
     chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, nanos)
-        .map(|time| time.format("%H:%M:%S").to_string())
+        .map(|time| {
+            // Timestamps reales (>= 1 día desde Unix epoch) se muestran en hora local;
+            // offsets sintéticos pequeños (< 86400s) se mantienen en UTC determinista.
+            if seconds.abs() >= 86_400 {
+                time.with_timezone(&chrono::Local)
+                    .format("%H:%M:%S")
+                    .to_string()
+            } else {
+                time.format("%H:%M:%S").to_string()
+            }
+        })
         .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn pad_to_width(s: &str, target_w: usize) -> String {
+    let truncated = truncate_plain(s, target_w);
+    let pad = target_w.saturating_sub(string_width(&truncated));
+    if pad == 0 {
+        truncated
+    } else {
+        format!("{truncated}{}", " ".repeat(pad))
+    }
 }
 
 fn truncate_plain(s: &str, max_width: usize) -> String {
@@ -454,42 +474,60 @@ pub fn format_tokens(num: i64) -> String {
 
 pub fn compact_model_label(model: &str) -> String {
     let clean = crate::opencode::normalize_model_str(model);
-    let base = clean.rsplit('/').next().unwrap_or(&clean).to_lowercase();
+    let mut base = clean
+        .rsplit('/')
+        .next()
+        .unwrap_or(&clean)
+        .trim()
+        .to_lowercase();
 
-    if base.contains("sonnet") {
-        "sonnet-5-5".to_string()
-    } else if base.contains("opus") {
-        "opus-5-5".to_string()
-    } else if base.contains("haiku") {
-        "haiku-5-5".to_string()
-    } else if base.contains("5.6-sol") || base.contains("sol") {
-        "5.6-sol".to_string()
-    } else if base.contains("5.6-terra") || base.contains("terra") {
-        "5.6-terra".to_string()
-    } else if base.contains("5.6-luna") || base.contains("luna") {
-        "5.6-luna".to_string()
-    } else if base.contains("codex-auto-review")
-        || base.contains("codex-review")
-        || (base.contains("codex") && base.contains("review"))
-    {
-        "codex-review".to_string()
-    } else if base.contains("gemini-3.8-flash")
-        || base.contains("3.8-flash")
-        || (base.contains("3.8") && base.contains("flash"))
-        || base.contains("flash")
-    {
-        "3.8-flash".to_string()
-    } else if base.contains("gemini-3.8-pro")
-        || base.contains("3.8-pro")
-        || (base.contains("3.8") && base.contains("pro"))
-    {
-        "3.8-pro".to_string()
-    } else {
-        base.trim_start_matches("gpt-")
-            .trim_start_matches("claude-")
-            .trim_start_matches("gemini-")
-            .to_string()
+    for prefix in [
+        "anthropic-",
+        "claude-",
+        "openai-",
+        "gpt-",
+        "google-",
+        "gemini-",
+    ] {
+        if let Some(stripped) = base.strip_prefix(prefix)
+            && !stripped.is_empty()
+        {
+            base = stripped.to_string();
+            break;
+        }
     }
+
+    if base == "codex-auto-review" {
+        return "codex-review".to_string();
+    }
+
+    loop {
+        let trimmed = base
+            .strip_suffix("-xhigh")
+            .or_else(|| base.strip_suffix("-high"))
+            .or_else(|| base.strip_suffix("-medium"))
+            .or_else(|| base.strip_suffix("-low"))
+            .or_else(|| base.strip_suffix("-minimal"))
+            .or_else(|| base.strip_suffix("-thinking"));
+        if let Some(next) = trimmed
+            && !next.is_empty()
+        {
+            base = next.to_string();
+        } else {
+            break;
+        }
+    }
+
+    if let Some((head, tail)) = base.rsplit_once('-')
+        && !head.is_empty()
+        && tail.len() == 8
+        && tail.starts_with("20")
+        && tail.bytes().all(|b| b.is_ascii_digit())
+    {
+        base = head.to_string();
+    }
+
+    base
 }
 
 pub fn clean_subagent_role(role: &str) -> String {
@@ -513,12 +551,14 @@ pub fn clean_subagent_role(role: &str) -> String {
         s.replace("jd-judge-", "judge-")
     } else if s == "jd-fix" {
         "fix".to_string()
+    } else if s == "review-risk" {
+        "rev-risk".to_string()
     } else if s == "review-readability" {
-        "review-read".to_string()
+        "rev-read".to_string()
     } else if s == "review-reliability" {
-        "review-rel".to_string()
+        "rev-rel".to_string()
     } else if s == "review-resilience" {
-        "review-res".to_string()
+        "rev-res".to_string()
     } else if s == "deep-researcher" {
         "deep-rsch".to_string()
     } else if s == "news-researcher" {
@@ -1522,7 +1562,7 @@ pub fn render_screen_tabbed(
 
         if let Some(orch) = active_orch {
             let pool_title = format!(
-                "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{}{RESET} {accent_secondary}*{RESET}",
+                "{title_color}Cuota de Modelos{RESET} {text_dim}\u{00b7}{RESET} {mint}{}{RESET} {accent_secondary}*{RESET}",
                 orch.display_name()
             );
 
@@ -1549,16 +1589,15 @@ pub fn render_screen_tabbed(
                     all_roles: vec![orch.name.as_str(), orch.display_name(), "orchestrator"],
                 });
 
-                // Agrupar subagentes y colapsar las 4 revisiones (review-risk, readability, reliability, resilience) en 'rev-4r'
+                // Agrupar subagentes y colapsar revisiones (review-risk, readability, reliability, resilience) en 'rev-4r'
+                // solo si son homogéneas en cuenta y modelo compacto.
                 let review_roles = [
                     "review-risk",
                     "review-readability",
                     "review-reliability",
                     "review-resilience",
                 ];
-                let mut has_review_group = false;
-                let mut review_prefix: Option<&str> = None;
-                let mut review_model: &str = "claude-sonnet-5-5";
+                let mut review_subs: Vec<&crate::models::SubAgentProfile> = Vec::new();
 
                 for sub in &orch.subagents {
                     let r_low = sub.role.to_lowercase();
@@ -1566,11 +1605,7 @@ pub fn render_screen_tabbed(
                         .iter()
                         .any(|&rr| r_low == rr || r_low.contains(rr))
                     {
-                        has_review_group = true;
-                        if review_prefix.is_none() {
-                            review_prefix = sub.prefix.as_deref();
-                        }
-                        review_model = &sub.model_short;
+                        review_subs.push(sub);
                     } else {
                         let clean_r = clean_subagent_role(&sub.role);
                         let pfx = sub.prefix.as_deref().or(orch.prefix.as_deref());
@@ -1585,26 +1620,59 @@ pub fn render_screen_tabbed(
                     }
                 }
 
-                if has_review_group {
-                    let pfx = review_prefix.or(orch.prefix.as_deref());
-                    fleet_rows.push(FleetRow {
-                        role_label: "rev-4r".to_string(),
-                        _full_role: "review-4r",
-                        prefix: pfx,
-                        model_short: review_model,
-                        is_orch: false,
-                        all_roles: vec![
-                            "review-risk",
-                            "review-readability",
-                            "review-reliability",
-                            "review-resilience",
-                            "review-read",
-                            "review-rel",
-                            "review-res",
-                            "rev-4r",
-                        ],
+                if let Some(first_rev) = review_subs.first().copied() {
+                    let first_pfx = first_rev.prefix.as_deref().or(orch.prefix.as_deref());
+                    let first_model = compact_model_label(&first_rev.model_short);
+                    let is_homogeneous = review_subs.iter().all(|s| {
+                        let spfx = s.prefix.as_deref().or(orch.prefix.as_deref());
+                        let pfx_match = match (first_pfx, spfx) {
+                            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        pfx_match && compact_model_label(&s.model_short) == first_model
                     });
+
+                    if is_homogeneous {
+                        let pfx = first_pfx;
+                        fleet_rows.push(FleetRow {
+                            role_label: "rev-4r".to_string(),
+                            _full_role: "review-4r",
+                            prefix: pfx,
+                            model_short: &first_rev.model_short,
+                            is_orch: false,
+                            all_roles: vec![
+                                "review-risk",
+                                "review-readability",
+                                "review-reliability",
+                                "review-resilience",
+                                "rev-risk",
+                                "rev-read",
+                                "review-read",
+                                "rev-rel",
+                                "review-rel",
+                                "rev-res",
+                                "review-res",
+                                "rev-4r",
+                            ],
+                        });
+                    } else {
+                        for sub in review_subs {
+                            let clean_r = clean_subagent_role(&sub.role);
+                            let pfx = sub.prefix.as_deref().or(orch.prefix.as_deref());
+                            fleet_rows.push(FleetRow {
+                                role_label: clean_r,
+                                _full_role: sub.role.as_str(),
+                                prefix: pfx,
+                                model_short: &sub.model_short,
+                                is_orch: false,
+                                all_roles: vec![sub.role.as_str()],
+                            });
+                        }
+                    }
                 }
+
+                let norm_proj = crate::paths::normalize_path(&snap.project_dir);
 
                 for row in &fleet_rows {
                     let pfx_str = row.prefix.or(orch.prefix.as_deref()).unwrap_or("local");
@@ -1643,7 +1711,16 @@ pub fn render_screen_tabbed(
                         };
 
                     // Determinar estado de ejecución:
-                    // 1. Activo (Working):
+                    // 1. Activo (Working) en el workspace actual:
+                    let pane_in_workspace = |p: &&crate::models::HerdrPane| -> bool {
+                        if norm_proj.is_empty() {
+                            return true;
+                        }
+                        p.cwd.as_deref().is_none_or(|c| {
+                            c.trim().is_empty() || crate::paths::normalize_path(c) == norm_proj
+                        })
+                    };
+
                     let is_active = if row.is_orch {
                         orch.status == crate::models::OrchestratorStatus::Working
                             && ((snap.agent_session.agent_status == "working"
@@ -1671,7 +1748,7 @@ pub fn render_screen_tabbed(
                                             .agent_session
                                             .model_short
                                             .eq_ignore_ascii_case(&orch.model_short))))
-                                || snap.panes.iter().any(|p| {
+                                || snap.panes.iter().filter(pane_in_workspace).any(|p| {
                                     let p_working = p.agent_status.as_deref() == Some("working")
                                         || p.tokens.get("agent_status").map(|s| s.as_str())
                                             == Some("working");
@@ -1700,7 +1777,7 @@ pub fn render_screen_tabbed(
                                 &snap.agent_session.model_short,
                             );
 
-                        let pane_active = snap.panes.iter().any(|p| {
+                        let pane_active = snap.panes.iter().filter(pane_in_workspace).any(|p| {
                             let p_working = p.agent_status.as_deref() == Some("working")
                                 || p.tokens.get("agent_status").map(|s| s.as_str())
                                     == Some("working");
@@ -1733,16 +1810,21 @@ pub fn render_screen_tabbed(
                         session_active || pane_active || child_active
                     };
 
-                    // 2. Pasivo (recién dejó de trabajar / presente en all_active_prefixes / idle):
-                    let is_passive = !is_active
-                        && (row
+                    // 2. Pasivo (recién dejó de trabajar / prefijo distinto activo / idle):
+                    // Si un subagente comparte el prefijo del propio orquestador, requiere invocación explícita.
+                    let has_distinct_active_prefix = row.prefix.is_some_and(|p| {
+                        let shares_orch_prefix = orch
                             .prefix
-                            .map(|p| {
-                                snap.agent_session
-                                    .all_active_prefixes
-                                    .contains(&p.to_lowercase())
-                            })
-                            .unwrap_or(false)
+                            .as_deref()
+                            .is_some_and(|op| op.eq_ignore_ascii_case(p));
+                        (!shares_orch_prefix || row.is_orch)
+                            && snap
+                                .agent_session
+                                .all_active_prefixes
+                                .contains(&p.to_lowercase())
+                    });
+                    let is_passive = !is_active
+                        && (has_distinct_active_prefix
                             || snap.agent_session.subagent_invocations.iter().any(|child| {
                                 child.status != "working"
                                     && check_subagent_hit(
@@ -1754,31 +1836,27 @@ pub fn render_screen_tabbed(
                             || (row.is_orch
                                 && orch.status == crate::models::OrchestratorStatus::Idle));
 
-                    // 3. Glifos y colores de texto solicitados:
-                    // Activos: '>' y texto blanco brillante (BOLD TEXT_PRIMARY)
-                    // Pasivos: '●' en MAGENTA (púrpura) y texto blanco (TEXT_PRIMARY)
-                    // Inactivos: '○' en gris (TEXT_DIM) y texto gris (TEXT_MUTED)
+                    // 3. Glifos y colores del tema activo (manteniendo MAGENTA para pasivos):
                     let (status_glyph, text_color) = if is_active {
                         (
                             format!("{accent_secondary}>{RESET}"),
-                            format!("{BOLD}{TEXT_PRIMARY}"),
+                            format!("{BOLD}{text_primary}"),
                         )
                     } else if is_passive {
                         (
                             format!("{MAGENTA}\u{25cf}{RESET}"),
-                            TEXT_PRIMARY.to_string(),
+                            text_primary.to_string(),
                         )
                     } else {
-                        (format!("{TEXT_DIM}\u{25cb}{RESET}"), TEXT_MUTED.to_string())
+                        (format!("{text_dim}\u{25cb}{RESET}"), text_muted.to_string())
                     };
 
                     let compact_model = compact_model_label(row.model_short);
                     let role_w = if width < 42 { 8 } else { 9 };
-                    let role_truncated = truncate_to_width(&row.role_label, role_w);
-                    let role_disp = format!("{:<width$}", role_truncated, width = role_w);
+                    let role_disp = pad_to_width(&row.role_label, role_w);
 
                     let left = format!(
-                        "{status_glyph} {text_color}{role_disp}{RESET} {TEXT_DIM}({compact_model}){RESET}"
+                        "{status_glyph} {text_color}{role_disp}{RESET} {text_dim}({compact_model}){RESET}"
                     );
 
                     // Proyección de cuota / saldo para esta cuenta y modelo:
@@ -1801,30 +1879,32 @@ pub fn render_screen_tabbed(
                                 );
                             let pool_color = if maybe_budget.is_some() {
                                 if rem_pct <= 8 {
-                                    CORAL
+                                    coral
                                 } else if rem_pct <= 20 {
-                                    AMBER
+                                    amber
                                 } else {
-                                    MINT
+                                    mint
                                 }
                             } else {
-                                MINT
+                                mint
                             };
                             let bar = render_gauge_inline(rem_pct, bar_len, pool_color);
                             if let Some(rem) = rem_balance {
                                 if rem <= 0.0 || rem_pct <= 8 {
-                                    format!("{bar} {BOLD}{CORAL}[SALDO AGOTADO]{RESET}")
+                                    format!("{bar} {BOLD}{coral}[SALDO AGOTADO]{RESET}")
                                 } else if width < 42 {
                                     format!("{bar} {BOLD}{pool_color}${rem:.2}{RESET}")
                                 } else {
                                     format!("{bar} {BOLD}{pool_color}${rem:.2} disp{RESET}")
                                 }
                             } else {
-                                format!("{TEXT_DIM}[{}]{RESET}", acc.reset_5h)
+                                format!("{text_dim}[{}]{RESET}", acc.reset_5h)
                             }
                         } else {
-                            let eff =
-                                crate::quotas::evaluate_account_for_model(acc, row.model_short);
+                            let eff = crate::quotas::evaluate_account_for_sovereign_model(
+                                acc,
+                                row.model_short,
+                            );
                             if acc.has_error || eff.reset_5h == crate::quotas::UNFETCHED_RESET {
                                 let reason = if acc.has_error && !acc.error_msg.is_empty() {
                                     truncate_to_width(
@@ -1834,45 +1914,45 @@ pub fn render_screen_tabbed(
                                 } else {
                                     "sin consultar".to_string()
                                 };
-                                format!("{AMBER}?[{reason}]{RESET}")
+                                format!("{amber}?[{reason}]{RESET}")
                             } else {
                                 let pool_color = if eff.is_critical {
-                                    CORAL
+                                    coral
                                 } else if eff.is_warning {
-                                    AMBER
+                                    amber
                                 } else {
-                                    MINT
+                                    mint
                                 };
                                 let bar = render_gauge_inline(eff.rem_5h, bar_len, pool_color);
                                 let pct_5h = format!("{BOLD}{pool_color}{:>3}%{RESET}", eff.rem_5h);
                                 let wk_color = if eff.is_critical {
-                                    CORAL
+                                    coral
                                 } else if eff.is_warning {
-                                    AMBER
+                                    amber
                                 } else {
-                                    MINT
+                                    mint
                                 };
                                 let wk_str = if width < 40 {
                                     format!(
-                                        " {TEXT_DIM}W:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                                        " {text_dim}W:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
                                         eff.rem_wk
                                     )
                                 } else {
                                     format!(
-                                        " {TEXT_DIM}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
+                                        " {text_dim}Wk:{RESET}{BOLD}{wk_color}{:>3}%{RESET}",
                                         eff.rem_wk
                                     )
                                 };
 
                                 if eff.is_critical {
-                                    format!("{bar} {pct_5h}{wk_str} {CORAL}[AGOTADO]{RESET}")
+                                    format!("{bar} {pct_5h}{wk_str} {coral}[AGOTADO]{RESET}")
                                 } else {
                                     format!("{bar} {pct_5h}{wk_str}")
                                 }
                             }
                         }
                     } else {
-                        format!("{TEXT_DIM}[disp]{RESET}")
+                        format!("{text_dim}[disp]{RESET}")
                     };
 
                     lines.push(draw_row(&left, &right, width));
@@ -1898,13 +1978,13 @@ pub fn render_screen_tabbed(
                             };
                             let tokens = invocation.tokens_input + invocation.tokens_output;
                             let usage = if invocation.cost > 0.0 {
-                                format!("${:.3} · {tokens} tok", invocation.cost)
+                                format!("${:.3} \u{00b7} {tokens} tok", invocation.cost)
                             } else {
                                 format!("{tokens} tok")
                             };
                             lines.push(draw_row(
-                                &format!("  {TEXT_DIM}↳ ini {started} · fin {finished}{RESET}"),
-                                &format!("{TEXT_MUTED}{usage}{RESET}"),
+                                &format!("  {text_dim}\u{21b3} ini {started} \u{00b7} fin {finished}{RESET}"),
+                                &format!("{text_muted}{usage}{RESET}"),
                                 width,
                             ));
                         }
@@ -1931,40 +2011,40 @@ pub fn render_screen_tabbed(
                 .or_else(|| snap.accounts.first());
 
             let pool_title = format!(
-                "{title_color}Cuota de Modelos{RESET} {TEXT_DIM}\u{00b7}{RESET} {MINT}{active_acc_prefix} {accent_secondary}*{RESET}"
+                "{title_color}Cuota de Modelos{RESET} {text_dim}\u{00b7}{RESET} {mint}{active_acc_prefix} {accent_secondary}*{RESET}"
             );
 
             lines.push(draw_top(&pool_title, collapsed[5], width));
             if !collapsed[5] {
                 if snap.accounts.is_empty() {
                     lines.push(draw_row(
-                        &format!("{TEXT_DIM}Sin proveedor de cuotas activo{RESET}"),
-                        &format!("{TEXT_DIM}[inactivo]{RESET}"),
+                        &format!("{text_dim}Sin proveedor de cuotas activo{RESET}"),
+                        &format!("{text_dim}[inactivo]{RESET}"),
                         width,
                     ));
                 } else if let Some(acc) = target_account {
                     for p in &acc.pools {
                         let pool_color = if p.percent <= 15 {
-                            CORAL
+                            coral
                         } else if p.percent <= 50 {
-                            AMBER
+                            amber
                         } else {
-                            MINT
+                            mint
                         };
 
                         let bar_len = if width < 42 { 3 } else { 6 };
                         let bar = render_gauge_inline(p.percent, bar_len, pool_color);
                         let pct_fmt = format!("{BOLD}{pool_color}{:>3}%{RESET}", p.percent);
-                        let pfx_w = if width < 42 { 8 } else { 12 };
-                        let p_label = format!("{:<width$}", p.label, width = pfx_w);
+                        let pfx_w = if width < 42 { 8 } else { 13 };
+                        let p_label = pad_to_width(&p.label, pfx_w);
                         let left = format!(
-                            "{pool_color}\u{25cf}{RESET} {TEXT_PRIMARY}{p_label}{RESET} {bar} {pct_fmt}"
+                            "{pool_color}\u{25cf}{RESET} {text_primary}{p_label}{RESET} {bar} {pct_fmt}"
                         );
                         let right = if width < 40 {
-                            format!("{pool_color}{}{RESET} {TEXT_DIM}{}{RESET}", p.pace, p.reset)
+                            format!("{pool_color}{}{RESET} {text_dim}{}{RESET}", p.pace, p.reset)
                         } else {
                             format!(
-                                "{pool_color}{}{RESET} {TEXT_DIM}en {}{RESET}",
+                                "{pool_color}{}{RESET} {text_dim}en {}{RESET}",
                                 p.pace, p.reset
                             )
                         };
