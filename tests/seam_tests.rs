@@ -11389,4 +11389,315 @@ api-keys:
             "Fallback legacy de Cuota de Modelos debe usar paleta del tema activo"
         );
     }
+
+    #[test]
+    fn test_saldos_api_cross_session_pi_baseline_case_insensitive_and_config_isolation() {
+        use hudr2::quotas::{
+            calculate_api_key_balance_at, get_user_configured_budget_at,
+        };
+        use hudr2::state::save_account_budget;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_a = tmp.path().join("cfg-a.json");
+        let cfg_b = tmp.path().join("cfg-b.json");
+        std::fs::write(&cfg_b, "{}").unwrap();
+
+        // 1. Claves case-insensitive y aislamiento por --config / AppState::with_config (sin HUDR2_CONFIG_PATH)
+        save_account_budget(&cfg_a, "TavoClaude", Some(25.0), 0.0, None).unwrap();
+        assert_eq!(
+            get_user_configured_budget_at("tavoclaude", Some(&cfg_a)),
+            Some(25.0)
+        );
+        assert_eq!(
+            get_user_configured_budget_at("tavoclaude", Some(&cfg_b)),
+            None
+        );
+
+        save_account_budget(&cfg_a, "tavoclaude", Some(30.0), 1.0, None).unwrap();
+        let raw_a = std::fs::read_to_string(&cfg_a).unwrap();
+        let parsed_a: serde_json::Value = serde_json::from_str(&raw_a).unwrap();
+        let budgets_a = parsed_a["account_budgets"].as_object().unwrap();
+        assert_eq!(
+            budgets_a.len(),
+            1,
+            "save_account_budget no debe duplicar claves con distinto case: {budgets_a:?}"
+        );
+
+        let mut st = AppState::with_config(Some(cfg_a.clone()), None);
+        st.start_edit_balance("tavoclaude");
+        assert_eq!(
+            st.balance_input_buffer, "30.00",
+            "start_edit_balance debe leer desde st.config_path y no desde archivo global"
+        );
+        st.update_balance_input_buffer("42.50".to_string());
+        st.commit_balance();
+        assert_eq!(
+            get_user_configured_budget_at("tavoclaude", Some(&cfg_a)),
+            Some(42.50)
+        );
+        assert_eq!(
+            get_user_configured_budget_at("tavoclaude", Some(&cfg_b)),
+            None
+        );
+
+        // 2. Contabilidad cross-session cuando se pasa a Pi (session_id: None) desde OpenCode
+        save_account_budget(
+            &cfg_a,
+            "tavoclaude",
+            Some(20.0),
+            4.10,
+            Some("ses_oc_1".to_string()),
+        )
+        .unwrap();
+        let (_, rem_to_pi, _, cost_to_pi) =
+            calculate_api_key_balance_at("tavoclaude", 1.50, None, Some(&cfg_a));
+        assert!((cost_to_pi - 1.50).abs() < 1e-6);
+        assert!((rem_to_pi.unwrap() - 18.50).abs() < 1e-6);
+
+        // 3. Línea base guardada en Pi (session_id: None)
+        save_account_budget(&cfg_a, "tavoclaude", Some(20.0), 4.10, None).unwrap();
+        // Misma sesión Pi (costo siguió subiendo >= baseline)
+        let (_, rem_same_pi, _, cost_same_pi) =
+            calculate_api_key_balance_at("tavoclaude", 4.60, None, Some(&cfg_a));
+        assert!((cost_same_pi - 0.50).abs() < 1e-6);
+        assert!((rem_same_pi.unwrap() - 19.50).abs() < 1e-6);
+
+        // Nueva sesión Pi (costo reinició por debajo de baseline)
+        let (_, rem_fresh_pi, _, cost_fresh_pi) =
+            calculate_api_key_balance_at("tavoclaude", 0.75, None, Some(&cfg_a));
+        assert!((cost_fresh_pi - 0.75).abs() < 1e-6);
+        assert!((rem_fresh_pi.unwrap() - 19.25).abs() < 1e-6);
+
+        // Cambio hacia sesión OpenCode
+        let (_, rem_pi_to_oc, _, cost_pi_to_oc) =
+            calculate_api_key_balance_at("tavoclaude", 0.75, Some("ses_oc_2"), Some(&cfg_a));
+        assert!((cost_pi_to_oc - 0.75).abs() < 1e-6);
+        assert!((rem_pi_to_oc.unwrap() - 19.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_saldos_api_root_plus_child_cost_cwd_panes_billing_provider_and_theme() {
+        use hudr2::models::{AccountQuota, AgentSession, HerdrPane, QuotaPool, SubagentInvocation};
+        use hudr2::quotas::{
+            account_billing_info, api_account_attributed_usage_in_dir,
+            is_api_account_active_in_dir,
+        };
+        use hudr2::state::{ActiveTab, save_account_budget};
+        use hudr2::theme::HERDR_TOKYO_NIGHT_DAY;
+        use std::collections::{HashMap, HashSet};
+
+        // 1. Suma combinada de root + subagentes + exclusión de panes de otro cwd
+        let work_acc = AccountQuota {
+            prefix: "work-key".to_string(),
+            auth_file: "config.yaml#work-key".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            rem_5h: 100,
+            rem_wk: 100,
+            pools: vec![QuotaPool {
+                label: "DeepSeek API".to_string(),
+                percent: 100,
+                reset: "api-key".to_string(),
+                pace: "$0.000".to_string(),
+            }],
+            ..Default::default()
+        };
+        let gpt_custom_acc = AccountQuota {
+            prefix: "corp-ai".to_string(),
+            auth_file: "config.yaml#corp-ai".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            pools: vec![QuotaPool {
+                label: "GPT API".to_string(),
+                percent: 100,
+                reset: "api-key".to_string(),
+                pace: "$0.000".to_string(),
+            }],
+            ..Default::default()
+        };
+        let crit_acc = AccountQuota {
+            prefix: "crit-key".to_string(),
+            auth_file: "config.yaml#crit-key".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            rem_5h: 5,
+            rem_wk: 5,
+            is_critical: true,
+            ..Default::default()
+        };
+        let unset_acc = AccountQuota {
+            prefix: "unset-key".to_string(),
+            auth_file: "config.yaml#unset-key".to_string(),
+            reset_5h: "api-key".to_string(),
+            reset_wk: "api-key".to_string(),
+            ..Default::default()
+        };
+
+        let mut foreign_tokens = HashMap::new();
+        foreign_tokens.insert("prefix".to_string(), "crit-key".to_string());
+        foreign_tokens.insert("cost".to_string(), "9.00".to_string());
+        foreign_tokens.insert("turn_count".to_string(), "20".to_string());
+        let foreign_pane = HerdrPane {
+            pane_id: "w2:p9".to_string(),
+            cwd: Some("D:/ws-other".to_string()),
+            agent_status: Some("working".to_string()),
+            tokens: foreign_tokens,
+            ..Default::default()
+        };
+
+        let session = AgentSession {
+            session_id: Some("ses_root".to_string()),
+            agent: "main".to_string(),
+            agent_status: "working".to_string(),
+            local_prefix: Some("work-key".to_string()),
+            model: "work-key/deepseek-v3".to_string(),
+            cost: 1.00,
+            turn_count: 4,
+            subagent_invocations: vec![SubagentInvocation {
+                session_id: "ses_child".to_string(),
+                role: "worker".to_string(),
+                model: "work-key/deepseek-v3".to_string(),
+                local_prefix: Some("work-key".to_string()),
+                status: "idle".to_string(),
+                cost: 0.42,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let panes = vec![foreign_pane];
+        let (comb_cost, comb_turns) =
+            api_account_attributed_usage_in_dir(&work_acc, &session, &panes, "D:/ws-a");
+        assert!(
+            (comb_cost - 1.42).abs() < 1e-6 && comb_turns == 5,
+            "Debe sumar root ($1.00, 4t) + hijo ($0.42, 1t); obtuvo (${comb_cost}, {comb_turns})"
+        );
+        assert!(
+            !is_api_account_active_in_dir(&crit_acc, &session, &[], &panes, "D:/ws-a"),
+            "Pane working de otro cwd no debe marcar activa cuenta API del workspace actual"
+        );
+        let (foreign_cost, foreign_turns) =
+            api_account_attributed_usage_in_dir(&crit_acc, &session, &panes, "D:/ws-a");
+        assert!((foreign_cost - 0.0).abs() < 1e-6 && foreign_turns == 0);
+
+        // 2. Detección de proveedor para billing URL desde pool cuando el prefijo es personalizado
+        assert_eq!(
+            account_billing_info(&work_acc),
+            ("DeepSeek Platform", "https://platform.deepseek.com/top_up")
+        );
+        assert_eq!(
+            account_billing_info(&gpt_custom_acc),
+            (
+                "OpenAI Platform",
+                "https://platform.openai.com/settings/organization/billing/overview"
+            )
+        );
+
+        // 3. Card 6 Saldos API respeta config_path, ancho <= w y paleta activa en modo normal y edición
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("saldos-ui.json");
+        save_account_budget(
+            &cfg,
+            "work-key",
+            Some(20.0),
+            0.0,
+            Some("ses_root".to_string()),
+        )
+        .unwrap();
+        save_account_budget(&cfg, "crit-key", Some(10.0), 0.0, None).unwrap();
+
+        let mut st = AppState::with_config(Some(cfg), Some("D:/ws-a".to_string()));
+        st.snapshot.agent_session = session;
+        st.snapshot.panes = panes;
+        st.snapshot.accounts = vec![work_acc, crit_acc, unset_acc];
+
+        // Simular gasto crítico en crit-key mediante subagent_invocation ya terminado en root
+        st.snapshot.agent_session.subagent_invocations.push(SubagentInvocation {
+            session_id: "ses_crit".to_string(),
+            role: "fix".to_string(),
+            model: "crit-key/claude".to_string(),
+            local_prefix: Some("crit-key".to_string()),
+            status: "idle".to_string(),
+            cost: 9.60,
+            ..Default::default()
+        });
+
+        for editing in [false, true] {
+            if editing {
+                st.start_edit_balance("work-key");
+            }
+            for w in [36usize, 56usize] {
+                let out = ui::render_screen_tabbed(
+                    &st.snapshot,
+                    &[false; 13],
+                    None,
+                    None,
+                    &[],
+                    &HashSet::new(),
+                    w,
+                    &HERDR_TOKYO_NIGHT_DAY,
+                    Some(ActiveTab::Modelos),
+                );
+                let sb = out
+                    .bounds
+                    .iter()
+                    .find(|b| b.id == "saldos")
+                    .expect("debe registrar bounds de saldos");
+                for line in &out.lines[sb.start_line..=sb.end_line] {
+                    assert!(
+                        ui::string_width(line) <= w,
+                        "Línea en Saldos API (editing={editing}) excede ancho {w}: {}",
+                        ui::strip_ansi(line)
+                    );
+                }
+                let raw = out.lines[sb.start_line..=sb.end_line].join("\n");
+                let clean = ui::strip_ansi(&raw);
+                assert!(
+                    clean.contains("DeepSeek Platform"),
+                    "Debe mostrar consola DeepSeek por pool:\n{clean}"
+                );
+                if editing && w == 36 {
+                    assert!(
+                        clean.contains("[Enter|Esc]"),
+                        "En edición ancho 36 [Enter|Esc] debe seguir visible:\n{clean}"
+                    );
+                }
+                if !editing {
+                    assert!(
+                        raw.contains(HERDR_TOKYO_NIGHT_DAY.mint)
+                            && raw.contains(HERDR_TOKYO_NIGHT_DAY.coral)
+                            && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_primary)
+                            && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_muted)
+                            && raw.contains(HERDR_TOKYO_NIGHT_DAY.text_dim),
+                        "Card 6 Saldos API debe usar paleta del tema activo en ancho {w}"
+                    );
+                } else {
+                    assert!(
+                        raw.contains(HERDR_TOKYO_NIGHT_DAY.amber),
+                        "Modo edición Saldos API debe usar amber del tema activo"
+                    );
+                }
+            }
+            if editing {
+                st.cancel_edit_balance();
+            }
+        }
+        assert!(
+            ui::render_screen_tabbed(
+                &st.snapshot,
+                &[false; 13],
+                None,
+                None,
+                &[],
+                &HashSet::new(),
+                56,
+                &HERDR_TOKYO_NIGHT_DAY,
+                Some(ActiveTab::Modelos),
+            )
+            .bounds
+            .iter()
+            .any(|b| b.action_type == Some("open_billing_url")
+                && b.action_path.as_deref() == Some("https://platform.deepseek.com/top_up"))
+        );
+    }
 }

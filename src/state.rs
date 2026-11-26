@@ -280,6 +280,7 @@ pub fn save_account_budget(
         .cloned()
         .unwrap_or_default();
 
+    budgets_map.retain(|k, _| !k.eq_ignore_ascii_case(prefix));
     if let Some(amt) = amount {
         let entry = json!({
             "budget": amt,
@@ -287,8 +288,6 @@ pub fn save_account_budget(
             "session_id": session_id,
         });
         budgets_map.insert(prefix.to_string(), entry);
-    } else {
-        budgets_map.remove(prefix);
     }
 
     payload["account_budgets"] = Value::Object(budgets_map);
@@ -407,6 +406,7 @@ impl AppState {
             s.snapshot.sound_mode = cfg.sound_mode;
             s.snapshot.tabbed_view = cfg.tabbed;
         }
+        s.snapshot.config_path = config_path.clone();
         s.config_path = config_path;
         s
     }
@@ -707,7 +707,10 @@ impl AppState {
         self.collapsed_cards[6] = false;
         self.is_editing_balance = true;
         self.editing_balance_prefix = Some(prefix.to_string());
-        let current_budget = crate::quotas::cliproxy::get_user_configured_budget(prefix);
+        let current_budget = crate::quotas::cliproxy::get_user_configured_budget_at(
+            prefix,
+            self.config_path.as_deref(),
+        );
         self.balance_input_buffer = current_budget
             .map(|b| format!("{b:.2}"))
             .unwrap_or_default();
@@ -727,17 +730,21 @@ impl AppState {
         if let Some(ref pfx) = self.editing_balance_prefix.clone() {
             let clean = self.balance_input_buffer.trim().trim_start_matches('$');
             let parsed = clean.parse::<f64>().ok().filter(|&v| v > 0.0);
-            let cfg_path = crate::paths::resolve_hudr2_config_path();
+            let cfg_path = self
+                .config_path
+                .clone()
+                .unwrap_or_else(crate::paths::resolve_hudr2_config_path);
             let current_cost = self
                 .snapshot
                 .accounts
                 .iter()
                 .find(|account| account.prefix.eq_ignore_ascii_case(pfx))
                 .map(|account| {
-                    crate::quotas::api_account_attributed_usage(
+                    crate::quotas::api_account_attributed_usage_in_dir(
                         account,
                         &self.snapshot.agent_session,
                         &self.snapshot.panes,
+                        &self.snapshot.project_dir,
                     )
                     .0
                 })

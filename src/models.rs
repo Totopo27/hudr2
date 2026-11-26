@@ -398,6 +398,7 @@ pub struct TelemetrySnapshot {
     pub balance_input_buffer: String,
     pub sound_mode: crate::sound::SoundMode,
     pub tabbed_view: bool,
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

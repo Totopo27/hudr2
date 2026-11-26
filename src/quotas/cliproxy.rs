@@ -642,15 +642,34 @@ pub fn is_available_for(target_dir: &str) -> bool {
     false
 }
 
-/// Obtiene el balance inicial o presupuesto definido por el usuario para una cuenta API Key.
+fn find_budget_entry<'a>(
+    v: &'a serde_json::Value,
+    prefix: &str,
+) -> Option<&'a serde_json::Value> {
+    let ab = v.get("account_budgets")?.as_object()?;
+    if let Some(exact) = ab.get(prefix) {
+        return Some(exact);
+    }
+    ab.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(prefix))
+        .map(|(_, val)| val)
+}
+
+/// Obtiene el balance inicial o presupuesto definido por el usuario para una cuenta API Key
+/// desde la ruta indicada (o `resolve_hudr2_config_path()` si es `None`).
 /// Retorna `None` si el usuario aún no ha configurado ningún saldo para esta cuenta.
-pub fn get_user_configured_budget(prefix: &str) -> Option<f64> {
-    let cfg_path = crate::paths::resolve_hudr2_config_path();
+pub fn get_user_configured_budget_at(
+    prefix: &str,
+    config_path: Option<&std::path::Path>,
+) -> Option<f64> {
+    let cfg_path = config_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(crate::paths::resolve_hudr2_config_path);
     if cfg_path.exists()
         && let Ok(content) = crate::paths::read_config_string(&cfg_path)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
     {
-        if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
+        if let Some(custom) = find_budget_entry(&v, prefix) {
             if let Some(b) = custom.as_f64() {
                 return Some(b);
             }
@@ -663,6 +682,12 @@ pub fn get_user_configured_budget(prefix: &str) -> Option<f64> {
         }
     }
     None
+}
+
+/// Obtiene el balance inicial o presupuesto definido por el usuario para una cuenta API Key.
+/// Retorna `None` si el usuario aún no ha configurado ningún saldo para esta cuenta.
+pub fn get_user_configured_budget(prefix: &str) -> Option<f64> {
+    get_user_configured_budget_at(prefix, None)
 }
 
 /// Devuelve la URL oficial de facturación y consulta de saldo según el proveedor o prefijo.
@@ -765,6 +790,22 @@ pub fn provider_billing_label(provider_or_prefix: &str) -> &'static str {
     }
 }
 
+/// Resuelve etiqueta y URL oficial de facturación revisando primero `acc.prefix`
+/// y, si es un alias personalizado, inspeccionando los labels de `acc.pools`.
+pub fn account_billing_info(acc: &AccountQuota) -> (&'static str, &'static str) {
+    let prefix_label = provider_billing_label(&acc.prefix);
+    if prefix_label != "Billing Console" {
+        return (prefix_label, provider_billing_url(&acc.prefix));
+    }
+    for pool in &acc.pools {
+        let pool_label = provider_billing_label(&pool.label);
+        if pool_label != "Billing Console" {
+            return (pool_label, provider_billing_url(&pool.label));
+        }
+    }
+    (prefix_label, provider_billing_url(&acc.prefix))
+}
+
 fn api_account_matches(prefix: &str, local_prefix: Option<&str>, model: &str) -> bool {
     if local_prefix.is_some_and(|p| p.eq_ignore_ascii_case(prefix)) {
         return true;
@@ -789,13 +830,25 @@ fn pane_uses_api_account(pane: &HerdrPane, prefix: &str) -> bool {
     api_account_matches(prefix, pane_prefix, pane_model)
 }
 
-/// Determina si una cuenta API Key está siendo utilizada ahora por la sesión
-/// principal o por un subagente observable en la telemetría de ejecución.
-pub fn is_api_account_active(
+fn pane_matches_target_dir(pane: &HerdrPane, target_dir: &str) -> bool {
+    let target = target_dir.trim();
+    if target.is_empty() {
+        return true;
+    }
+    match pane.cwd.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(cwd) => crate::paths::normalize_path(cwd) == crate::paths::normalize_path(target),
+        None => true,
+    }
+}
+
+/// Determina si una cuenta API Key está siendo utilizada ahora en `target_dir`
+/// por la sesión principal o por un subagente observable en la telemetría de ejecución.
+pub fn is_api_account_active_in_dir(
     acc: &AccountQuota,
     session: &AgentSession,
     _orchestrators: &[OrchestratorProfile],
     panes: &[HerdrPane],
+    target_dir: &str,
 ) -> bool {
     if session.agent_status == "working"
         && api_account_matches(
@@ -819,37 +872,57 @@ pub fn is_api_account_active(
     }
 
     panes.iter().any(|pane| {
-        (pane.agent_status.as_deref() == Some("working")
-            || pane.tokens.get("agent_status").map(String::as_str) == Some("working"))
+        pane_matches_target_dir(pane, target_dir)
+            && (pane.agent_status.as_deref() == Some("working")
+                || pane.tokens.get("agent_status").map(String::as_str) == Some("working"))
             && pane_uses_api_account(pane, &acc.prefix)
     })
 }
 
-/// Devuelve únicamente costo y turnos que pueden atribuirse a la cuenta dada.
-/// Si un subagente no publica costo propio, no se reutiliza el costo global del
-/// orquestador: es preferible omitir una proyección antes que inventarla.
-pub fn api_account_attributed_usage(
+/// Determina si una cuenta API Key está siendo utilizada ahora por la sesión
+/// principal o por un subagente observable en la telemetría de ejecución.
+pub fn is_api_account_active(
+    acc: &AccountQuota,
+    session: &AgentSession,
+    orchestrators: &[OrchestratorProfile],
+    panes: &[HerdrPane],
+) -> bool {
+    is_api_account_active_in_dir(acc, session, orchestrators, panes, "")
+}
+
+/// Devuelve únicamente costo y turnos que pueden atribuirse a la cuenta dada en `target_dir`.
+/// Combina el costo de la sesión raíz y sus `subagent_invocations` cuando ambos usan la cuenta,
+/// o cae a los panes de Herdr pertenecientes a `target_dir`.
+pub fn api_account_attributed_usage_in_dir(
     acc: &AccountQuota,
     session: &AgentSession,
     panes: &[HerdrPane],
+    target_dir: &str,
 ) -> (f64, usize) {
-    if api_account_matches(
+    let root_matches = api_account_matches(
         &acc.prefix,
         session.local_prefix.as_deref(),
         session.effective_model(),
-    ) {
-        return (session.cost, session.turn_count);
-    }
+    );
+    let (root_cost, root_turns) = if root_matches {
+        (session.cost, session.turn_count)
+    } else {
+        (0.0, 0usize)
+    };
 
     let (child_cost, child_tasks) = session
         .subagent_invocations
         .iter()
         .filter(|invocation| {
-            api_account_matches(
-                &acc.prefix,
-                invocation.local_prefix.as_deref(),
-                &invocation.model,
-            )
+            session
+                .session_id
+                .as_deref()
+                .is_none_or(|rid| rid != invocation.session_id)
+                && api_account_matches(
+                    &acc.prefix,
+                    invocation.local_prefix.as_deref(),
+                    &invocation.model,
+                )
         })
         .fold((0.0, 0usize), |(cost, tasks), invocation| {
             (
@@ -857,13 +930,15 @@ pub fn api_account_attributed_usage(
                 tasks + usize::from(invocation.cost > 0.0),
             )
         });
-    if child_cost > 0.0 || child_tasks > 0 {
-        return (child_cost, child_tasks);
+    if root_matches || child_cost > 0.0 || child_tasks > 0 {
+        return (root_cost + child_cost, root_turns + child_tasks);
     }
 
     panes
         .iter()
-        .filter(|pane| pane_uses_api_account(pane, &acc.prefix))
+        .filter(|pane| {
+            pane_matches_target_dir(pane, target_dir) && pane_uses_api_account(pane, &acc.prefix)
+        })
         .fold((0.0, 0usize), |(cost, turns), pane| {
             let pane_cost = pane
                 .tokens
@@ -880,21 +955,37 @@ pub fn api_account_attributed_usage(
         })
 }
 
-/// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.
+/// Devuelve únicamente costo y turnos que pueden atribuirse a la cuenta dada.
+/// Si un subagente no publica costo propio, no se reutiliza el costo global del
+/// orquestador: es preferible omitir una proyección antes que inventarla.
+pub fn api_account_attributed_usage(
+    acc: &AccountQuota,
+    session: &AgentSession,
+    panes: &[HerdrPane],
+) -> (f64, usize) {
+    api_account_attributed_usage_in_dir(acc, session, panes, "")
+}
+
+/// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key
+/// desde `config_path` (o `resolve_hudr2_config_path()` si es `None`).
 /// Si el usuario configuró el saldo con línea base, solo descuenta el costo incurrido
-/// desde ese momento en la sesión, protegiendo el saldo de consumos históricos previos.
+/// desde ese momento en la sesión, protegiendo el saldo de consumos históricos previos
+/// y reiniciando la línea base ante cambios de sesión o nuevas sesiones de Pi (`None`).
 /// Retorna: `(budget, rem_balance, rem_pct, cost_since_set)`
-pub fn calculate_api_key_balance(
+pub fn calculate_api_key_balance_at(
     prefix: &str,
     session_cost: f64,
     session_id: Option<&str>,
+    config_path: Option<&std::path::Path>,
 ) -> (Option<f64>, Option<f64>, u8, f64) {
-    let cfg_path = crate::paths::resolve_hudr2_config_path();
+    let cfg_path = config_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(crate::paths::resolve_hudr2_config_path);
     if cfg_path.exists()
         && let Ok(content) = crate::paths::read_config_string(&cfg_path)
         && let Ok(v) = serde_json::from_str::<serde_json::Value>(&content)
     {
-        if let Some(custom) = v.get("account_budgets").and_then(|ab| ab.get(prefix)) {
+        if let Some(custom) = find_budget_entry(&v, prefix) {
             let (budget, baseline, saved_sid) = if let Some(b) = custom.as_f64() {
                 (b, 0.0, None)
             } else if let Some(b) = custom.get("budget").and_then(|v| v.as_f64()) {
@@ -910,7 +1001,8 @@ pub fn calculate_api_key_balance(
 
             let same_session = match (saved_sid, session_id) {
                 (Some(s1), Some(s2)) => s1 == s2,
-                _ => true,
+                (None, None) => session_cost + 1e-9 >= baseline,
+                _ => false,
             };
 
             let cost_since_set = if same_session {
@@ -940,6 +1032,18 @@ pub fn calculate_api_key_balance(
     }
 
     (None, None, 100, 0.0)
+}
+
+/// Calcula el saldo remanente y porcentaje disponible para una cuenta API Key.
+/// Si el usuario configuró el saldo con línea base, solo descuenta el costo incurrido
+/// desde ese momento en la sesión, protegiendo el saldo de consumos históricos previos.
+/// Retorna: `(budget, rem_balance, rem_pct, cost_since_set)`
+pub fn calculate_api_key_balance(
+    prefix: &str,
+    session_cost: f64,
+    session_id: Option<&str>,
+) -> (Option<f64>, Option<f64>, u8, f64) {
+    calculate_api_key_balance_at(prefix, session_cost, session_id, None)
 }
 
 fn register_or_update_api_key_account(

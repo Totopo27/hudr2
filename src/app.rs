@@ -145,19 +145,23 @@ pub async fn refresh_all(app_state: &Arc<RwLock<AppState>>) {
             state.snapshot.ecosystem = eco;
         }
 
+        state.snapshot.config_path = state.config_path.clone();
+
         // Sincronizar telemetría de costos y balance para cuentas API Key
         for acc in &mut accounts_copy {
             if quotas::is_api_key(acc) {
-                let (cost_to_apply, _) = quotas::api_account_attributed_usage(
+                let (cost_to_apply, _) = quotas::api_account_attributed_usage_in_dir(
                     acc,
                     &state.snapshot.agent_session,
                     &state.snapshot.panes,
+                    &state.snapshot.project_dir,
                 );
                 let (budget, rem_balance, rem_pct, cost_since_set) =
-                    quotas::calculate_api_key_balance(
+                    quotas::calculate_api_key_balance_at(
                         &acc.prefix,
                         cost_to_apply,
                         state.snapshot.agent_session.session_id.as_deref(),
+                        state.config_path.as_deref(),
                     );
                 acc.rem_5h = rem_pct;
                 acc.rem_wk = rem_pct;

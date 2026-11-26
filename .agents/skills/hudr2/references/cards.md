@@ -91,16 +91,16 @@
 - **Header:** `Saldos API · <N> perfiles` (only renders when API key accounts exist in `snap.accounts` and the card is not hidden).
 - **Accounts listing:** Displays each discovered API key account (`tavoclaude`, `gianniclaude`, `clasclaude`, etc.).
 - **Interactive Balance & Budget:**
-  - When budget is set: renders inline health gauge (`MINT` `> 20%`, `AMBER` `<= 20%`, `CORAL` `<= 8%`), remaining percentage, remaining dollars (`$XX.XX disp`), and clickable `[editar]` button (`action_type: Some("edit_balance")`).
+  - When budget is set: renders inline health gauge using active theme tokens (`mint` `> 20%`, `amber` `<= 20%`, `coral` `<= 8%`, `text_primary`/`text_dim`/`text_muted`), remaining percentage, remaining dollars (`$XX.XX disp`), and clickable `[editar]` button (`action_type: Some("edit_balance")`).
   - When no budget is set: renders `○ <prefix> [definir saldo]`.
-  - When editing: renders in-place terminal input buffer `> <prefix> Saldo $: [ XX.XX ]_ [Enter|Esc]`. Typing numbers/dots updates the buffer; pressing `Enter` saves atomically to `hudr2.json` under `account_budgets.<prefix>` with session baseline tracking; `Esc` cancels.
+  - When editing: renders in-place terminal input buffer (`> <prefix> Saldo $: <buf>_ [Enter|Esc]`, compacting prefix/prompt at `< 42` cols so `[Enter|Esc]` stays visible at `36` cols). Typing numbers/dots updates the buffer; pressing `Enter` saves atomically to the active `--config` path (`TelemetrySnapshot::config_path` / `resolve_hudr2_config_path()`) under `account_budgets` with case-insensitive key canonicalization and cross-session / Pi (`session_id: None`, reset on `session_cost < baseline`) tracking; `Esc` cancels.
 - **Dynamic Task & Quota Projection:**
-  - Evaluates actual runtime telemetry: a matching working root session, a matching OpenCode child session, or a working Herdr pane with matching account/model metadata. Merely configuring an account in an orchestrator profile or retaining it in `all_active_prefixes` does not count as use.
+  - Evaluates actual runtime telemetry via `is_api_account_active_in_dir` / `api_account_attributed_usage_in_dir`: combines a matching root session and its distinct matching child `subagent_invocations`, or falls back to Herdr panes matching the normalized `project_dir` (`cwd`). Merely configuring an account in an orchestrator profile, foreign-workspace panes, or retaining a prefix in `all_active_prefixes` does not count as use.
   - When attributable consumption exists: displays row `  sesión: $<cost_since_set> · $<avg_cost>/req · ~<reqs_remaining> reqs disp` using only that account's own root/child/pane cost.
   - When no cost can be attributed, preserves the configured balance and omits session/projection metrics instead of reusing the global root-session cost.
   - Dynamically recalculates and projects remaining requests in real time as turns and tasks complete.
 - **Official Billing Web Console:**
-  - Renders row `  ↳ <Provider> Console [visitar ->]` (`action_type: Some("open_billing_url")`).
+  - Resolves `account_billing_info(acc)` (`acc.prefix` first, falling back to `acc.pools` provider labels when using custom key aliases) and renders row `  ↳ <Provider> Console [visitar ->]` (`action_type: Some("open_billing_url")`).
   - Clicking `[visitar ->]` opens the provider's official billing management page in the default system browser (Anthropic Spending Console, OpenAI Organization Overview, ChatGPT Subscription, DeepSeek Platform, etc.).
 
 ## 7. `Cambios` (`id: "git"`, index `7`, key `7`)

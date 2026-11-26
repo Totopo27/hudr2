@@ -1190,16 +1190,18 @@ pub fn render_screen_tabbed(
                     let pfx_disp = format!("{text_primary}{pfx_clean}{RESET}");
                     let left = if is_api {
                         let (cost_to_apply, _) =
-                            crate::quotas::cliproxy::api_account_attributed_usage(
+                            crate::quotas::cliproxy::api_account_attributed_usage_in_dir(
                                 acc,
                                 &snap.agent_session,
                                 &snap.panes,
+                                &snap.project_dir,
                             );
                         let (_budget, rem_balance, _, _) =
-                            crate::quotas::cliproxy::calculate_api_key_balance(
+                            crate::quotas::cliproxy::calculate_api_key_balance_at(
                                 &acc.prefix,
                                 cost_to_apply,
                                 snap.agent_session.session_id.as_deref(),
+                                snap.config_path.as_deref(),
                             );
 
                         match rem_balance {
@@ -1866,16 +1868,18 @@ pub fn render_screen_tabbed(
                         let is_api = crate::quotas::is_api_key(acc);
                         if is_api {
                             let (session_cost, _) =
-                                crate::quotas::cliproxy::api_account_attributed_usage(
+                                crate::quotas::cliproxy::api_account_attributed_usage_in_dir(
                                     acc,
                                     &snap.agent_session,
                                     &snap.panes,
+                                    &snap.project_dir,
                                 );
                             let (maybe_budget, rem_balance, rem_pct, _cost) =
-                                crate::quotas::cliproxy::calculate_api_key_balance(
+                                crate::quotas::cliproxy::calculate_api_key_balance_at(
                                     &acc.prefix,
                                     session_cost,
                                     snap.agent_session.session_id.as_deref(),
+                                    snap.config_path.as_deref(),
                                 );
                             let pool_color = if maybe_budget.is_some() {
                                 if rem_pct <= 8 {
@@ -2082,7 +2086,7 @@ pub fn render_screen_tabbed(
             &format!("{num_profiles} perfiles")
         };
         let saldos_title = format!(
-            "{BOLD}{title_color}Saldos API{RESET} {TEXT_DIM}\u{00b7}{RESET} {TEXT_DIM}{p_label}{RESET}"
+            "{BOLD}{title_color}Saldos API{RESET} {text_dim}\u{00b7}{RESET} {text_dim}{p_label}{RESET}"
         );
         lines.push(draw_top(&saldos_title, collapsed[6], width));
 
@@ -2092,18 +2096,20 @@ pub fn render_screen_tabbed(
                     lines.push(draw_divider(width));
                 }
 
-                let is_in_use = crate::quotas::cliproxy::is_api_account_active(
+                let is_in_use = crate::quotas::cliproxy::is_api_account_active_in_dir(
                     acc,
                     &snap.agent_session,
                     &snap.orchestrators,
                     &snap.panes,
+                    &snap.project_dir,
                 );
 
                 let (session_cost, attributed_turns) =
-                    crate::quotas::cliproxy::api_account_attributed_usage(
+                    crate::quotas::cliproxy::api_account_attributed_usage_in_dir(
                         acc,
                         &snap.agent_session,
                         &snap.panes,
+                        &snap.project_dir,
                     );
                 let avg_cost = if attributed_turns > 0 {
                     session_cost / attributed_turns as f64
@@ -2111,12 +2117,16 @@ pub fn render_screen_tabbed(
                     0.0
                 };
 
-                let maybe_budget = crate::quotas::cliproxy::get_user_configured_budget(&acc.prefix);
+                let maybe_budget = crate::quotas::cliproxy::get_user_configured_budget_at(
+                    &acc.prefix,
+                    snap.config_path.as_deref(),
+                );
                 let (_, rem_balance, rem_pct, cost_since_set) =
-                    crate::quotas::cliproxy::calculate_api_key_balance(
+                    crate::quotas::cliproxy::calculate_api_key_balance_at(
                         &acc.prefix,
                         session_cost,
                         snap.agent_session.session_id.as_deref(),
+                        snap.config_path.as_deref(),
                     );
 
                 let is_editing = snap.is_editing_balance
@@ -2129,27 +2139,48 @@ pub fn render_screen_tabbed(
                 let saldo_row_idx = lines.len();
 
                 if is_editing {
-                    let input_display = if snap.balance_input_buffer.is_empty() {
-                        format!("{TEXT_DIM}_ (ej: 15.00){RESET}")
-                    } else {
+                    let right = format!("{amber}[Enter|Esc]{RESET}");
+                    let left = if width < 42 {
+                        let (input_display, input_plain_w) =
+                            if snap.balance_input_buffer.is_empty() {
+                                (format!("{text_dim}_{RESET}"), 1usize)
+                            } else {
+                                (
+                                    format!(
+                                        "{BOLD}{text_primary}{}{RESET}{mint}_{RESET}",
+                                        snap.balance_input_buffer
+                                    ),
+                                    string_width(&snap.balance_input_buffer) + 1,
+                                )
+                            };
+                        let fixed_w = string_width(&right) + 1 + 2 + 4 + input_plain_w;
+                        let max_pfx = width.saturating_sub(4 + fixed_w).max(4);
+                        let short_pfx = truncate_to_width(&acc.prefix, max_pfx);
                         format!(
-                            "{BOLD}{TEXT_PRIMARY}{}{RESET}{MINT}_{RESET}",
-                            snap.balance_input_buffer
+                            "{accent_secondary}> {RESET}{BOLD}{text_primary}{short_pfx}{RESET} $: {input_display}"
+                        )
+                    } else {
+                        let input_display = if snap.balance_input_buffer.is_empty() {
+                            format!("{text_dim}_ (ej: 15.00){RESET}")
+                        } else {
+                            format!(
+                                "{BOLD}{text_primary}{}{RESET}{mint}_{RESET}",
+                                snap.balance_input_buffer
+                            )
+                        };
+                        format!(
+                            "{accent_secondary}> {RESET}{BOLD}{text_primary}{}{RESET} Saldo $: {input_display}",
+                            acc.prefix
                         )
                     };
-                    let left = format!(
-                        "{accent_secondary}> {RESET}{BOLD}{}{RESET} Saldo $: {input_display}",
-                        acc.prefix
-                    );
-                    let right = format!("{AMBER}[Enter|Esc]{RESET}");
                     lines.push(draw_row(&left, &right, width));
                 } else if let (Some(_b), Some(rem)) = (maybe_budget, rem_balance) {
                     let pool_color = if rem <= 0.0 || rem_pct <= 8 {
-                        CORAL
+                        coral
                     } else if rem_pct <= 20 {
-                        AMBER
+                        amber
                     } else {
-                        MINT
+                        mint
                     };
 
                     let bar_len = if width < 42 { 4 } else { 6 };
@@ -2159,23 +2190,23 @@ pub fn render_screen_tabbed(
                     let glyph = if is_in_use {
                         format!("{pool_color}\u{25cf}{RESET}")
                     } else {
-                        format!("{TEXT_DIM}\u{25cf}{RESET}")
+                        format!("{text_dim}\u{25cf}{RESET}")
                     };
 
                     let name_disp = if is_in_use {
-                        format!("{BOLD}{TEXT_PRIMARY}{}{RESET}", acc.prefix)
+                        format!("{BOLD}{text_primary}{}{RESET}", acc.prefix)
                     } else {
-                        format!("{TEXT_PRIMARY}{}{RESET}", acc.prefix)
+                        format!("{text_primary}{}{RESET}", acc.prefix)
                     };
 
                     let left = format!("{glyph} {name_disp} {bar} {pct_fmt}");
 
                     let right = if rem <= 0.0 {
-                        format!("{BOLD}{CORAL}[SALDO AGOTADO]{RESET} {TEXT_DIM}[editar]{RESET}")
+                        format!("{BOLD}{coral}[SALDO AGOTADO]{RESET} {text_dim}[editar]{RESET}")
                     } else if width < 42 {
-                        format!("{BOLD}{pool_color}${rem:.2}{RESET} {TEXT_DIM}[editar]{RESET}")
+                        format!("{BOLD}{pool_color}${rem:.2}{RESET} {text_dim}[editar]{RESET}")
                     } else {
-                        format!("{BOLD}{pool_color}${rem:.2} disp{RESET} {TEXT_DIM}[editar]{RESET}")
+                        format!("{BOLD}{pool_color}${rem:.2} disp{RESET} {text_dim}[editar]{RESET}")
                     };
 
                     lines.push(draw_row(&left, &right, width));
@@ -2184,7 +2215,7 @@ pub fn render_screen_tabbed(
                     if is_in_use || cost_since_set > 0.0 {
                         let row2_left = if rem <= 0.0 {
                             format!(
-                                "  {BOLD}{CORAL}[AGOTADO]{RESET} {TEXT_DIM}sesi\u{00f3}n: ${:.3}{RESET}",
+                                "  {BOLD}{coral}[AGOTADO]{RESET} {text_dim}sesi\u{00f3}n: ${:.3}{RESET}",
                                 cost_since_set
                             )
                         } else if avg_cost > 0.0 && width >= 44 {
@@ -2195,7 +2226,7 @@ pub fn render_screen_tabbed(
                                 format!("~{count}")
                             };
                             format!(
-                                "  {TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET} {TEXT_DIM}\u{00b7} ${:.3}/req \u{00b7} {count_str} reqs disp{RESET}",
+                                "  {text_dim}sesi\u{00f3}n:{RESET} {BOLD}{text_primary}${:.3}{RESET} {text_dim}\u{00b7} ${:.3}/req \u{00b7} {count_str} reqs disp{RESET}",
                                 cost_since_set, avg_cost
                             )
                         } else if avg_cost > 0.0 {
@@ -2206,21 +2237,21 @@ pub fn render_screen_tabbed(
                                 format!("~{count}")
                             };
                             format!(
-                                "  {TEXT_DIM}sesi\u{00f3}n:{RESET} ${:.3} {TEXT_DIM}\u{00b7} {count_str} reqs{RESET}",
+                                "  {text_dim}sesi\u{00f3}n:{RESET} ${:.3} {text_dim}\u{00b7} {count_str} reqs{RESET}",
                                 cost_since_set
                             )
                         } else {
                             format!(
-                                "  {TEXT_DIM}sesi\u{00f3}n:{RESET} {BOLD}{TEXT_PRIMARY}${:.3}{RESET}",
+                                "  {text_dim}sesi\u{00f3}n:{RESET} {BOLD}{text_primary}${:.3}{RESET}",
                                 cost_since_set
                             )
                         };
                         lines.push(draw_row(&row2_left, "", width));
                     }
                 } else {
-                    let glyph = format!("{TEXT_MUTED}\u{25cb}{RESET}");
-                    let left = format!("{glyph} {TEXT_MUTED}{}{RESET}", acc.prefix);
-                    let right = format!("{MINT}[definir saldo]{RESET}");
+                    let glyph = format!("{text_muted}\u{25cb}{RESET}");
+                    let left = format!("{glyph} {text_muted}{}{RESET}", acc.prefix);
+                    let right = format!("{mint}[definir saldo]{RESET}");
                     lines.push(draw_row(&left, &right, width));
                 }
 
@@ -2234,9 +2265,9 @@ pub fn render_screen_tabbed(
 
                 // Fila de portal oficial de facturación
                 let portal_row_idx = lines.len();
-                let billing_url = crate::quotas::cliproxy::provider_billing_url(&acc.prefix);
-                let billing_label = crate::quotas::cliproxy::provider_billing_label(&acc.prefix);
-                let portal_left = format!("  {TEXT_DIM}\u{21b3} {billing_label}{RESET}");
+                let (billing_label, billing_url) =
+                    crate::quotas::cliproxy::account_billing_info(acc);
+                let portal_left = format!("  {text_dim}\u{21b3} {billing_label}{RESET}");
                 let portal_right = format!("{accent_primary}[visitar ->]{RESET}");
                 lines.push(draw_row(&portal_left, &portal_right, width));
                 bounds.push(CardBounds {
